@@ -77,9 +77,22 @@ export type AppState = {
   projects: Project[]
   runs: Run[]
   sessions: ProviderSession[]
+  drafts: DraftSession[]
   providersByHost: Record<string, Provider[]>
   settings: { notifications: boolean }
   discoveredAgentsByHost?: Record<string, DiscoveredAgent[]>
+}
+
+export type DraftSession = {
+  id: string
+  hostId: string
+  projectId: string
+  title: 'New chat'
+  prompt?: string
+  provider: Provider['id']
+  workspaceMode: 'current_checkout' | 'managed_worktree'
+  createdAt: string
+  updatedAt: string
 }
 
 export type ProviderSession = {

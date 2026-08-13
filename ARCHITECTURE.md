@@ -53,8 +53,13 @@ Responsibilities:
 - track the last applied event sequence per run;
 - reconnect and request replay after connection loss;
 - display OS notifications and suppress duplicate notification event IDs.
+- persist client-side draft sessions for pre-submission `New chat` rows and reconcile them with daemon-owned runs after the first prompt is accepted.
 
 It does not execute remote agents, parse local copies of remote files, or store remote secrets.
+
+Draft sessions are intentionally client-owned because no execution exists yet. They live in the local gateway store with a generated draft ID, host/project identity, prompt, provider, and workspace mode. Creating or editing one never contacts the remote daemon. The first prompt is a two-phase handoff: request run creation from the execution-host daemon, then delete the draft only after a successful response. This preserves the draft during network or provider failures and avoids a false remote session record.
+
+Provider-native discovery remains separate. Codex Desktop, for example, can render `client-new-thread:*` rows before `thread/start`; those rows do not appear in the VPS Codex SQLite database, rollout files, process list, or app-server loaded-thread inventory. Codesk models the same lifecycle for chats created in Codesk, but does not scrape another app's private renderer memory.
 
 Packaging choice: Tauri 2 with a React/TypeScript frontend. Tauri provides a native macOS application with a small footprint, notification integration, secure credential storage, autostart helpers, and a Rust backend suitable for managing SSH tunnels and local daemon processes.
 

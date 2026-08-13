@@ -22,6 +22,7 @@ Implemented today:
 - managed worktree creation, inspection, retention, and cleanup;
 - SSH alias onboarding and same-OS/architecture daemon bootstrap;
 - execution-host folder browsing and recursive Git project discovery;
+- durable per-project `New chat` drafts that create no process until the first prompt and reconcile safely into remote runs;
 - read-only detection of already-running Codex, Pi, and Claude processes without attaching debuggers or changing them;
 - deduplicated desktop notifications and client/network reconnection.
 

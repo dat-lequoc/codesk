@@ -29,6 +29,7 @@ This separation is a core invariant, not an implementation detail.
 9. Receive a desktop notification when a run completes, fails, blocks, or needs input.
 10. Inspect past runs, their prompts, commands, events, duration, exit state, host, project, and provider session identifiers.
 11. Start parallel runs in isolated Git worktrees without asking each agent to implement the isolation itself.
+12. Open multiple empty chats in a project, switch between them without losing composer state, and create the execution-host run only when the first prompt is submitted.
 
 ## 3. Must-have requirements
 
@@ -99,6 +100,16 @@ Each adapter must define:
 Provider-specific data must be retained alongside normalized events so that Codesk does not discard useful information.
 
 ### 3.5 Run lifecycle
+
+Before a provider run exists, the desktop client may own a lightweight draft session:
+
+- Clicking **New chat** creates a distinct draft row immediately under the selected project.
+- Multiple empty drafts in one project remain independently selectable and are titled `New chat`.
+- Draft prompt text, provider, workspace mode, host, and project persist across client/gateway restarts.
+- A draft does not start a local or remote process, allocate a provider session ID, or mutate the project.
+- On the first submitted prompt, the gateway starts the run on the project's execution host and removes the draft only after the daemon accepts the run.
+- If the host is offline or run creation fails, the draft and its composer state remain intact.
+- Drafts from another desktop application's unpublished renderer state are not execution-host sessions and are not assumed discoverable through SSH, provider databases, or process inspection.
 
 A run has at least these states:
 

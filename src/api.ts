@@ -1,4 +1,4 @@
-import type { AppState, DiscoveredAgent, DiscoveredProject, FileEntry, Host, Project, Run, RunEvent, SessionMessage } from './types'
+import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, FileEntry, Host, Project, Run, RunEvent, SessionMessage } from './types'
 
 export const gatewayOrigin = location.protocol === 'http:' || location.protocol === 'https:' ? '' : 'http://127.0.0.1:4242'
 
@@ -30,6 +30,10 @@ export const api = {
   removeWorktree: (hostId: string, id: string, force = false) => request(`/api/worktrees/${hostId}/${id}?force=${force}`, { method: 'DELETE' }),
   openPath: (hostId: string, path: string) => request('/api/open-path', { method: 'POST', body: JSON.stringify({ hostId, path }) }),
   createProject: (input: { hostId: string; name: string; path: string }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
+  createDraft: (input: { hostId: string; projectId: string; provider?: string; workspaceMode?: string }) => request<DraftSession>('/api/drafts', { method: 'POST', body: JSON.stringify(input) }),
+  updateDraft: (id: string, input: { prompt?: string; provider?: string; workspaceMode?: string }) => request<DraftSession>(`/api/drafts/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  deleteDraft: (id: string) => request(`/api/drafts/${id}`, { method: 'DELETE' }),
+  startDraft: (id: string, input: Record<string, unknown>) => request<Run>(`/api/drafts/${id}/start`, { method: 'POST', body: JSON.stringify(input) }),
   createRun: (input: Record<string, unknown>) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(input) }),
   resumeRun: (run: Run, prompt: string, fork = false) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify({ hostId: run.hostId, project_id: run.projectId, provider: run.provider, model: run.model, prompt, workspace_mode: fork ? 'managed_worktree' : (run.worktreeId ? 'existing_worktree' : 'current_checkout'), worktree_id: fork ? undefined : run.worktreeId, parent_run_id: run.id, operation: fork ? 'fork' : 'resume', resume_session_id: run.sessionId }) }),
   events: (hostId: string, id: string, after = 0) => request<RunEvent[]>(`/api/runs/${hostId}/${id}/events?after=${after}`),

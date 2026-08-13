@@ -4,11 +4,13 @@ import { randomUUID } from 'node:crypto'
 import { WebSocketServer } from 'ws'
 import { Store } from './store.mjs'
 import { Gateway } from './gateway.mjs'
+import { startDraft } from './drafts.mjs'
 
 const app = express(); const server = http.createServer(app); const wss = new WebSocketServer({ server, path: '/ws' }); const store = new Store()
 function broadcast(type, payload) { const body = JSON.stringify({ type, payload }); for (const client of wss.clients) if (client.readyState === 1) client.send(body) }
 const gateway = new Gateway(store, broadcast)
-app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Headers','content-type');res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');if(req.method==='OPTIONS')return res.sendStatus(204);next()})
+const mapRun = (item, hostId) => ({ id:item.id, projectId:item.project_id, worktreeId:item.worktree_id, parentRunId:item.parent_run_id, provider:item.provider, sessionId:item.provider_session_id, title:item.title, prompt:item.prompt, model:item.model || '', cwd:item.cwd, command:item.command, args:item.args, status:item.status, pid:item.pid, processGroupId:item.process_group_id, createdAt:item.created_at, startedAt:item.started_at, finishedAt:item.finished_at, exitCode:item.exit_code, terminatingSignal:item.terminating_signal, displayCommand:[item.command,...(item.args || [])].join(' '), hostId })
+app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Headers','content-type');res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS');if(req.method==='OPTIONS')return res.sendStatus(204);next()})
 app.use(express.json({ limit: '1mb' }))
 
 async function state() {
@@ -18,7 +20,7 @@ async function state() {
     try {
       const [hostProjects, hostRuns, capabilities, discoveredAgents] = await Promise.all([gateway.request(host.id, '/v1/projects'), gateway.request(host.id, '/v1/runs'), gateway.request(host.id, '/v1/capabilities'), gateway.request(host.id, '/v1/agents/discover')])
       projects.push(...hostProjects.map((item) => ({ id: item.id, name: item.name, path: item.path, repoRoot: item.repo_root, createdAt: item.created_at, hostId: host.id })))
-      runs.push(...hostRuns.map((item) => ({ id:item.id, projectId:item.project_id, worktreeId:item.worktree_id, parentRunId:item.parent_run_id, provider:item.provider, sessionId:item.provider_session_id, title:item.title, prompt:item.prompt, model:item.model || '', cwd:item.cwd, command:item.command, args:item.args, status:item.status, pid:item.pid, processGroupId:item.process_group_id, createdAt:item.created_at, startedAt:item.started_at, finishedAt:item.finished_at, exitCode:item.exit_code, terminatingSignal:item.terminating_signal, displayCommand:[item.command,...item.args].join(' '), hostId:host.id })))
+      runs.push(...hostRuns.map((item) => mapRun(item, host.id)))
       providersByHost[host.id] = capabilities
       discoveredAgentsByHost[host.id] = discoveredAgents.filter((item) => !item.managed_run_id)
       const hostSessions = await Promise.all(hostProjects.map(async (project) => {
@@ -30,7 +32,7 @@ async function state() {
   }))
   runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-  return { hosts: store.state.hosts, projects, runs, sessions, providersByHost, discoveredAgentsByHost, settings: store.state.settings }
+  return { hosts: store.state.hosts, projects, runs, sessions, drafts: store.state.drafts, providersByHost, discoveredAgentsByHost, settings: store.state.settings }
 }
 
 app.get('/api/state', async (_req, res) => res.json(await state()))
@@ -44,6 +46,27 @@ app.post('/api/hosts/:id/bootstrap', async (req,res)=>{try{res.json(await gatewa
 app.delete('/api/hosts/:id', (req, res) => { if (req.params.id === 'local') return res.status(400).json({ error: 'Local host cannot be removed' }); const child = gateway.processes.get(req.params.id); if (child) child.kill('SIGTERM'); store.state.hosts = store.state.hosts.filter((host) => host.id !== req.params.id); store.save(); broadcast('host.removed', { id: req.params.id }); res.json({ ok: true }) })
 
 app.post('/api/projects', async (req, res) => { try { const project = await gateway.request(req.body.hostId, '/v1/projects', { method: 'POST', body: JSON.stringify({ name: req.body.name, path: req.body.path }) }); res.status(201).json({ ...project, hostId: req.body.hostId }) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.post('/api/drafts', (req, res) => {
+  const { hostId, projectId, provider, workspaceMode } = req.body
+  if (!hostId || !projectId) return res.status(400).json({ error: 'hostId and projectId are required' })
+  const draft = store.createDraft({ id: randomUUID(), hostId, projectId, provider, workspaceMode })
+  broadcast('draft.created', draft); res.status(201).json(draft)
+})
+app.delete('/api/drafts/:id', (req, res) => {
+  if (!store.deleteDraft(req.params.id)) return res.status(404).json({ error: 'Draft not found' })
+  broadcast('draft.removed', { id: req.params.id }); res.json({ ok: true })
+})
+app.patch('/api/drafts/:id', (req, res) => {
+  const draft = store.updateDraft(req.params.id, req.body)
+  if (!draft) return res.status(404).json({ error: 'Draft not found' })
+  broadcast('draft.updated', draft); res.json(draft)
+})
+app.post('/api/drafts/:id/start', async (req, res) => {
+  try {
+    const { draft, run } = await startDraft(store, gateway, req.params.id, req.body)
+    broadcast('draft.removed', { id: draft.id }); res.status(201).json(mapRun(run, draft.hostId))
+  } catch (error) { res.status(error.statusCode || 400).json({ error: error.message }) }
+})
 app.get('/api/hosts/:hostId/files', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/files?path=${encodeURIComponent(req.query.path||'')}`))}catch(error){res.status(400).json({error:error.message})}})
 app.post('/api/hosts/:hostId/projects/discover', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/projects/discover',{method:'POST',body:JSON.stringify(req.body),timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/hosts/:hostId/agents', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/agents/discover'))}catch(error){res.status(400).json({error:error.message})}})
@@ -53,7 +76,7 @@ app.get('/api/projects/:hostId/:projectId/worktrees', async (req, res) => { try 
 app.get('/api/worktrees/:hostId/:id/status', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/worktrees/${req.params.id}/status`))}catch(error){res.status(400).json({error:error.message})}})
 app.delete('/api/worktrees/:hostId/:id', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/worktrees/${req.params.id}?force=${req.query.force === 'true'}`, { method: 'DELETE' })) } catch (error) { res.status(400).json({ error: error.message }) } })
 
-app.post('/api/runs', async (req, res) => { try { const run = await gateway.request(req.body.hostId, '/v1/runs', { method: 'POST', body: JSON.stringify(req.body) , timeout: 30000}); res.status(201).json({ ...run, hostId: req.body.hostId }) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.post('/api/runs', async (req, res) => { try { const run = await gateway.request(req.body.hostId, '/v1/runs', { method: 'POST', body: JSON.stringify(req.body) , timeout: 30000}); res.status(201).json(mapRun(run, req.body.hostId)) } catch (error) { res.status(400).json({ error: error.message }) } })
 for (const action of ['interrupt','terminate','kill']) app.post(`/api/runs/:hostId/:id/${action}`, async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/${action}`, { method: 'POST', body: '{}' })) } catch (error) { res.status(400).json({ error: error.message }) } })
 app.post('/api/runs/:hostId/:id/input', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/input`, { method: 'POST', body: JSON.stringify(req.body) })) } catch (error) { res.status(400).json({ error: error.message }) } })
 app.get('/api/runs/:hostId/:id/events', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/events?after=${req.query.after || 0}`)) } catch (error) { res.status(400).json({ error: error.message }) } })
