@@ -201,6 +201,11 @@ pub struct SessionsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MessagesQuery {
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DiscoverProjectsRequest {
     pub path: String,
     #[serde(default = "default_discovery_depth")]

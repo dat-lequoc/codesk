@@ -30,7 +30,7 @@ use crate::{
     db::Db,
     model::{
         CreateProjectRequest, CreateWorktreeRequest, DiscoverProjectsRequest, EventsQuery,
-        FilesQuery, Health, InputRequest, SessionsQuery, StartRunRequest,
+        FilesQuery, Health, InputRequest, MessagesQuery, SessionsQuery, StartRunRequest,
     },
     supervisor::Supervisor,
 };
@@ -172,6 +172,7 @@ async fn project_sessions(
 async fn project_session_messages(
     State(state): State<Arc<AppState>>,
     Path((id, provider, session_id)): Path<(String, String, String)>,
+    Query(query): Query<MessagesQuery>,
 ) -> ApiResult<Json<Vec<model::SessionMessage>>> {
     let project = state
         .db
@@ -179,7 +180,7 @@ async fn project_session_messages(
         .map_err(api_error)?
         .ok_or_else(|| api_error("project not found"))?;
     Ok(Json(
-        sessions::messages(&project, &provider, &session_id)
+        sessions::messages(&project, &provider, &session_id, query.after.as_deref())
             .await
             .map_err(api_error)?,
     ))

@@ -16,7 +16,8 @@ const MAX_SESSIONS_PER_PROVIDER: usize = 50;
 const MAX_CODEX_CANDIDATES: usize = 1500;
 const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_INDEX_TAIL_BYTES: u64 = 1024 * 1024;
-const MAX_TRANSCRIPT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_TRANSCRIPT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_STREAM_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MESSAGES: usize = 4000;
 const MAX_STATUS_BYTES: u64 = 256 * 1024;
 
@@ -34,21 +35,18 @@ pub async fn messages(
     project: &Project,
     provider: &str,
     native_session_id: &str,
+    after: Option<&str>,
 ) -> Result<Vec<SessionMessage>> {
     let project = project.clone();
     let provider = provider.to_string();
     let native_session_id = native_session_id.to_string();
+    let after = after.map(str::to_string);
     tokio::task::spawn_blocking(move || {
-        let sessions = list_sync(&project, &[], None)?;
-        let item = sessions
-            .into_iter()
-            .find(|item| item.provider == provider && item.native_session_id == native_session_id)
-            .context("provider session not found in this project")?;
-        if item.provider == "codex" {
-            return codex_messages(&item.native_session_id);
+        if provider == "codex" {
+            return codex_messages_for_project(&project, &native_session_id, after.as_deref());
         }
-        let path = source_path(&project, &item.provider, &item.native_session_id)?;
-        parse_messages(&path, &item.provider)
+        let path = source_path(&project, &provider, &native_session_id)?;
+        parse_messages(&path, &provider, after.as_deref())
     })
     .await?
 }
@@ -359,14 +357,60 @@ fn enrich_codex_titles(codex_root: &Path, sessions: &mut [ProviderSession]) {
     }
 }
 
-fn codex_messages(native_session_id: &str) -> Result<Vec<SessionMessage>> {
+fn codex_messages_for_project(
+    project: &Project,
+    native_session_id: &str,
+    after: Option<&str>,
+) -> Result<Vec<SessionMessage>> {
     let codex_root = home_dir().join(".codex");
     if let Some(path) = codex_rollout_path(&codex_root, native_session_id)? {
-        if path.is_file() {
-            return parse_messages(&path, "codex");
+        if path.is_file() && codex_rollout_matches_project(&path, project)? {
+            return parse_messages(&path, "codex", after);
         }
     }
-    codex_history_messages(&codex_root, native_session_id)
+    if codex_thread_matches_project(&codex_root, native_session_id, project)? {
+        return codex_history_messages(&codex_root, native_session_id, after);
+    }
+    anyhow::bail!("Codex transcript was not found in this project")
+}
+
+fn codex_thread_matches_project(
+    codex_root: &Path,
+    native_session_id: &str,
+    project: &Project,
+) -> Result<bool> {
+    let Some(path) = newest_numbered_database(codex_root, "state_") else {
+        return Ok(false);
+    };
+    let connection = readonly_database(&path)?;
+    let cwd = connection.query_row(
+        "SELECT cwd FROM threads WHERE id = ?1",
+        [native_session_id],
+        |row| row.get::<_, String>(0),
+    );
+    match cwd {
+        Ok(cwd) => Ok(cwd_matches(&cwd, &project.path)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn codex_rollout_matches_project(path: &Path, project: &Project) -> Result<bool> {
+    let file = File::open(path)?;
+    for line in BufReader::new(file)
+        .take(MAX_INDEX_BYTES)
+        .lines()
+        .map_while(Result::ok)
+    {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value["type"] == "session_meta" {
+            return Ok(string(&value["payload"]["cwd"])
+                .is_some_and(|cwd| cwd_matches(&cwd, &project.path)));
+        }
+    }
+    Ok(false)
 }
 
 fn codex_rollout_path(codex_root: &Path, native_session_id: &str) -> Result<Option<PathBuf>> {
@@ -389,6 +433,7 @@ fn codex_rollout_path(codex_root: &Path, native_session_id: &str) -> Result<Opti
 fn codex_history_messages(
     codex_root: &Path,
     native_session_id: &str,
+    after: Option<&str>,
 ) -> Result<Vec<SessionMessage>> {
     let Some(path) = newest_numbered_database(codex_root, "thread_history_") else {
         anyhow::bail!("Codex transcript was not found")
@@ -422,7 +467,9 @@ fn codex_history_messages(
         };
         if let Some(mut item) = message(&value, line_number, role, text) {
             item.timestamp = unix_millis_rfc3339(created_at_ms);
-            messages.push(item);
+            if after.is_none_or(|cursor| item.timestamp.as_str() >= cursor) {
+                messages.push(item);
+            }
         }
     }
     Ok(messages)
@@ -586,37 +633,61 @@ fn scan_index_reader<R: BufRead>(
 }
 
 fn source_path(project: &Project, provider: &str, native_id: &str) -> Result<PathBuf> {
-    let candidates = match provider {
-        "pi" => {
-            let directory = home_dir().join(".pi/agent/sessions").join(format!(
-                "--{}--",
-                project.path.trim_matches('/').replace('/', "-")
-            ));
-            jsonl_files(&directory, false)?
-        }
-        "claude" => {
-            let directory = home_dir().join(".claude/projects").join(format!(
-                "-{}",
-                project.path.trim_start_matches('/').replace('/', "-")
-            ));
-            jsonl_files(&directory, false)?
-        }
-        "codex" => jsonl_files(&home_dir().join(".codex/sessions"), true)?,
+    source_path_from_home(&home_dir(), project, provider, native_id)
+}
+
+fn source_path_from_home(
+    home: &Path,
+    project: &Project,
+    provider: &str,
+    native_id: &str,
+) -> Result<PathBuf> {
+    let directory = match provider {
+        "pi" => home.join(".pi/agent/sessions").join(format!(
+            "--{}--",
+            project.path.trim_matches('/').replace('/', "-")
+        )),
+        "claude" => home.join(".claude/projects").join(format!(
+            "-{}",
+            project.path.trim_start_matches('/').replace('/', "-")
+        )),
         _ => anyhow::bail!("unsupported provider"),
     };
-    for path in candidates {
-        if let Some(item) = index_file(project, provider, &path)? {
-            if item.native_session_id == native_id {
-                return Ok(path);
-            }
+    if provider == "claude" {
+        let path = directory.join(format!("{native_id}.jsonl"));
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    for entry in fs::read_dir(directory)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|stem| stem == native_id || stem.ends_with(&format!("_{native_id}")))
+        {
+            return Ok(path);
         }
     }
     anyhow::bail!("provider session file not found")
 }
 
-fn parse_messages(path: &Path, provider: &str) -> Result<Vec<SessionMessage>> {
-    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let reader = BufReader::new(file).take(MAX_TRANSCRIPT_BYTES);
+fn parse_messages(path: &Path, provider: &str, after: Option<&str>) -> Result<Vec<SessionMessage>> {
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let length = file.metadata()?.len();
+    let max_bytes = if after.is_some() {
+        MAX_STREAM_BYTES
+    } else {
+        MAX_TRANSCRIPT_BYTES
+    };
+    let start = length.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file.take(max_bytes));
+    if start > 0 {
+        let mut partial = String::new();
+        let _ = reader.read_line(&mut partial);
+    }
     let mut messages = Vec::new();
     for (line_number, line) in reader.lines().map_while(Result::ok).enumerate() {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -664,7 +735,9 @@ fn parse_messages(path: &Path, provider: &str) -> Result<Vec<SessionMessage>> {
             _ => None,
         };
         if let Some(item) = parsed {
-            messages.push(item);
+            if after.is_none_or(|cursor| item.timestamp.as_str() >= cursor) {
+                messages.push(item);
+            }
         }
         if messages.len() >= MAX_MESSAGES {
             break;
@@ -935,11 +1008,98 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let messages = codex_history_messages(&root, "thread-1").unwrap();
+        let messages = codex_history_messages(&root, "thread-1", None).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].text, "Hello");
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[1].text, "Hi");
+
+        let messages =
+            codex_history_messages(&root, "thread-1", Some("1970-01-01T00:00:01.500+00:00"))
+                .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "Hi");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reads_newest_messages_from_large_transcript_tail() {
+        let root =
+            std::env::temp_dir().join(format!("codesk-message-tail-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let old = serde_json::json!({
+            "timestamp":"2026-08-13T20:00:00Z", "type":"message", "id":"old",
+            "message":{"role":"user","content":[{"type":"text","text":"Old request"}]}
+        });
+        let padding = serde_json::json!({
+            "type":"padding", "value":"x".repeat(MAX_TRANSCRIPT_BYTES as usize + 1024)
+        });
+        let newest = serde_json::json!({
+            "timestamp":"2026-08-13T21:00:00Z", "type":"message", "id":"newest",
+            "message":{"role":"assistant","content":[{"type":"text","text":"Newest answer"}]}
+        });
+        fs::write(&path, format!("{old}\n{padding}\n{newest}\n")).unwrap();
+
+        let messages = parse_messages(&path, "pi", None).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "newest");
+        assert_eq!(messages[0].text, "Newest answer");
+
+        let messages = parse_messages(&path, "pi", Some("2026-08-13T20:30:00Z")).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "newest");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_pi_and_claude_transcripts_by_native_id() {
+        let home =
+            std::env::temp_dir().join(format!("codesk-source-path-{}", uuid::Uuid::new_v4()));
+        let project_path = PathBuf::from("/home/nightfury/thinkling/pi-agi");
+        let project = test_project(&project_path);
+        let pi_dir = home
+            .join(".pi/agent/sessions")
+            .join("--home-nightfury-thinkling-pi-agi--");
+        let claude_dir = home
+            .join(".claude/projects")
+            .join("-home-nightfury-thinkling-pi-agi");
+        fs::create_dir_all(&pi_dir).unwrap();
+        fs::create_dir_all(&claude_dir).unwrap();
+        let pi_path = pi_dir.join("2026-08-13T200000Z_pi-native.jsonl");
+        let claude_path = claude_dir.join("claude-native.jsonl");
+        fs::write(&pi_path, "").unwrap();
+        fs::write(&claude_path, "").unwrap();
+
+        assert_eq!(
+            source_path_from_home(&home, &project, "pi", "pi-native").unwrap(),
+            pi_path
+        );
+        assert_eq!(
+            source_path_from_home(&home, &project, "claude", "claude-native").unwrap(),
+            claude_path
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn verifies_codex_rollout_project_ownership() {
+        let root =
+            std::env::temp_dir().join(format!("codesk-rollout-project-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout.jsonl");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "type":"session_meta",
+                "payload":{"cwd":root.join("repo").to_string_lossy()}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(codex_rollout_matches_project(&path, &test_project(&root.join("repo"))).unwrap());
+        assert!(!codex_rollout_matches_project(&path, &test_project(&root.join("other"))).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 

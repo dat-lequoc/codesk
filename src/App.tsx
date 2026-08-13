@@ -44,6 +44,7 @@ export function App() {
   const [settings, setSettings] = useState(false)
   const [error, setError] = useState('')
   const initialized = useRef(false)
+  const sessionMessagesRef = useRef<Record<string, SessionMessage[]>>({})
   const priorSessionStatus = useRef<Map<string, ProviderSession['status']>>(new Map())
   const notified = useRef<Set<string>>(new Set(JSON.parse(localStorage.getItem('codesk.notifications') || '[]')))
   const reload = async () => { try { const next = await api.state(); next.drafts ||= []; setState(next); setExtraSessions((current) => { const refreshed = { ...current }; for (const [key, items] of Object.entries(refreshed)) { const latest = new Map(next.sessions.filter((item) => `${item.hostId}:${item.projectId}` === key).map((item) => [`${item.hostId}:${item.id}`, item])); refreshed[key] = items.map((item) => latest.get(`${item.hostId}:${item.id}`) || item) } return refreshed }); setError(''); if (!initialized.current) { const firstDraft = next.drafts[0]; const firstSession = next.sessions[0]; const firstRun = next.runs[0]; if (firstDraft) setSelectedDraftId(firstDraft.id); else if (firstSession) setSelectedSessionKey(`${firstSession.hostId}:${firstSession.id}`); else setSelectedId(firstRun?.id || null); const firstProject = firstDraft ? next.projects.find((item) => item.id === firstDraft.projectId && item.hostId === firstDraft.hostId) : firstSession ? next.projects.find((item) => item.id === firstSession.projectId && item.hostId === firstSession.hostId) : firstRun ? next.projects.find((item) => item.id === firstRun.projectId && item.hostId === firstRun.hostId) : next.projects[0]; setSelectedProjectKey(firstProject ? projectKey(firstProject) : null); initialized.current = true } else { setSelectedId((id) => id && next.runs.some((item) => item.id === id) ? id : null); setSelectedDraftId((id) => id && next.drafts.some((item) => item.id === id) ? id : null) } } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } }
@@ -55,11 +56,31 @@ export function App() {
   useEffect(() => {
     if (!session || !selectedSessionKey) return
     let stopped = false
-    const load = () => api.sessionMessages(session.hostId, session.projectId, session.provider, session.nativeSessionId).then((items) => { if (!stopped) setSessionMessages((current) => ({ ...current, [selectedSessionKey]: items })) }).catch((cause) => { if (!stopped) setError(cause instanceof Error ? cause.message : String(cause)) })
-    if (!sessionMessages[selectedSessionKey] || session.status === 'running') void load()
-    const timer = session.status === 'running' ? window.setInterval(load, 2500) : 0
-    return () => { stopped = true; if (timer) clearInterval(timer) }
-  }, [selectedSessionKey, session?.status])
+    let timer = 0
+    const load = async () => {
+      const prior = sessionMessagesRef.current[selectedSessionKey] || []
+      const after = [...prior].reverse().find((item) => item.timestamp)?.timestamp
+      try {
+        const incoming = await api.sessionMessages(session.hostId, session.projectId, session.provider, session.nativeSessionId, after)
+        if (stopped || !incoming.length) return
+        setSessionMessages((current) => {
+          const existing = current[selectedSessionKey] || []
+          const merged = new Map(existing.map((item) => [item.id, item]))
+          for (const item of incoming) merged.set(item.id, item)
+          const next = [...merged.values()].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id))
+          if (next.length === existing.length && next.every((item, index) => item.id === existing[index].id && item.timestamp === existing[index].timestamp && item.role === existing[index].role && item.text === existing[index].text)) return current
+          const updated = { ...current, [selectedSessionKey]: next }
+          sessionMessagesRef.current = updated
+          return updated
+        })
+      } catch (cause) {
+        if (!stopped) setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+    const poll = async () => { await load(); if (!stopped) timer = window.setTimeout(poll, 2000) }
+    void poll()
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [selectedSessionKey, session?.hostId, session?.projectId, session?.provider, session?.nativeSessionId])
   useEffect(() => {
     const origin = gatewayOrigin ? gatewayOrigin.replace('http://', 'ws://').replace('https://', 'wss://') : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
     let ws: WebSocket | null = null; let stopped = false; let retry = 500
