@@ -164,6 +164,8 @@ pub struct DiscoveredAgent {
     pub cwd: Option<String>,
     pub command: String,
     pub managed_run_id: Option<String>,
+    pub native_session_id: Option<String>,
+    pub transcript_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +193,11 @@ pub struct SessionMessage {
 #[derive(Debug, Deserialize)]
 pub struct FilesQuery {
     pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionsQuery {
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

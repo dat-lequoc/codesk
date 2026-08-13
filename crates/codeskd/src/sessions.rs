@@ -18,11 +18,16 @@ const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_INDEX_TAIL_BYTES: u64 = 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MESSAGES: usize = 4000;
+const MAX_STATUS_BYTES: u64 = 256 * 1024;
 
-pub async fn list(project: &Project, agents: &[DiscoveredAgent]) -> Result<Vec<ProviderSession>> {
+pub async fn list(
+    project: &Project,
+    agents: &[DiscoveredAgent],
+    limit: Option<usize>,
+) -> Result<Vec<ProviderSession>> {
     let project = project.clone();
     let agents = agents.to_vec();
-    tokio::task::spawn_blocking(move || list_sync(&project, &agents)).await?
+    tokio::task::spawn_blocking(move || list_sync(&project, &agents, limit)).await?
 }
 
 pub async fn messages(
@@ -34,7 +39,7 @@ pub async fn messages(
     let provider = provider.to_string();
     let native_session_id = native_session_id.to_string();
     tokio::task::spawn_blocking(move || {
-        let sessions = list_sync(&project, &[])?;
+        let sessions = list_sync(&project, &[], None)?;
         let item = sessions
             .into_iter()
             .find(|item| item.provider == provider && item.native_session_id == native_session_id)
@@ -48,38 +53,157 @@ pub async fn messages(
     .await?
 }
 
-fn list_sync(project: &Project, agents: &[DiscoveredAgent]) -> Result<Vec<ProviderSession>> {
+fn list_sync(
+    project: &Project,
+    agents: &[DiscoveredAgent],
+    limit: Option<usize>,
+) -> Result<Vec<ProviderSession>> {
+    let session_limit = limit.unwrap_or(MAX_SESSIONS_PER_PROVIDER).clamp(1, 150);
     let mut result = Vec::new();
-    result.extend(index_pi(project)?);
-    result.extend(index_codex(project)?);
-    result.extend(index_claude(project)?);
+    result.extend(index_pi(project, session_limit)?);
+    result.extend(index_codex(project, session_limit)?);
+    result.extend(index_claude(project, session_limit)?);
     let mut seen = HashSet::new();
     result.retain(|session| {
         seen.insert((session.provider.clone(), session.native_session_id.clone()))
     });
 
-    for provider in ["codex", "pi", "claude"] {
-        let live = agents.iter().find(|agent| {
-            agent.provider == provider
-                && agent.managed_run_id.is_none()
-                && agent
-                    .cwd
-                    .as_deref()
-                    .is_some_and(|cwd| cwd_matches(cwd, &project.path))
+    for agent in agents.iter().filter(|agent| {
+        agent.managed_run_id.is_none()
+            && agent
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| cwd_matches(cwd, &project.path))
+    }) {
+        let native_id = agent.native_session_id.clone().or_else(|| {
+            unique_active_session_id(project, &agent.provider, &result)
+                .ok()
+                .flatten()
         });
-        if let Some(agent) = live {
-            if let Some(newest) = result
-                .iter_mut()
-                .filter(|item| item.provider == provider)
-                .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
-            {
-                newest.status = "running".to_string();
-                newest.pid = Some(agent.pid);
-            }
+        let Some(native_id) = native_id.as_deref() else {
+            continue;
+        };
+        let Some(session) = result
+            .iter_mut()
+            .find(|item| item.provider == agent.provider && item.native_session_id == native_id)
+        else {
+            continue;
+        };
+        session.pid = Some(agent.pid);
+        if agent
+            .transcript_path
+            .as_deref()
+            .is_some_and(|path| transcript_turn_active(Path::new(path), &agent.provider))
+        {
+            session.status = "running".to_string();
         }
     }
     result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    result.truncate(session_limit);
     Ok(result)
+}
+
+fn unique_active_session_id(
+    project: &Project,
+    provider: &str,
+    indexed: &[ProviderSession],
+) -> Result<Option<String>> {
+    let mut candidates = match provider {
+        "pi" => jsonl_files(
+            &home_dir().join(".pi/agent/sessions").join(format!(
+                "--{}--",
+                project.path.trim_matches('/').replace('/', "-")
+            )),
+            false,
+        )?,
+        "claude" => jsonl_files(
+            &home_dir().join(".claude/projects").join(format!(
+                "-{}",
+                project.path.trim_start_matches('/').replace('/', "-")
+            )),
+            false,
+        )?,
+        _ => return Ok(None),
+    };
+    sort_recent(&mut candidates);
+    candidates.truncate(12);
+    let active = candidates
+        .into_iter()
+        .filter(|path| transcript_turn_active(path, provider))
+        .filter_map(|path| index_file(project, provider, &path).ok().flatten())
+        .filter(|session| {
+            indexed.iter().any(|item| {
+                item.provider == provider && item.native_session_id == session.native_session_id
+            })
+        })
+        .map(|session| session.native_session_id)
+        .collect::<Vec<_>>();
+    Ok((active.len() == 1).then(|| active[0].clone()))
+}
+
+fn transcript_turn_active(path: &Path, provider: &str) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    let start = metadata.len().saturating_sub(MAX_STATUS_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut reader = BufReader::new(file.take(MAX_STATUS_BYTES));
+    if start > 0 {
+        let mut partial = String::new();
+        let _ = reader.read_line(&mut partial);
+    }
+    let mut active = false;
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match provider {
+            "codex" => {
+                let event = string(&value["payload"]["type"]);
+                if value["type"] == "event_msg"
+                    && matches!(event.as_deref(), Some("task_complete" | "turn_aborted"))
+                {
+                    active = false;
+                } else if value["type"] == "event_msg" && event.as_deref() == Some("task_started")
+                    || value["type"] == "response_item"
+                        && value["payload"]["type"] == "message"
+                        && value["payload"]["role"] == "user"
+                {
+                    active = true;
+                }
+            }
+            "pi" => {
+                if value["type"] != "message" {
+                    continue;
+                }
+                let role = string(&value["message"]["role"]).unwrap_or_default();
+                if role == "user" || role == "toolResult" {
+                    active = true;
+                } else if role == "assistant" {
+                    let reason = string(&value["message"]["stopReason"])
+                        .or_else(|| string(&value["message"]["rawStopReason"]));
+                    active = !matches!(reason.as_deref(), Some("stop" | "end_turn" | "completed"));
+                }
+            }
+            "claude" => {
+                if value["type"] == "user" {
+                    active = true;
+                } else if value["type"] == "assistant" {
+                    let reason = string(&value["message"]["stop_reason"]);
+                    active = !matches!(reason.as_deref(), Some("end_turn" | "stop_sequence"));
+                } else if value["type"] == "system" && value["subtype"] == "turn_duration" {
+                    active = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    active
 }
 
 fn cwd_matches(cwd: &str, project_path: &str) -> bool {
@@ -89,43 +213,44 @@ fn cwd_matches(cwd: &str, project_path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-fn index_pi(project: &Project) -> Result<Vec<ProviderSession>> {
+fn index_pi(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let directory = home_dir().join(".pi/agent/sessions").join(format!(
         "--{}--",
         project.path.trim_matches('/').replace('/', "-")
     ));
-    index_directory(project, "pi", &directory)
+    index_directory(project, "pi", &directory, limit)
 }
 
-fn index_claude(project: &Project) -> Result<Vec<ProviderSession>> {
+fn index_claude(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let directory = home_dir().join(".claude/projects").join(format!(
         "-{}",
         project.path.trim_start_matches('/').replace('/', "-")
     ));
-    index_directory(project, "claude", &directory)
+    index_directory(project, "claude", &directory, limit)
 }
 
 fn index_directory(
     project: &Project,
     provider: &str,
     directory: &Path,
+    limit: usize,
 ) -> Result<Vec<ProviderSession>> {
     if !directory.is_dir() {
         return Ok(Vec::new());
     }
     let mut files = jsonl_files(directory, false)?;
     sort_recent(&mut files);
-    files.truncate(MAX_SESSIONS_PER_PROVIDER);
+    files.truncate(limit);
     Ok(files
         .into_iter()
         .filter_map(|path| index_file(project, provider, &path).transpose())
         .collect::<Result<Vec<_>>>()?)
 }
 
-fn index_codex(project: &Project) -> Result<Vec<ProviderSession>> {
+fn index_codex(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let codex_root = home_dir().join(".codex");
-    let mut sessions = index_codex_database(project, &codex_root).unwrap_or_default();
-    if sessions.len() >= MAX_SESSIONS_PER_PROVIDER {
+    let mut sessions = index_codex_database(project, &codex_root, limit).unwrap_or_default();
+    if sessions.len() >= limit {
         return Ok(sessions);
     }
     let directory = codex_root.join("sessions");
@@ -144,7 +269,7 @@ fn index_codex(project: &Project) -> Result<Vec<ProviderSession>> {
                 continue;
             }
             sessions.push(item);
-            if sessions.len() >= MAX_SESSIONS_PER_PROVIDER {
+            if sessions.len() >= limit {
                 break;
             }
         }
@@ -152,7 +277,11 @@ fn index_codex(project: &Project) -> Result<Vec<ProviderSession>> {
     Ok(sessions)
 }
 
-fn index_codex_database(project: &Project, codex_root: &Path) -> Result<Vec<ProviderSession>> {
+fn index_codex_database(
+    project: &Project,
+    codex_root: &Path,
+    limit: usize,
+) -> Result<Vec<ProviderSession>> {
     let Some(path) = newest_numbered_database(codex_root, "state_") else {
         return Ok(Vec::new());
     };
@@ -165,33 +294,30 @@ fn index_codex_database(project: &Project, codex_root: &Path) -> Result<Vec<Prov
          ORDER BY updated_at DESC
          LIMIT ?2",
     )?;
-    let rows = statement.query_map(
-        params![project.path, MAX_SESSIONS_PER_PROVIDER as i64],
-        |row| {
-            let native_id: String = row.get(0)?;
-            let cwd: String = row.get(1)?;
-            let title: String = row.get(2)?;
-            let first_user_message: String = row.get(3)?;
-            let created_at: i64 = row.get(4)?;
-            let updated_at: i64 = row.get(5)?;
-            Ok(ProviderSession {
-                id: format!("codex:{native_id}"),
-                provider: "codex".to_string(),
-                native_session_id: native_id,
-                project_id: project.id.clone(),
-                cwd,
-                title: truncate_title(&meaningful_user_text(if title.trim().is_empty() {
-                    first_user_message
-                } else {
-                    title
-                })),
-                created_at: unix_seconds_rfc3339(created_at),
-                updated_at: unix_seconds_rfc3339(updated_at),
-                status: "idle".to_string(),
-                pid: None,
-            })
-        },
-    )?;
+    let rows = statement.query_map(params![project.path, limit as i64], |row| {
+        let native_id: String = row.get(0)?;
+        let cwd: String = row.get(1)?;
+        let title: String = row.get(2)?;
+        let first_user_message: String = row.get(3)?;
+        let created_at: i64 = row.get(4)?;
+        let updated_at: i64 = row.get(5)?;
+        Ok(ProviderSession {
+            id: format!("codex:{native_id}"),
+            provider: "codex".to_string(),
+            native_session_id: native_id,
+            project_id: project.id.clone(),
+            cwd,
+            title: truncate_title(&meaningful_user_text(if title.trim().is_empty() {
+                first_user_message
+            } else {
+                title
+            })),
+            created_at: unix_seconds_rfc3339(created_at),
+            updated_at: unix_seconds_rfc3339(updated_at),
+            status: "idle".to_string(),
+            pid: None,
+        })
+    })?;
     let mut sessions = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
     enrich_codex_titles(codex_root, &mut sessions);
     sessions.retain(|session| !session.title.is_empty());
@@ -209,7 +335,7 @@ fn enrich_codex_titles(codex_root: &Path, sessions: &mut [ProviderSession]) {
         "SELECT item_json
          FROM thread_items
          WHERE thread_id = ?1 AND item_type = 'userMessage'
-         ORDER BY rollout_ordinal DESC, created_at_ms DESC
+         ORDER BY rollout_ordinal DESC
          LIMIT 20",
     ) else {
         return;
@@ -710,6 +836,7 @@ fn jsonl_files(root: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn test_project(path: &Path) -> Project {
         Project {
@@ -766,7 +893,12 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let sessions = index_codex_database(&test_project(&project_path), &root).unwrap();
+        let sessions = index_codex_database(
+            &test_project(&project_path),
+            &root,
+            MAX_SESSIONS_PER_PROVIDER,
+        )
+        .unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].native_session_id, "thread-1");
         assert_eq!(sessions[0].title, "A fresh conversation");
@@ -895,5 +1027,29 @@ mod tests {
             latest_rfc3339("2026-08-13T22:00:00+02:00", "2026-08-13T20:01:00Z"),
             "2026-08-13T20:01:00Z"
         );
+    }
+
+    #[test]
+    fn detects_codex_active_and_completed_turns() {
+        let root = std::env::temp_dir().join(format!("codesk-status-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n"
+            ),
+        )
+        .unwrap();
+        assert!(transcript_turn_active(&path, "codex"));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
+            .unwrap();
+        assert!(!transcript_turn_active(&path, "codex"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

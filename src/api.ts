@@ -25,6 +25,7 @@ export const api = {
   discoverProjects: (hostId: string, path: string, register = true, maxDepth = 2) => request<DiscoveredProject[]>(`/api/hosts/${hostId}/projects/discover`, { method: 'POST', body: JSON.stringify({ path, register, max_depth: maxDepth }) }),
   discoveredAgents: (hostId: string) => request<DiscoveredAgent[]>(`/api/hosts/${hostId}/agents`),
   sessionMessages: (hostId: string, projectId: string, provider: string, sessionId: string) => request<SessionMessage[]>(`/api/projects/${hostId}/${projectId}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}/messages`),
+  projectSessions: (hostId: string, projectId: string, limit: number) => request<import('./types').ProviderSession[]>(`/api/projects/${hostId}/${projectId}/sessions?limit=${limit}`),
   controlDiscoveredAgent: (hostId: string, pid: number, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/agents/${hostId}/${pid}/${action}`, { method: 'POST' }),
   worktreeStatus: (hostId: string, id: string) => request<{ worktree: { path: string }; dirty: boolean; summary: string; diff_stat: string }>(`/api/worktrees/${hostId}/${id}/status`),
   removeWorktree: (hostId: string, id: string, force = false) => request(`/api/worktrees/${hostId}/${id}?force=${force}`, { method: 'DELETE' }),

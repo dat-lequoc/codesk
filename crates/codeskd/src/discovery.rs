@@ -178,6 +178,10 @@ pub async fn discover_agents(db: &Db) -> Result<Vec<DiscoveredAgent>> {
             .find(|(managed_pid, managed_pgid, _)| *managed_pid == pid || *managed_pgid == pgid)
             .map(|(_, _, id)| id.clone());
         let cwd = process_cwd(pid).await;
+        let transcript_path = process_transcript(pid, provider).await;
+        let native_session_id = transcript_path
+            .as_deref()
+            .and_then(|path| transcript_session_id(path, provider));
         agents.push(DiscoveredAgent {
             id: format!("external-{pid}"),
             provider: provider.to_string(),
@@ -186,10 +190,74 @@ pub async fn discover_agents(db: &Db) -> Result<Vec<DiscoveredAgent>> {
             cwd,
             command,
             managed_run_id,
+            native_session_id,
+            transcript_path,
         });
     }
     agents.sort_by_key(|item| item.pid);
     Ok(agents)
+}
+
+async fn process_transcript(pid: u32, provider: &str) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut entries = tokio::fs::read_dir(format!("/proc/{pid}/fd")).await.ok()?;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(path) = tokio::fs::read_link(entry.path()).await else {
+                continue;
+            };
+            let value = path.to_string_lossy();
+            if transcript_matches(&value, provider) {
+                return Some(value.into_owned());
+            }
+        }
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-Fn"])
+            .output()
+            .await
+            .ok()?;
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix('n'))
+            .find(|path| transcript_matches(path, provider))
+            .map(str::to_string);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (pid, provider);
+        None
+    }
+}
+
+fn transcript_matches(path: &str, provider: &str) -> bool {
+    path.ends_with(".jsonl")
+        && match provider {
+            "codex" => path.contains("/.codex/sessions/"),
+            "pi" => path.contains("/.pi/agent/sessions/"),
+            "claude" => path.contains("/.claude/projects/"),
+            _ => false,
+        }
+}
+
+fn transcript_session_id(path: &str, provider: &str) -> Option<String> {
+    let stem = PathBuf::from(path).file_stem()?.to_str()?.to_string();
+    match provider {
+        "codex" => stem
+            .get(stem.len().checked_sub(36)?..)
+            .filter(|value| Uuid::parse_str(value).is_ok())
+            .map(str::to_string),
+        "pi" => stem
+            .rsplit_once('_')
+            .map(|(_, id)| id)
+            .filter(|value| Uuid::parse_str(value).is_ok())
+            .map(str::to_string),
+        "claude" => Uuid::parse_str(&stem).ok().map(|_| stem),
+        _ => None,
+    }
 }
 
 fn classify_agent(command: &str) -> Option<&'static str> {
@@ -241,4 +309,29 @@ pub fn signal_external(pid: u32, pgid: i32, signal: i32) -> Result<()> {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_native_session_ids_from_transcript_paths() {
+        assert_eq!(
+            transcript_session_id(
+                "/home/me/.codex/sessions/2026/08/14/rollout-2026-08-14T00-00-00-019ff788-c44a-7e23-a9fa-8733e15a3990.jsonl",
+                "codex"
+            )
+            .as_deref(),
+            Some("019ff788-c44a-7e23-a9fa-8733e15a3990")
+        );
+        assert_eq!(
+            transcript_session_id(
+                "/home/me/.pi/agent/sessions/--repo--/2026-08-14T00-00-00Z_019ff8c1-bca1-74f2-b3bf-78cb908a9994.jsonl",
+                "pi"
+            )
+            .as_deref(),
+            Some("019ff8c1-bca1-74f2-b3bf-78cb908a9994")
+        );
+    }
 }

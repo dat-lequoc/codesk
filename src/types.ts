@@ -105,7 +105,7 @@ export type ProviderSession = {
   title: string
   createdAt: string
   updatedAt: string
-  status: 'running' | 'idle'
+  status: 'running' | 'stopped' | 'idle'
   pid?: number | null
 }
 
@@ -118,4 +118,4 @@ export type SessionMessage = {
 
 export type FileEntry = { name: string; path: string; is_dir: boolean; is_git: boolean }
 export type DiscoveredProject = { name: string; path: string; repo_root?: string | null; registered_project_id?: string | null }
-export type DiscoveredAgent = { id: string; provider: Provider['id']; pid: number; process_group_id: number; cwd?: string | null; command: string; managed_run_id?: string | null }
+export type DiscoveredAgent = { id: string; provider: Provider['id']; pid: number; process_group_id: number; cwd?: string | null; command: string; managed_run_id?: string | null; native_session_id?: string | null; transcript_path?: string | null }

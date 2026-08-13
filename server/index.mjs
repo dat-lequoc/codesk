@@ -10,6 +10,10 @@ const app = express(); const server = http.createServer(app); const wss = new We
 function broadcast(type, payload) { const body = JSON.stringify({ type, payload }); for (const client of wss.clients) if (client.readyState === 1) client.send(body) }
 const gateway = new Gateway(store, broadcast)
 const mapRun = (item, hostId) => ({ id:item.id, projectId:item.project_id, worktreeId:item.worktree_id, parentRunId:item.parent_run_id, provider:item.provider, sessionId:item.provider_session_id, title:item.title, prompt:item.prompt, model:item.model || '', cwd:item.cwd, command:item.command, args:item.args, status:item.status, pid:item.pid, processGroupId:item.process_group_id, createdAt:item.created_at, startedAt:item.started_at, finishedAt:item.finished_at, exitCode:item.exit_code, terminatingSignal:item.terminating_signal, displayCommand:[item.command,...(item.args || [])].join(' '), hostId })
+const mapSession = (item, hostId) => ({ id:item.id, provider:item.provider, nativeSessionId:item.native_session_id, projectId:item.project_id, hostId, cwd:item.cwd, title:item.title, createdAt:item.created_at, updatedAt:item.updated_at, status:item.status, pid:item.pid })
+const SESSION_PAGE_SIZE = 8
+const previousSessionStatus = new Map()
+const stoppedUntil = new Map()
 app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Headers','content-type');res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS');if(req.method==='OPTIONS')return res.sendStatus(204);next()})
 app.use(express.json({ limit: '1mb' }))
 
@@ -24,14 +28,22 @@ async function state() {
       providersByHost[host.id] = capabilities
       discoveredAgentsByHost[host.id] = discoveredAgents.filter((item) => !item.managed_run_id)
       const hostSessions = await Promise.all(hostProjects.map(async (project) => {
-        try { return await gateway.request(host.id, `/v1/projects/${project.id}/sessions`, { timeout: 30000 }) }
+        try { return await gateway.request(host.id, `/v1/projects/${project.id}/sessions?limit=${SESSION_PAGE_SIZE}`, { timeout: 12000 }) }
         catch { return [] }
       }))
-      sessions.push(...hostSessions.flat().map((item) => ({ id:item.id, provider:item.provider, nativeSessionId:item.native_session_id, projectId:item.project_id, hostId:host.id, cwd:item.cwd, title:item.title, createdAt:item.created_at, updatedAt:item.updated_at, status:item.status, pid:item.pid })))
+      sessions.push(...hostSessions.flat().map((item) => mapSession(item, host.id)))
     } catch {}
   }))
   runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  const now = Date.now()
+  for (const session of sessions) {
+    const key = `${session.hostId}:${session.id}`; const prior = previousSessionStatus.get(key)
+    if (prior === 'running' && session.status !== 'running') stoppedUntil.set(key, now + 45_000)
+    previousSessionStatus.set(key, session.status)
+    if (session.status !== 'running' && (stoppedUntil.get(key) || 0) > now) session.status = 'stopped'
+    else if ((stoppedUntil.get(key) || 0) <= now) stoppedUntil.delete(key)
+  }
   return { hosts: store.state.hosts, projects, runs, sessions, drafts: store.state.drafts, providersByHost, discoveredAgentsByHost, settings: store.state.settings }
 }
 
@@ -71,6 +83,7 @@ app.get('/api/hosts/:hostId/files', async (req,res)=>{try{res.json(await gateway
 app.post('/api/hosts/:hostId/projects/discover', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/projects/discover',{method:'POST',body:JSON.stringify(req.body),timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/hosts/:hostId/agents', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/agents/discover'))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/projects/:hostId/:projectId/sessions/:provider/:sessionId/messages', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/projects/${req.params.projectId}/sessions/${encodeURIComponent(req.params.provider)}/${encodeURIComponent(req.params.sessionId)}/messages`,{timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
+app.get('/api/projects/:hostId/:projectId/sessions', async (req,res)=>{try{const limit=Math.min(150,Math.max(1,Number(req.query.limit)||SESSION_PAGE_SIZE));const items=await gateway.request(req.params.hostId,`/v1/projects/${req.params.projectId}/sessions?limit=${limit}`,{timeout:20000});res.json(items.map((item)=>mapSession(item,req.params.hostId)))}catch(error){res.status(400).json({error:error.message})}})
 for (const action of ['interrupt','terminate','kill']) app.post(`/api/agents/:hostId/:pid/${action}`,async(req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/agents/${req.params.pid}/${action}`,{method:'POST',body:'{}'}))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/projects/:hostId/:projectId/worktrees', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/projects/${req.params.projectId}/worktrees`)) } catch (error) { res.status(400).json({ error: error.message }) } })
 app.get('/api/worktrees/:hostId/:id/status', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/worktrees/${req.params.id}/status`))}catch(error){res.status(400).json({error:error.message})}})
