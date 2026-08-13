@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d2320"/>
+      <stop offset="1" stop-color="#0d100e"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#62e6ad"/>
+      <stop offset="1" stop-color="#28a974"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+  </defs>
+  <rect x="52" y="52" width="920" height="920" rx="220" fill="url(#bg)"/>
+  <rect x="75" y="75" width="874" height="874" rx="197" fill="none" stroke="#303834" stroke-width="10"/>
+  <path d="M300 320 490 512 300 704" fill="none" stroke="#35c98a" stroke-width="82" stroke-linecap="round" stroke-linejoin="round" opacity=".25" filter="url(#shadow)"/>
+  <path d="M300 320 490 512 300 704" fill="none" stroke="url(#mark)" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M515 700h168" fill="none" stroke="#a9b2ad" stroke-width="62" stroke-linecap="round"/>
+  <circle cx="698" cy="332" r="73" fill="#182d24" stroke="#35c98a" stroke-width="20"/>
+  <circle cx="698" cy="332" r="25" fill="#75edb8"/>
+</svg>

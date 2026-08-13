@@ -1,0 +1,244 @@
+use std::{collections::HashSet, path::PathBuf};
+
+use anyhow::{Context, Result};
+use tokio::process::Command;
+use uuid::Uuid;
+
+use crate::{
+    db::Db,
+    model::{DiscoveredAgent, DiscoveredProject, FileEntry, Project},
+    worktrees,
+};
+
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".next",
+    ".cache",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+];
+
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+pub async fn list_files(path: Option<&str>) -> Result<Vec<FileEntry>> {
+    let requested = path.map(PathBuf::from).unwrap_or_else(home_dir);
+    let root = tokio::fs::canonicalize(&requested)
+        .await
+        .with_context(|| format!("open {}", requested.display()))?;
+    anyhow::ensure!(root.is_dir(), "path is not a directory");
+    let mut reader = tokio::fs::read_dir(&root).await?;
+    let mut entries = Vec::new();
+    while let Some(entry) = reader.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            continue;
+        }
+        let child = entry.path();
+        entries.push(FileEntry {
+            name,
+            path: child.to_string_lossy().into_owned(),
+            is_dir: true,
+            is_git: child.join(".git").exists(),
+        });
+    }
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(entries)
+}
+
+pub async fn discover_projects(
+    db: &Db,
+    path: &str,
+    max_depth: usize,
+    register: bool,
+) -> Result<Vec<DiscoveredProject>> {
+    let root = tokio::fs::canonicalize(path)
+        .await
+        .with_context(|| format!("open {path}"))?;
+    anyhow::ensure!(root.is_dir(), "path is not a directory");
+    let mut candidates = Vec::new();
+    let mut stack = vec![(root.clone(), 0usize)];
+    let mut seen = HashSet::new();
+    while let Some((current, depth)) = stack.pop() {
+        if current.join(".git").exists() {
+            let canonical = current.to_string_lossy().into_owned();
+            if seen.insert(canonical) {
+                candidates.push(current);
+            }
+            continue;
+        }
+        if depth >= max_depth.min(5) {
+            continue;
+        }
+        let mut reader = match tokio::fs::read_dir(&current).await {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = reader.next_entry().await {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            stack.push((entry.path(), depth + 1));
+        }
+    }
+    if candidates.is_empty() {
+        candidates.push(root);
+    }
+    candidates.sort();
+    let mut result = Vec::new();
+    for candidate in candidates {
+        let path = candidate.to_string_lossy().into_owned();
+        let repo_root = worktrees::detect_repo(&candidate).await;
+        let existing = db.project_by_path(&path)?;
+        let registered_project_id = if let Some(project) = existing {
+            Some(project.id)
+        } else if register {
+            let project = Project {
+                id: Uuid::new_v4().to_string(),
+                name: candidate
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&path)
+                    .to_string(),
+                path: path.clone(),
+                repo_root: repo_root.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            db.create_project(&project)?;
+            Some(project.id)
+        } else {
+            None
+        };
+        result.push(DiscoveredProject {
+            name: candidate
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&path)
+                .to_string(),
+            path,
+            repo_root,
+            registered_project_id,
+        });
+    }
+    Ok(result)
+}
+
+pub async fn discover_agents(db: &Db) -> Result<Vec<DiscoveredAgent>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,pgid=,command="])
+        .output()
+        .await?;
+    anyhow::ensure!(output.status.success(), "ps failed");
+    let managed = db
+        .runs()?
+        .into_iter()
+        .filter_map(|run| {
+            run.pid
+                .map(|pid| (pid, run.process_group_id.unwrap_or(pid as i32), run.id))
+        })
+        .collect::<Vec<_>>();
+    let mut agents = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line
+            .trim()
+            .splitn(3, char::is_whitespace)
+            .filter(|part| !part.is_empty());
+        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(pgid) = fields
+            .next()
+            .and_then(|value| value.trim().parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let command = fields.next().unwrap_or("").trim().to_string();
+        let provider = classify_agent(&command);
+        let Some(provider) = provider else { continue };
+        let managed_run_id = managed
+            .iter()
+            .find(|(managed_pid, managed_pgid, _)| *managed_pid == pid || *managed_pgid == pgid)
+            .map(|(_, _, id)| id.clone());
+        let cwd = process_cwd(pid).await;
+        agents.push(DiscoveredAgent {
+            id: format!("external-{pid}"),
+            provider: provider.to_string(),
+            pid,
+            process_group_id: pgid,
+            cwd,
+            command,
+            managed_run_id,
+        });
+    }
+    agents.sort_by_key(|item| item.pid);
+    Ok(agents)
+}
+
+fn classify_agent(command: &str) -> Option<&'static str> {
+    let lower = command.to_lowercase();
+    let tokens = lower
+        .split(|character: char| character.is_whitespace() || character == '/')
+        .collect::<Vec<_>>();
+    if tokens.iter().any(|token| *token == "codex") {
+        Some("codex")
+    } else if tokens.iter().any(|token| *token == "claude") {
+        Some("claude")
+    } else if tokens.iter().any(|token| *token == "pi") && !lower.contains("pip") {
+        Some("pi")
+    } else {
+        None
+    }
+}
+
+async fn process_cwd(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        return tokio::fs::read_link(format!("/proc/{pid}/cwd"))
+            .await
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+            .output()
+            .await
+            .ok()?;
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix('n').map(str::to_string));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+pub fn signal_external(pid: u32, pgid: i32, signal: i32) -> Result<()> {
+    anyhow::ensure!(pid > 1 && pgid > 1, "refusing unsafe process target");
+    let result = unsafe { libc::kill(-pgid, signal) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}

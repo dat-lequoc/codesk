@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Codesk",
+  "version": "0.2.0",
+  "identifier": "app.codesk.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "npm run build && npm run build:gateway && cargo build -p codeskd",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Codesk",
+        "width": 1800,
+        "height": 1050,
+        "minWidth": 980,
+        "minHeight": 680,
+        "center": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"],
+    "icon": [],
+    "resources": {
+      "binaries/codesk-gateway": "bin/codesk-gateway",
+      "../target/debug/codeskd": "bin/codeskd"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "codesk",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n api,ui -c cyan,magenta \"node --watch server/index.mjs\" \"vite\"",
+    "build": "vite build",
+    "build:gateway": "node scripts/build-gateway.mjs",
+    "start": "node server/index.mjs",
+    "test": "cargo test --workspace && node scripts/test-daemon-survival.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs",
+    "check": "tsc --noEmit",
+    "desktop": "tauri dev",
+    "desktop:build": "npm run build:gateway && cargo build -p codeskd && tauri build"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/api": "^2.11.1",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.2.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.2"
+  }
+}

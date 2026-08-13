@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.codesk/
+target/
+src-tauri/binaries/codesk-gateway
+.DS_Store
+*.log

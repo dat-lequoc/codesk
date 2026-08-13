@@ -1,0 +1,38 @@
+import type { AppState, DiscoveredAgent, DiscoveredProject, FileEntry, Host, Project, Run, RunEvent, SessionMessage } from './types'
+
+export const gatewayOrigin = location.protocol === 'http:' || location.protocol === 'https:' ? '' : 'http://127.0.0.1:4242'
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${gatewayOrigin}${path}`, {
+    ...options,
+    headers: { 'content-type': 'application/json', ...options?.headers },
+  })
+  const body = await response.json()
+  if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`)
+  return body
+}
+
+export const api = {
+  state: () => request<AppState>('/api/state'),
+  sshAliases: () => request<string[]>('/api/ssh-aliases'),
+  createHost: (input: { name: string; sshAlias: string; daemonPort?: number }) => request<Host>('/api/hosts', { method: 'POST', body: JSON.stringify(input) }),
+  removeHost: (id: string) => request(`/api/hosts/${id}`, { method: 'DELETE' }),
+  reconnectHost: (id: string) => request(`/api/hosts/${id}/reconnect`, { method: 'POST' }),
+  inspectHost: (id: string) => request<Record<string,string>>(`/api/hosts/${id}/inspect`),
+  installHost: (id: string, artifactUrl: string) => request(`/api/hosts/${id}/install`, { method: 'POST', body: JSON.stringify({ artifactUrl }) }),
+  bootstrapHost: (id: string, artifactUrl?: string) => request(`/api/hosts/${id}/bootstrap`, { method: 'POST', body: JSON.stringify({ artifactUrl }) }),
+  files: (hostId: string, path = '') => request<FileEntry[]>(`/api/hosts/${hostId}/files?path=${encodeURIComponent(path)}`),
+  discoverProjects: (hostId: string, path: string, register = true, maxDepth = 2) => request<DiscoveredProject[]>(`/api/hosts/${hostId}/projects/discover`, { method: 'POST', body: JSON.stringify({ path, register, max_depth: maxDepth }) }),
+  discoveredAgents: (hostId: string) => request<DiscoveredAgent[]>(`/api/hosts/${hostId}/agents`),
+  sessionMessages: (hostId: string, projectId: string, provider: string, sessionId: string) => request<SessionMessage[]>(`/api/projects/${hostId}/${projectId}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}/messages`),
+  controlDiscoveredAgent: (hostId: string, pid: number, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/agents/${hostId}/${pid}/${action}`, { method: 'POST' }),
+  worktreeStatus: (hostId: string, id: string) => request<{ worktree: { path: string }; dirty: boolean; summary: string; diff_stat: string }>(`/api/worktrees/${hostId}/${id}/status`),
+  removeWorktree: (hostId: string, id: string, force = false) => request(`/api/worktrees/${hostId}/${id}?force=${force}`, { method: 'DELETE' }),
+  openPath: (hostId: string, path: string) => request('/api/open-path', { method: 'POST', body: JSON.stringify({ hostId, path }) }),
+  createProject: (input: { hostId: string; name: string; path: string }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
+  createRun: (input: Record<string, unknown>) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(input) }),
+  resumeRun: (run: Run, prompt: string, fork = false) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify({ hostId: run.hostId, project_id: run.projectId, provider: run.provider, model: run.model, prompt, workspace_mode: fork ? 'managed_worktree' : (run.worktreeId ? 'existing_worktree' : 'current_checkout'), worktree_id: fork ? undefined : run.worktreeId, parent_run_id: run.id, operation: fork ? 'fork' : 'resume', resume_session_id: run.sessionId }) }),
+  events: (hostId: string, id: string, after = 0) => request<RunEvent[]>(`/api/runs/${hostId}/${id}/events?after=${after}`),
+  controlRun: (hostId: string, id: string, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/runs/${hostId}/${id}/${action}`, { method: 'POST' }),
+  input: (hostId: string, id: string, message: string) => request(`/api/runs/${hostId}/${id}/input`, { method: 'POST', body: JSON.stringify({ message, request_id: crypto.randomUUID() }) }),
+}

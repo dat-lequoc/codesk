@@ -1,0 +1,67 @@
+import express from 'express'
+import http from 'node:http'
+import { randomUUID } from 'node:crypto'
+import { WebSocketServer } from 'ws'
+import { Store } from './store.mjs'
+import { Gateway } from './gateway.mjs'
+
+const app = express(); const server = http.createServer(app); const wss = new WebSocketServer({ server, path: '/ws' }); const store = new Store()
+function broadcast(type, payload) { const body = JSON.stringify({ type, payload }); for (const client of wss.clients) if (client.readyState === 1) client.send(body) }
+const gateway = new Gateway(store, broadcast)
+app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Headers','content-type');res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');if(req.method==='OPTIONS')return res.sendStatus(204);next()})
+app.use(express.json({ limit: '1mb' }))
+
+async function state() {
+  const projects = []; const runs = []; const sessions = []; const providersByHost = {}; const discoveredAgentsByHost = {}
+  await Promise.all(store.state.hosts.map(async (host) => {
+    if (host.status !== 'online') return
+    try {
+      const [hostProjects, hostRuns, capabilities, discoveredAgents] = await Promise.all([gateway.request(host.id, '/v1/projects'), gateway.request(host.id, '/v1/runs'), gateway.request(host.id, '/v1/capabilities'), gateway.request(host.id, '/v1/agents/discover')])
+      projects.push(...hostProjects.map((item) => ({ id: item.id, name: item.name, path: item.path, repoRoot: item.repo_root, createdAt: item.created_at, hostId: host.id })))
+      runs.push(...hostRuns.map((item) => ({ id:item.id, projectId:item.project_id, worktreeId:item.worktree_id, parentRunId:item.parent_run_id, provider:item.provider, sessionId:item.provider_session_id, title:item.title, prompt:item.prompt, model:item.model || '', cwd:item.cwd, command:item.command, args:item.args, status:item.status, pid:item.pid, processGroupId:item.process_group_id, createdAt:item.created_at, startedAt:item.started_at, finishedAt:item.finished_at, exitCode:item.exit_code, terminatingSignal:item.terminating_signal, displayCommand:[item.command,...item.args].join(' '), hostId:host.id })))
+      providersByHost[host.id] = capabilities
+      discoveredAgentsByHost[host.id] = discoveredAgents.filter((item) => !item.managed_run_id)
+      const hostSessions = await Promise.all(hostProjects.map(async (project) => {
+        try { return await gateway.request(host.id, `/v1/projects/${project.id}/sessions`, { timeout: 30000 }) }
+        catch { return [] }
+      }))
+      sessions.push(...hostSessions.flat().map((item) => ({ id:item.id, provider:item.provider, nativeSessionId:item.native_session_id, projectId:item.project_id, hostId:host.id, cwd:item.cwd, title:item.title, createdAt:item.created_at, updatedAt:item.updated_at, status:item.status, pid:item.pid })))
+    } catch {}
+  }))
+  runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  return { hosts: store.state.hosts, projects, runs, sessions, providersByHost, discoveredAgentsByHost, settings: store.state.settings }
+}
+
+app.get('/api/state', async (_req, res) => res.json(await state()))
+app.get('/api/health', (_req, res) => res.json({ ok: true, version: '0.2.0' }))
+app.get('/api/ssh-aliases', async (_req,res)=>res.json(await gateway.sshAliases()))
+app.post('/api/hosts', async (req, res) => { const { name, sshAlias, daemonPort = 4243 } = req.body; if (!name?.trim() || !sshAlias?.trim()) return res.status(400).json({ error: 'Name and SSH alias are required' }); const host = { id: randomUUID(), name: name.trim(), type: 'ssh', sshAlias: sshAlias.trim(), daemonPort, status: 'offline', createdAt: new Date().toISOString() }; store.state.hosts.push(host); store.save(); broadcast('host.created', host); gateway.connect(host.id); res.status(201).json(host) })
+app.post('/api/hosts/:id/reconnect', (req, res) => { gateway.reconnect(req.params.id); res.json({ ok: true }) })
+app.get('/api/hosts/:id/inspect', async (req,res)=>{try{res.json(await gateway.inspectRemote(req.params.id))}catch(error){res.status(400).json({error:error.message})}})
+app.post('/api/hosts/:id/install', async (req,res)=>{try{res.json(await gateway.installRemote(req.params.id,req.body.artifactUrl))}catch(error){res.status(400).json({error:error.message})}})
+app.post('/api/hosts/:id/bootstrap', async (req,res)=>{try{res.json(await gateway.bootstrapRemote(req.params.id,{artifactUrl:req.body.artifactUrl,localBinaryPath:process.env.CODESK_DAEMON_BINARY}))}catch(error){res.status(400).json({error:error.message})}})
+app.delete('/api/hosts/:id', (req, res) => { if (req.params.id === 'local') return res.status(400).json({ error: 'Local host cannot be removed' }); const child = gateway.processes.get(req.params.id); if (child) child.kill('SIGTERM'); store.state.hosts = store.state.hosts.filter((host) => host.id !== req.params.id); store.save(); broadcast('host.removed', { id: req.params.id }); res.json({ ok: true }) })
+
+app.post('/api/projects', async (req, res) => { try { const project = await gateway.request(req.body.hostId, '/v1/projects', { method: 'POST', body: JSON.stringify({ name: req.body.name, path: req.body.path }) }); res.status(201).json({ ...project, hostId: req.body.hostId }) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.get('/api/hosts/:hostId/files', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/files?path=${encodeURIComponent(req.query.path||'')}`))}catch(error){res.status(400).json({error:error.message})}})
+app.post('/api/hosts/:hostId/projects/discover', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/projects/discover',{method:'POST',body:JSON.stringify(req.body),timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
+app.get('/api/hosts/:hostId/agents', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/agents/discover'))}catch(error){res.status(400).json({error:error.message})}})
+app.get('/api/projects/:hostId/:projectId/sessions/:provider/:sessionId/messages', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/projects/${req.params.projectId}/sessions/${encodeURIComponent(req.params.provider)}/${encodeURIComponent(req.params.sessionId)}/messages`,{timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
+for (const action of ['interrupt','terminate','kill']) app.post(`/api/agents/:hostId/:pid/${action}`,async(req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/agents/${req.params.pid}/${action}`,{method:'POST',body:'{}'}))}catch(error){res.status(400).json({error:error.message})}})
+app.get('/api/projects/:hostId/:projectId/worktrees', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/projects/${req.params.projectId}/worktrees`)) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.get('/api/worktrees/:hostId/:id/status', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/worktrees/${req.params.id}/status`))}catch(error){res.status(400).json({error:error.message})}})
+app.delete('/api/worktrees/:hostId/:id', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/worktrees/${req.params.id}?force=${req.query.force === 'true'}`, { method: 'DELETE' })) } catch (error) { res.status(400).json({ error: error.message }) } })
+
+app.post('/api/runs', async (req, res) => { try { const run = await gateway.request(req.body.hostId, '/v1/runs', { method: 'POST', body: JSON.stringify(req.body) , timeout: 30000}); res.status(201).json({ ...run, hostId: req.body.hostId }) } catch (error) { res.status(400).json({ error: error.message }) } })
+for (const action of ['interrupt','terminate','kill']) app.post(`/api/runs/:hostId/:id/${action}`, async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/${action}`, { method: 'POST', body: '{}' })) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.post('/api/runs/:hostId/:id/input', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/input`, { method: 'POST', body: JSON.stringify(req.body) })) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.get('/api/runs/:hostId/:id/events', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/events?after=${req.query.after || 0}`)) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.post('/api/open-path', async (req,res)=>{try{const host=store.state.hosts.find((item)=>item.id===req.body.hostId);if(!host)throw new Error('Host not found');if(host.type!=='local')throw new Error('Opening remote folders requires an SSH-aware editor integration; the path remains available in Environment.');spawn('open',[req.body.path],{detached:true,stdio:'ignore'}).unref();res.json({ok:true})}catch(error){res.status(400).json({error:error.message})}})
+
+wss.on('connection', (socket) => socket.send(JSON.stringify({ type: 'ready', payload: { now: new Date().toISOString() } })))
+async function main() {
+  await gateway.start()
+  server.listen(Number(process.env.PORT || 4242), '127.0.0.1', () => console.log(`Codesk client gateway listening on http://127.0.0.1:${process.env.PORT || 4242}`))
+}
+main().catch((error) => { console.error(error); process.exitCode = 1 })

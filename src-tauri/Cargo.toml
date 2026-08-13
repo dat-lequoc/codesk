@@ -1,0 +1,10 @@
+[package]
+name = "codesk-desktop"
+version = "0.2.0"
+edition = "2024"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

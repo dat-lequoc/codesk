@@ -1,0 +1,38 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  daemon:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: codeskd-Linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: codeskd-Linux-aarch64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: codeskd-Darwin-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: codeskd-Darwin-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release -p codeskd --target ${{ matrix.target }}
+      - run: cp target/${{ matrix.target }}/release/codeskd ${{ matrix.asset }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}

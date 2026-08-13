@@ -1,0 +1,90 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    tauri::Builder::default()
+        .setup(|app| {
+            use std::{
+                fs,
+                process::{Command, Stdio},
+            };
+            use tauri::Manager;
+            let resources = app.path().resource_dir()?;
+            let gateway = resources.join("bin/codesk-gateway");
+            let daemon = resources.join("bin/codeskd");
+            let client_data = app.path().app_data_dir()?.join("client");
+            fs::create_dir_all(&client_data)?;
+            if daemon.exists() {
+                let current = reqwest_health_version("127.0.0.1:4243");
+                let required = Command::new(&daemon)
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .and_then(|text| text.split_whitespace().last().map(str::to_string));
+                if let (Some(current), Some(required)) = (current, required) {
+                    if version_lt(&current, &required) {
+                        let _ = Command::new("pkill").args(["-x", "codeskd"]).status();
+                        std::thread::sleep(std::time::Duration::from_millis(350));
+                    }
+                }
+            }
+            let already_running = std::net::TcpStream::connect("127.0.0.1:4242").is_ok();
+            if !already_running && gateway.exists() {
+                let log_dir = app.path().app_log_dir()?;
+                fs::create_dir_all(&log_dir)?;
+                let stdout = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_dir.join("gateway.log"))?;
+                let stderr = stdout.try_clone()?;
+                Command::new(&gateway)
+                    .env("CODESK_DAEMON_BINARY", &daemon)
+                    .env("CODESK_CLIENT_DATA_DIR", &client_data)
+                    .env("PORT", "4242")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(stdout))
+                    .stderr(Stdio::from(stderr))
+                    .spawn()?;
+            }
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running Codesk desktop");
+}
+
+fn reqwest_health_version(address: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &address.parse().ok()?,
+        std::time::Duration::from_millis(250),
+    )
+    .ok()?;
+    stream
+        .write_all(b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .ok()?;
+    let mut body = String::new();
+    stream.read_to_string(&mut body).ok()?;
+    let json = body.split("\r\n\r\n").nth(1)?;
+    let marker = "\"version\":\"";
+    let start = json.find(marker)? + marker.len();
+    let end = json[start..].find('"')? + start;
+    Some(json[start..end].to_string())
+}
+
+fn version_lt(left: &str, right: &str) -> bool {
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let a = parse(left);
+    let b = parse(right);
+    (0..3)
+        .find_map(|index| {
+            let x = *a.get(index).unwrap_or(&0);
+            let y = *b.get(index).unwrap_or(&0);
+            (x != y).then_some(x < y)
+        })
+        .unwrap_or(false)
+}
