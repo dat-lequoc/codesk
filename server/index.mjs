@@ -10,40 +10,58 @@ const app = express(); const server = http.createServer(app); const wss = new We
 function broadcast(type, payload) { const body = JSON.stringify({ type, payload }); for (const client of wss.clients) if (client.readyState === 1) client.send(body) }
 const gateway = new Gateway(store, broadcast)
 const mapRun = (item, hostId) => ({ id:item.id, projectId:item.project_id, worktreeId:item.worktree_id, parentRunId:item.parent_run_id, provider:item.provider, sessionId:item.provider_session_id, title:item.title, prompt:item.prompt, model:item.model || '', cwd:item.cwd, command:item.command, args:item.args, status:item.status, pid:item.pid, processGroupId:item.process_group_id, createdAt:item.created_at, startedAt:item.started_at, finishedAt:item.finished_at, exitCode:item.exit_code, terminatingSignal:item.terminating_signal, displayCommand:[item.command,...(item.args || [])].join(' '), hostId })
-const mapSession = (item, hostId) => ({ id:item.id, provider:item.provider, nativeSessionId:item.native_session_id, projectId:item.project_id, hostId, cwd:item.cwd, title:item.title, createdAt:item.created_at, updatedAt:item.updated_at, status:item.status, pid:item.pid })
+const mapSession = (item, hostId) => ({ id:item.id, provider:item.provider, nativeSessionId:item.native_session_id, projectId:item.project_id, hostId, cwd:item.cwd, title:item.title, createdAt:item.created_at, updatedAt:item.updated_at, sortAt:item.updated_at, status:item.status, pid:item.pid })
 const SESSION_PAGE_SIZE = 8
 const previousSessionStatus = new Map()
 const stoppedUntil = new Map()
+const sessionSortAt = new Map()
+const cachedHostState = new Map()
 app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Headers','content-type');res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS');if(req.method==='OPTIONS')return res.sendStatus(204);next()})
 app.use(express.json({ limit: '1mb' }))
 
 async function state() {
   const projects = []; const runs = []; const sessions = []; const providersByHost = {}; const discoveredAgentsByHost = {}
-  await Promise.all(store.state.hosts.map(async (host) => {
+  const hostResults = await Promise.all(store.state.hosts.map(async (host) => {
     if (host.status !== 'online') return
     try {
       const [hostProjects, hostRuns, capabilities, discoveredAgents] = await Promise.all([gateway.request(host.id, '/v1/projects'), gateway.request(host.id, '/v1/runs'), gateway.request(host.id, '/v1/capabilities'), gateway.request(host.id, '/v1/agents/discover')])
-      projects.push(...hostProjects.map((item) => ({ id: item.id, name: item.name, path: item.path, repoRoot: item.repo_root, createdAt: item.created_at, hostId: host.id })))
-      runs.push(...hostRuns.map((item) => mapRun(item, host.id)))
-      providersByHost[host.id] = capabilities
-      discoveredAgentsByHost[host.id] = discoveredAgents.filter((item) => !item.managed_run_id)
       const hostSessions = await Promise.all(hostProjects.map(async (project) => {
         try { return await gateway.request(host.id, `/v1/projects/${project.id}/sessions?limit=${SESSION_PAGE_SIZE}`, { timeout: 12000 }) }
         catch { return [] }
       }))
-      sessions.push(...hostSessions.flat().map((item) => mapSession(item, host.id)))
-    } catch {}
+      const result = { host, hostProjects, hostRuns, capabilities, discoveredAgents, hostSessions }
+      cachedHostState.set(host.id, result)
+      return result
+    } catch { return cachedHostState.get(host.id) || null }
   }))
+  // Promise completion timing must never affect sidebar order. Fold results in
+  // the persisted host order, then each daemon's stable project order.
+  for (const result of hostResults) {
+    if (!result) continue
+    const { host, hostProjects, hostRuns, capabilities, discoveredAgents, hostSessions } = result
+    projects.push(...hostProjects.map((item) => ({ id: item.id, name: item.name, path: item.path, repoRoot: item.repo_root, createdAt: item.created_at, hostId: host.id })))
+    runs.push(...hostRuns.map((item) => mapRun(item, host.id)))
+    providersByHost[host.id] = capabilities
+    discoveredAgentsByHost[host.id] = discoveredAgents.filter((item) => !item.managed_run_id)
+    sessions.push(...hostSessions.flat().map((item) => mapSession(item, host.id)))
+  }
   runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   const now = Date.now()
   for (const session of sessions) {
     const key = `${session.hostId}:${session.id}`; const prior = previousSessionStatus.get(key)
-    if (prior === 'running' && session.status !== 'running') stoppedUntil.set(key, now + 45_000)
+    if (!sessionSortAt.has(key)) sessionSortAt.set(key, session.updatedAt)
+    if (prior === 'running' && session.status !== 'running') {
+      stoppedUntil.set(key, now + 45_000)
+      sessionSortAt.set(key, session.updatedAt)
+    } else if (session.status !== 'running' && prior !== session.status) {
+      sessionSortAt.set(key, session.updatedAt)
+    }
     previousSessionStatus.set(key, session.status)
+    session.sortAt = sessionSortAt.get(key)
     if (session.status !== 'running' && (stoppedUntil.get(key) || 0) > now) session.status = 'stopped'
     else if ((stoppedUntil.get(key) || 0) <= now) stoppedUntil.delete(key)
   }
+  sessions.sort((a, b) => b.sortAt.localeCompare(a.sortAt))
   return { hosts: store.state.hosts, projects, runs, sessions, drafts: store.state.drafts, providersByHost, discoveredAgentsByHost, settings: store.state.settings }
 }
 

@@ -27,7 +27,7 @@ const observedAgents = (state: AppState) => {
   return [...sessions.values()]
 }
 const providerName = (provider: string) => provider === 'codex' ? 'Codex' : provider === 'pi' ? 'Pi' : provider === 'claude' ? 'Claude Code' : 'Command'
-const recentFirst = (left: ProviderSession, right: ProviderSession) => right.updatedAt.localeCompare(left.updatedAt) || Number(right.status === 'running') - Number(left.status === 'running')
+const recentFirst = (left: ProviderSession, right: ProviderSession) => right.sortAt.localeCompare(left.sortAt) || Number(right.status === 'running') - Number(left.status === 'running')
 
 export function App() {
   const [state, setState] = useState<AppState>(empty)

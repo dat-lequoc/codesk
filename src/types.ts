@@ -105,6 +105,7 @@ export type ProviderSession = {
   title: string
   createdAt: string
   updatedAt: string
+  sortAt: string
   status: 'running' | 'stopped' | 'idle'
   pid?: number | null
 }
