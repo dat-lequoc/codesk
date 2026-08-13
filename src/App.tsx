@@ -27,7 +27,7 @@ const observedAgents = (state: AppState) => {
   return [...sessions.values()]
 }
 const providerName = (provider: string) => provider === 'codex' ? 'Codex' : provider === 'pi' ? 'Pi' : provider === 'claude' ? 'Claude Code' : 'Command'
-const runningFirst = (left: ProviderSession, right: ProviderSession) => Number(right.status === 'running') - Number(left.status === 'running') || right.updatedAt.localeCompare(left.updatedAt)
+const recentFirst = (left: ProviderSession, right: ProviderSession) => right.updatedAt.localeCompare(left.updatedAt) || Number(right.status === 'running') - Number(left.status === 'running')
 
 export function App() {
   const [state, setState] = useState<AppState>(empty)
@@ -106,7 +106,7 @@ function Sidebar({ state, runs, sessions, agents, selectedId, selectedSessionKey
     <div className="side-projects">{state.projects.map((project) => {
       const key = projectKey(project); const host = state.hosts.find((item) => item.id === project.hostId)
       const projectDrafts = state.drafts.filter((draft) => draft.projectId === project.id && draft.hostId === project.hostId)
-      const projectSessions = sessions.filter((session) => session.projectId === project.id && session.hostId === project.hostId).sort(runningFirst)
+      const projectSessions = sessions.filter((session) => session.projectId === project.id && session.hostId === project.hostId).sort(recentFirst)
       const runningCount = projectSessions.filter((session) => session.status === 'running').length
       const projectRuns = runs.filter((run) => run.projectId === project.id && run.hostId === project.hostId && !projectSessions.some((session) => session.nativeSessionId === run.sessionId))
       const projectAgents = agents.filter((item) => item.project && projectKey(item.project) === key && !projectSessions.some((session) => session.provider === item.agent.provider && session.status === 'running'))
@@ -125,7 +125,7 @@ function Sidebar({ state, runs, sessions, agents, selectedId, selectedSessionKey
     })}</div>
     <div className="side-heading"><span>Recents</span></div>
     <div className="recent-search"><Search size={13} /><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search chats" /></div>
-    <div className="side-recents">{state.drafts.map((draft) => <button key={draft.id} className={draft.id === selectedDraftId ? 'selected' : ''} onClick={() => onSelectDraft(draft)}><span className="recent-status draft-status"><Circle size={7} /></span><span>New chat</span></button>)}{[...sessions].sort(runningFirst).slice(0, 30).map((session) => <button key={`${session.hostId}:${session.id}`} className={`${session.status === 'running' ? 'running ' : ''}${`${session.hostId}:${session.id}` === selectedSessionKey ? 'selected' : ''}`} onClick={() => onSelectSession(session)}><span className="recent-status">{session.status === 'running' ? <Radio size={12} /> : providerIcon(session.provider)}</span><span>{session.title}</span>{session.status === 'running' ? <small className="running-label">Running</small> : <small>{relative(session.updatedAt)}</small>}</button>)}</div>
+    <div className="side-recents">{state.drafts.map((draft) => <button key={draft.id} className={draft.id === selectedDraftId ? 'selected' : ''} onClick={() => onSelectDraft(draft)}><span className="recent-status draft-status"><Circle size={7} /></span><span>New chat</span></button>)}{[...sessions].sort(recentFirst).slice(0, 30).map((session) => <button key={`${session.hostId}:${session.id}`} className={`${session.status === 'running' ? 'running ' : ''}${`${session.hostId}:${session.id}` === selectedSessionKey ? 'selected' : ''}`} onClick={() => onSelectSession(session)}><span className="recent-status">{session.status === 'running' ? <Radio size={12} /> : providerIcon(session.provider)}</span><span>{session.title}</span>{session.status === 'running' ? <small className="running-label">Running</small> : <small>{relative(session.updatedAt)}</small>}</button>)}</div>
     <div className="side-bottom"><button onClick={onSettings}><Settings2 size={17} /><span>Settings</span></button><button><Archive size={17} /><span>Archived chats</span></button></div>
   </aside>
 }

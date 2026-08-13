@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File},
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -15,6 +15,7 @@ use crate::model::{DiscoveredAgent, Project, ProviderSession, SessionMessage};
 const MAX_SESSIONS_PER_PROVIDER: usize = 50;
 const MAX_CODEX_CANDIDATES: usize = 1500;
 const MAX_INDEX_BYTES: u64 = 1024 * 1024;
+const MAX_INDEX_TAIL_BYTES: u64 = 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MESSAGES: usize = 4000;
 
@@ -124,6 +125,9 @@ fn index_directory(
 fn index_codex(project: &Project) -> Result<Vec<ProviderSession>> {
     let codex_root = home_dir().join(".codex");
     let mut sessions = index_codex_database(project, &codex_root).unwrap_or_default();
+    if sessions.len() >= MAX_SESSIONS_PER_PROVIDER {
+        return Ok(sessions);
+    }
     let directory = codex_root.join("sessions");
     if !directory.is_dir() {
         return Ok(sessions);
@@ -188,10 +192,45 @@ fn index_codex_database(project: &Project, codex_root: &Path) -> Result<Vec<Prov
             })
         },
     )?;
-    Ok(rows
-        .filter_map(|row| row.ok())
-        .filter(|session| !session.title.is_empty())
-        .collect())
+    let mut sessions = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
+    enrich_codex_titles(codex_root, &mut sessions);
+    sessions.retain(|session| !session.title.is_empty());
+    Ok(sessions)
+}
+
+fn enrich_codex_titles(codex_root: &Path, sessions: &mut [ProviderSession]) {
+    let Some(path) = newest_numbered_database(codex_root, "thread_history_") else {
+        return;
+    };
+    let Ok(connection) = readonly_database(&path) else {
+        return;
+    };
+    let Ok(mut statement) = connection.prepare(
+        "SELECT item_json
+         FROM thread_items
+         WHERE thread_id = ?1 AND item_type = 'userMessage'
+         ORDER BY rollout_ordinal DESC, created_at_ms DESC
+         LIMIT 20",
+    ) else {
+        return;
+    };
+    for session in sessions {
+        let Ok(rows) =
+            statement.query_map([&session.native_session_id], |row| row.get::<_, String>(0))
+        else {
+            continue;
+        };
+        for row in rows.flatten() {
+            let Ok(value) = serde_json::from_str::<Value>(&row) else {
+                continue;
+            };
+            let title = meaningful_user_text(text_content(&value["content"]));
+            if !title.is_empty() {
+                session.title = truncate_title(&title);
+                break;
+            }
+        }
+    }
 }
 
 fn codex_messages(native_session_id: &str) -> Result<Vec<SessionMessage>> {
@@ -287,7 +326,7 @@ fn newest_numbered_database(root: &Path, prefix: &str) -> Option<PathBuf> {
 }
 
 fn index_file(project: &Project, provider: &str, path: &Path) -> Result<Option<ProviderSession>> {
-    let file = match File::open(path) {
+    let mut file = match File::open(path) {
         Ok(file) => file,
         Err(_) => return Ok(None),
     };
@@ -299,60 +338,44 @@ fn index_file(project: &Project, provider: &str, path: &Path) -> Result<Option<P
         .to_string();
     let mut cwd = String::new();
     let mut created_at = String::new();
-    let updated_at = modified_rfc3339(&metadata);
+    let modified_at = modified_rfc3339(&metadata);
+    let mut latest_event_at = String::new();
     let mut title = String::new();
-    let reader = BufReader::new(file).take(MAX_INDEX_BYTES);
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        match provider {
-            "pi" => {
-                if value["type"] == "session" {
-                    native_id = string(&value["id"]).unwrap_or(native_id);
-                    cwd = string(&value["cwd"]).unwrap_or_default();
-                    created_at = string(&value["timestamp"]).unwrap_or_default();
-                } else if value["type"] == "message" {
-                    if title.is_empty() && value["message"]["role"] == "user" {
-                        title = meaningful_user_text(text_content(&value["message"]["content"]));
-                    }
-                }
-            }
-            "claude" => {
-                cwd = string(&value["cwd"]).unwrap_or(cwd);
-                native_id = string(&value["sessionId"]).unwrap_or(native_id);
-                let timestamp = string(&value["timestamp"]).unwrap_or_default();
-                if created_at.is_empty() {
-                    created_at = timestamp.clone();
-                }
-                if title.is_empty() && value["type"] == "user" {
-                    title = meaningful_user_text(claude_user_text(&value["message"]["content"]));
-                }
-            }
-            "codex" => {
-                if value["type"] == "session_meta" {
-                    native_id = string(&value["payload"]["session_id"]).unwrap_or(native_id);
-                    cwd = string(&value["payload"]["cwd"]).unwrap_or_default();
-                    created_at = string(&value["timestamp"]).unwrap_or_default();
-                } else if value["type"] == "response_item" {
-                    let payload = &value["payload"];
-                    if title.is_empty() && payload["type"] == "message" && payload["role"] == "user"
-                    {
-                        title = meaningful_user_text(text_content(&payload["content"]));
-                    }
-                }
-            }
-            _ => {}
+    scan_index_reader(
+        BufReader::new((&mut file).take(MAX_INDEX_BYTES)),
+        provider,
+        &mut native_id,
+        &mut cwd,
+        &mut created_at,
+        &mut latest_event_at,
+        &mut title,
+    );
+    if !cwd.is_empty() && !cwd_matches(&cwd, &project.path) {
+        return Ok(None);
+    }
+    if metadata.len() > MAX_INDEX_BYTES {
+        let tail_start = metadata.len().saturating_sub(MAX_INDEX_TAIL_BYTES);
+        file.seek(SeekFrom::Start(tail_start))?;
+        let mut reader = BufReader::new(file.take(MAX_INDEX_TAIL_BYTES));
+        if tail_start > 0 {
+            let mut partial_line = String::new();
+            let _ = reader.read_line(&mut partial_line);
         }
-        if !cwd.is_empty() && !cwd_matches(&cwd, &project.path) {
-            return Ok(None);
-        }
+        scan_index_reader(
+            reader,
+            provider,
+            &mut native_id,
+            &mut cwd,
+            &mut created_at,
+            &mut latest_event_at,
+            &mut title,
+        );
     }
     if cwd.is_empty() || !cwd_matches(&cwd, &project.path) {
         return Ok(None);
     }
     if created_at.is_empty() {
-        created_at = updated_at.clone();
+        created_at = modified_at.clone();
     }
     if title.is_empty() {
         return Ok(None);
@@ -365,10 +388,75 @@ fn index_file(project: &Project, provider: &str, path: &Path) -> Result<Option<P
         cwd,
         title: truncate_title(&title),
         created_at,
-        updated_at,
+        updated_at: latest_rfc3339(&modified_at, &latest_event_at),
         status: "idle".to_string(),
         pid: None,
     }))
+}
+
+fn scan_index_reader<R: BufRead>(
+    reader: R,
+    provider: &str,
+    native_id: &mut String,
+    cwd: &mut String,
+    created_at: &mut String,
+    latest_event_at: &mut String,
+    title: &mut String,
+) {
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(timestamp) = string(&value["timestamp"]) {
+            *latest_event_at = latest_rfc3339(latest_event_at, &timestamp);
+        }
+        let candidate = match provider {
+            "pi" => {
+                if value["type"] == "session" {
+                    *native_id = string(&value["id"]).unwrap_or_else(|| native_id.clone());
+                    *cwd = string(&value["cwd"]).unwrap_or_default();
+                    *created_at = string(&value["timestamp"]).unwrap_or_default();
+                    String::new()
+                } else if value["type"] == "message" && value["message"]["role"] == "user" {
+                    meaningful_user_text(text_content(&value["message"]["content"]))
+                } else {
+                    String::new()
+                }
+            }
+            "claude" => {
+                *cwd = string(&value["cwd"]).unwrap_or_else(|| cwd.clone());
+                *native_id = string(&value["sessionId"]).unwrap_or_else(|| native_id.clone());
+                if created_at.is_empty() {
+                    *created_at = string(&value["timestamp"]).unwrap_or_default();
+                }
+                if value["type"] == "user" {
+                    meaningful_user_text(claude_user_text(&value["message"]["content"]))
+                } else {
+                    String::new()
+                }
+            }
+            "codex" => {
+                if value["type"] == "session_meta" {
+                    *native_id = string(&value["payload"]["session_id"])
+                        .unwrap_or_else(|| native_id.clone());
+                    *cwd = string(&value["payload"]["cwd"]).unwrap_or_default();
+                    *created_at = string(&value["timestamp"]).unwrap_or_default();
+                    String::new()
+                } else if value["type"] == "response_item"
+                    && value["payload"]["type"] == "message"
+                    && value["payload"]["role"] == "user"
+                {
+                    meaningful_user_text(text_content(&value["payload"]["content"]))
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        };
+        if !candidate.is_empty() {
+            *title = candidate;
+        }
+    }
 }
 
 fn source_path(project: &Project, provider: &str, native_id: &str) -> Result<PathBuf> {
@@ -580,6 +668,18 @@ fn unix_millis_rfc3339(millis: i64) -> String {
         .to_rfc3339()
 }
 
+fn latest_rfc3339(left: &str, right: &str) -> String {
+    match (
+        chrono::DateTime::parse_from_rfc3339(left),
+        chrono::DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left_time), Ok(right_time)) if right_time > left_time => right.to_string(),
+        (Ok(_), _) => left.to_string(),
+        (_, Ok(_)) => right.to_string(),
+        _ => left.max(right).to_string(),
+    }
+}
+
 fn sort_recent(paths: &mut [PathBuf]) {
     paths.sort_by_key(|path| fs::metadata(path).and_then(|value| value.modified()).ok());
     paths.reverse();
@@ -709,5 +809,91 @@ mod tests {
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[1].text, "Hi");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uses_latest_meaningful_codex_history_prompt_as_title() {
+        let root = std::env::temp_dir().join(format!("codesk-title-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let connection = Connection::open(root.join("thread_history_1.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE thread_items (
+                    thread_id TEXT NOT NULL, item_json TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL, item_type TEXT NOT NULL,
+                    rollout_ordinal INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+        for (ordinal, text) in [
+            (1, "First request"),
+            (2, "/model"),
+            (3, "Explain this codebase"),
+        ] {
+            connection.execute(
+                "INSERT INTO thread_items VALUES (?1, ?2, ?3, 'userMessage', ?4)",
+                params![
+                    "thread-1",
+                    serde_json::json!({"type":"userMessage","content":[{"type":"text","text":text}]}).to_string(),
+                    ordinal * 1000,
+                    ordinal
+                ],
+            ).unwrap();
+        }
+        drop(connection);
+        let mut sessions = vec![ProviderSession {
+            id: "codex:thread-1".into(),
+            provider: "codex".into(),
+            native_session_id: "thread-1".into(),
+            project_id: "project-1".into(),
+            cwd: "/repo".into(),
+            title: "First request".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            status: "idle".into(),
+            pid: None,
+        }];
+
+        enrich_codex_titles(&root, &mut sessions);
+
+        assert_eq!(sessions[0].title, "Explain this codebase");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn indexes_latest_prompt_from_large_jsonl_tail() {
+        let root = std::env::temp_dir().join(format!("codesk-tail-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let project = test_project(&root);
+        let path = root.join("session.jsonl");
+        let session = serde_json::json!({
+            "timestamp":"2026-08-13T20:00:00Z", "type":"session",
+            "id":"pi-session", "cwd":root.to_string_lossy()
+        });
+        let first = serde_json::json!({
+            "timestamp":"2026-08-13T20:01:00Z", "type":"message",
+            "message":{"role":"user","content":[{"type":"text","text":"First request"}]}
+        });
+        let last = serde_json::json!({
+            "timestamp":"2026-08-13T21:07:27Z", "type":"message",
+            "message":{"role":"user","content":[{"type":"text","text":"Explain this codebase"}]}
+        });
+        let padding =
+            serde_json::json!({"type":"padding","value":"x".repeat(MAX_INDEX_BYTES as usize)});
+        fs::write(&path, format!("{session}\n{first}\n{padding}\n{last}\n")).unwrap();
+
+        let indexed = index_file(&project, "pi", &path).unwrap().unwrap();
+
+        assert_eq!(indexed.title, "Explain this codebase");
+        assert_eq!(indexed.native_session_id, "pi-session");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compares_rfc3339_activity_across_offsets() {
+        assert_eq!(
+            latest_rfc3339("2026-08-13T22:00:00+02:00", "2026-08-13T20:01:00Z"),
+            "2026-08-13T20:01:00Z"
+        );
     }
 }
