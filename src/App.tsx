@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Archive, Bell, Bot, ChevronDown, ChevronRight, Circle, Clock3, Command, Cpu, FolderGit2,
+  Archive, Bell, Bot, ChevronDown, ChevronLeft, ChevronRight, Circle, Clock3, Command, Cpu, Folder, FolderGit2, Home,
   GitBranch, Globe2, Laptop, MoreHorizontal, Plug, Plus, Radio, RefreshCw,
   Search, Send, Server, Settings2, ShieldAlert, Square, Terminal, TreePine,
   WifiOff, X, Zap,
@@ -212,11 +212,36 @@ function ThreadEvent({ event }: { event: RunEvent }) { const text = event.payloa
 
 function Dialog({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) { return <div className="dialog-backdrop"><div className="codex-dialog"><header><div><h2>{title}</h2><p>{subtitle}</p></div><button onClick={onClose}><X size={18} /></button></header>{children}</div></div> }
 function ProjectDialog({ hosts, onClose, onCreated }: { hosts: Host[]; onClose: () => void; onCreated: () => void }) {
-  const online = hosts.filter((host) => host.status === 'online'); const [hostId, setHost] = useState(online[0]?.id || ''); const [path, setPath] = useState(''); const [entries, setEntries] = useState<FileEntry[]>([]); const [busy, setBusy] = useState(false); const [error, setError] = useState('')
-  const browse = async (nextPath = path) => { if (!hostId) return; setBusy(true); setError(''); try { const items = await api.files(hostId, nextPath); setEntries(items); if (!nextPath && items[0]) setPath(items[0].path.split('/').slice(0, -1).join('/') || '/') } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) } }
-  useEffect(() => { setEntries([]); setPath(''); if (hostId) void browse('') }, [hostId])
-  const parent = path.split('/').slice(0, -1).join('/') || '/'
-  return <Dialog title="Add folder" subtitle="Browse on the execution host. Git projects below this folder are discovered automatically." onClose={onClose}><div className="folder-dialog"><label>Host<select value={hostId} onChange={(event) => setHost(event.target.value)}>{online.map((host) => <option value={host.id} key={host.id}>{host.name}{host.type === 'ssh' ? ' · Remote' : ' · Local'}</option>)}</select></label><div className="folder-path"><button type="button" onClick={() => { setPath(parent); void browse(parent) }}>↩</button><input value={path} onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void browse() } }} /><button type="button" onClick={() => void browse()}><RefreshCw className={busy ? 'spin' : ''} size={15} /></button></div><div className="folder-list">{entries.map((entry) => <button type="button" key={entry.path} onClick={() => { setPath(entry.path); void browse(entry.path) }}><FolderGit2 size={17} /><span>{entry.name}</span>{entry.is_git && <small>Git</small>}<ChevronDown size={14} /></button>)}</div>{error && <p className="dialog-error">{error}</p>}<p className="folder-note">Adding a parent folder registers every Git repository found up to two levels below it. Existing runs are never touched.</p><footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="dialog-primary" disabled={!path || busy} onClick={async () => { setBusy(true); setError(''); try { await api.discoverProjects(hostId, path, true, 2); onCreated() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setBusy(false) } }}>{busy ? 'Discovering…' : 'Add folder'}</button></footer></div></Dialog>
+  const online = hosts.filter((host) => host.status === 'online')
+  const [hostId, setHost] = useState(online[0]?.id || '')
+  const [path, setPath] = useState('')
+  const [currentPath, setCurrentPath] = useState('')
+  const [parentPath, setParentPath] = useState<string | null>(null)
+  const [homePath, setHomePath] = useState('')
+  const [entries, setEntries] = useState<FileEntry[]>([])
+  const [busy, setBusy] = useState<'browse' | 'add' | ''>('')
+  const [error, setError] = useState('')
+  const selectedHost = online.find((host) => host.id === hostId)
+  const browse = async (nextPath = path) => {
+    if (!hostId || busy === 'add') return
+    setBusy('browse'); setError('')
+    try {
+      const listing = await api.files(hostId, nextPath)
+      setCurrentPath(listing.current_path); setPath(listing.current_path); setParentPath(listing.parent_path || null); setHomePath(listing.home_path); setEntries(listing.entries)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setBusy('') }
+  }
+  useEffect(() => { setEntries([]); setPath(''); setCurrentPath(''); setParentPath(null); setHomePath(''); if (hostId) void browse('') }, [hostId])
+  const segments = currentPath.split('/').filter(Boolean)
+  return <Dialog title="Add folder" subtitle="Choose a folder on this Mac or a connected host." onClose={onClose}><div className="folder-dialog">
+    <div className="folder-hosts">{online.map((host) => <button type="button" className={host.id === hostId ? 'selected' : ''} key={host.id} onClick={() => setHost(host.id)}>{host.type === 'ssh' ? <Server size={16} /> : <Laptop size={16} />}<span><strong>{host.name}</strong><small>{host.type === 'ssh' ? host.sshAlias : 'This Mac'}</small></span><i className={host.status} /></button>)}</div>
+    <div className="folder-toolbar"><button type="button" title="Parent folder" disabled={!parentPath || !!busy} onClick={() => parentPath && void browse(parentPath)}><ChevronLeft size={17} /></button><button type="button" title="Home folder" disabled={!homePath || !!busy} onClick={() => void browse(homePath)}><Home size={16} /></button><form onSubmit={(event) => { event.preventDefault(); void browse(path) }}><input aria-label="Folder path" value={path} onChange={(event) => setPath(event.target.value)} placeholder={selectedHost?.type === 'ssh' ? '/home/user/project' : '/Users/you/project'} /><button title="Go to path" disabled={!path.trim() || !!busy}><ChevronRight size={16} /></button></form><button type="button" title="Refresh" disabled={!!busy} onClick={() => void browse(currentPath)}><RefreshCw className={busy === 'browse' ? 'spin' : ''} size={15} /></button></div>
+    <div className="folder-breadcrumb"><button type="button" onClick={() => void browse('/')}><span>/</span></button>{segments.map((segment, index) => { const segmentPath = `/${segments.slice(0, index + 1).join('/')}`; return <span key={segmentPath}><ChevronRight size={12} /><button type="button" onClick={() => void browse(segmentPath)}>{segment}</button></span> })}</div>
+    <div className="folder-list">{busy === 'browse' && !entries.length ? <div className="folder-state"><RefreshCw className="spin" size={16} />Loading folders</div> : entries.length ? entries.map((entry) => <div className={`folder-entry ${path === entry.path && currentPath !== entry.path ? 'selected' : ''}`} key={entry.path}><button type="button" className="folder-entry-main" onDoubleClick={() => void browse(entry.path)} onClick={() => setPath(entry.path)}><span className="folder-icon">{entry.is_git ? <FolderGit2 size={17} /> : <Folder size={17} />}</span><span><strong>{entry.name}</strong><small>{entry.path}</small></span>{entry.is_git && <em>Git repository</em>}</button><button type="button" className="folder-open" title={`Open ${entry.name}`} onClick={() => void browse(entry.path)}><ChevronRight size={15} /></button></div>) : <div className="folder-state"><Folder size={18} /><strong>This folder is empty</strong><span>You can still add it as a project.</span></div>}</div>
+    <div className="folder-selection"><FolderGit2 size={16} /><span><small>Folder to add</small><strong>{path || currentPath || 'Choose a folder'}</strong></span>{path && currentPath && path !== currentPath && <button type="button" onClick={() => void browse(path)}>Open</button>}</div>
+    {error && <p className="dialog-error">{error}</p>}<p className="folder-note">Codesk registers the selected folder and Git repositories up to two levels below it. Existing agent processes are only observed and never modified.</p>
+    <footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="dialog-primary" disabled={!path.trim() || !!busy} onClick={async () => { setBusy('add'); setError(''); try { await api.discoverProjects(hostId, path.trim(), true, 2); onCreated() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setBusy('') } }}>{busy === 'add' ? <><RefreshCw className="spin" size={14} />Adding…</> : 'Add folder'}</button></footer>
+  </div></Dialog>
 }
 function ConnectionsDialog({ hosts, onClose, onChanged }: { hosts: Host[]; onClose: () => void; onChanged: () => void }) {
   const [name, setName] = useState(''); const [alias, setAlias] = useState(''); const [aliases, setAliases] = useState<string[]>([]); const [agents, setAgents] = useState<Record<string, DiscoveredAgent[]>>({}); const [busy, setBusy] = useState(''); const [error, setError] = useState('')

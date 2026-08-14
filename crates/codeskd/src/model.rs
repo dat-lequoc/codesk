@@ -148,6 +148,14 @@ pub struct FileEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct FileListing {
+    pub current_path: String,
+    pub parent_path: Option<String>,
+    pub home_path: String,
+    pub entries: Vec<FileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredProject {
     pub name: String,
     pub path: String,

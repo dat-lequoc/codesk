@@ -210,7 +210,7 @@ async fn create_project(
     state.db.create_project(&item).map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(item)))
 }
-async fn files(Query(query): Query<FilesQuery>) -> ApiResult<Json<Vec<model::FileEntry>>> {
+async fn files(Query(query): Query<FilesQuery>) -> ApiResult<Json<model::FileListing>> {
     Ok(Json(
         discovery::list_files(query.path.as_deref())
             .await

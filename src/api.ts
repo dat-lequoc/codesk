@@ -1,4 +1,4 @@
-import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, FileEntry, Host, Project, Run, RunEvent, SessionMessage } from './types'
+import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, FileListing, Host, Project, Run, RunEvent, SessionMessage } from './types'
 
 export const gatewayOrigin = location.protocol === 'http:' || location.protocol === 'https:' ? '' : 'http://127.0.0.1:4242'
 
@@ -21,7 +21,7 @@ export const api = {
   inspectHost: (id: string) => request<Record<string,string>>(`/api/hosts/${id}/inspect`),
   installHost: (id: string, artifactUrl: string) => request(`/api/hosts/${id}/install`, { method: 'POST', body: JSON.stringify({ artifactUrl }) }),
   bootstrapHost: (id: string, artifactUrl?: string) => request(`/api/hosts/${id}/bootstrap`, { method: 'POST', body: JSON.stringify({ artifactUrl }) }),
-  files: (hostId: string, path = '') => request<FileEntry[]>(`/api/hosts/${hostId}/files?path=${encodeURIComponent(path)}`),
+  files: (hostId: string, path = '') => request<FileListing>(`/api/hosts/${hostId}/files?path=${encodeURIComponent(path)}`),
   discoverProjects: (hostId: string, path: string, register = true, maxDepth = 2) => request<DiscoveredProject[]>(`/api/hosts/${hostId}/projects/discover`, { method: 'POST', body: JSON.stringify({ path, register, max_depth: maxDepth }) }),
   discoveredAgents: (hostId: string) => request<DiscoveredAgent[]>(`/api/hosts/${hostId}/agents`),
   sessionMessages: (hostId: string, projectId: string, provider: string, sessionId: string, after?: string) => request<SessionMessage[]>(`/api/projects/${hostId}/${projectId}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}/messages${after ? `?after=${encodeURIComponent(after)}` : ''}`),

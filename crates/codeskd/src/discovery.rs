@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     db::Db,
-    model::{DiscoveredAgent, DiscoveredProject, FileEntry, Project},
+    model::{DiscoveredAgent, DiscoveredProject, FileEntry, FileListing, Project},
     worktrees,
 };
 
@@ -28,8 +28,9 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-pub async fn list_files(path: Option<&str>) -> Result<Vec<FileEntry>> {
-    let requested = path.map(PathBuf::from).unwrap_or_else(home_dir);
+pub async fn list_files(path: Option<&str>) -> Result<FileListing> {
+    let home = home_dir();
+    let requested = requested_path(path, &home);
     let root = tokio::fs::canonicalize(&requested)
         .await
         .with_context(|| format!("open {}", requested.display()))?;
@@ -37,12 +38,14 @@ pub async fn list_files(path: Option<&str>) -> Result<Vec<FileEntry>> {
     let mut reader = tokio::fs::read_dir(&root).await?;
     let mut entries = Vec::new();
     while let Some(entry) = reader.next_entry().await? {
-        let file_type = entry.file_type().await?;
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
         if !file_type.is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == ".git" {
+        if name == ".git" || name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
         let child = entry.path();
@@ -54,7 +57,33 @@ pub async fn list_files(path: Option<&str>) -> Result<Vec<FileEntry>> {
         });
     }
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    Ok(entries)
+    Ok(FileListing {
+        current_path: root.to_string_lossy().into_owned(),
+        parent_path: root
+            .parent()
+            .filter(|parent| *parent != root)
+            .map(|parent| parent.to_string_lossy().into_owned()),
+        home_path: home.to_string_lossy().into_owned(),
+        entries,
+    })
+}
+
+fn requested_path(path: Option<&str>, home: &std::path::Path) -> PathBuf {
+    let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return home.to_path_buf();
+    };
+    if path == "~" {
+        return home.to_path_buf();
+    }
+    if let Some(relative) = path.strip_prefix("~/") {
+        return home.join(relative);
+    }
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        home.join(path)
+    }
 }
 
 pub async fn discover_projects(
@@ -314,6 +343,26 @@ pub fn signal_external(pid: u32, pgid: i32, signal: i32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expands_home_and_relative_browser_paths() {
+        let home = PathBuf::from("/home/me");
+        assert_eq!(requested_path(None, &home), home);
+        assert_eq!(requested_path(Some(""), &home), home);
+        assert_eq!(requested_path(Some("~"), &home), home);
+        assert_eq!(
+            requested_path(Some("~/thinkling"), &home),
+            home.join("thinkling")
+        );
+        assert_eq!(
+            requested_path(Some("thinkling/pi-agi"), &home),
+            home.join("thinkling/pi-agi")
+        );
+        assert_eq!(
+            requested_path(Some("/srv/repos"), &home),
+            PathBuf::from("/srv/repos")
+        );
+    }
 
     #[test]
     fn extracts_native_session_ids_from_transcript_paths() {
