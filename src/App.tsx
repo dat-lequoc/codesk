@@ -1,8 +1,8 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive, Bell, Bot, ChevronDown, ChevronLeft, ChevronRight, Circle, Clock3, Command, Cpu, Folder, FolderGit2, Home,
   GitBranch, Globe2, Laptop, MoreHorizontal, Plug, Plus, Radio, RefreshCw,
-  Search, Send, Server, Settings2, ShieldAlert, Square, Terminal, TreePine,
+  ListPlus, Pencil, Search, Send, Server, Settings2, ShieldAlert, Square, Terminal, TreePine,
   WifiOff, X, Zap,
 } from 'lucide-react'
 import { api, gatewayOrigin } from './api'
@@ -29,6 +29,45 @@ const observedAgents = (state: AppState) => {
 const providerName = (provider: string) => provider === 'codex' ? 'Codex' : provider === 'pi' ? 'Pi' : provider === 'claude' ? 'Claude Code' : 'Command'
 const recentFirst = (left: ProviderSession, right: ProviderSession) => right.sortAt.localeCompare(left.sortAt) || Number(right.status === 'running') - Number(left.status === 'running')
 const pathLike = (value: string) => { const query = value.trim(); return query.startsWith('/') || query.startsWith('~') || query.includes('/') }
+const mergeEvents = (prior: RunEvent[], incoming: RunEvent[]) => {
+  const merged = new Map(prior.map((event) => [event.event_id, event]))
+  for (const event of incoming) merged.set(event.event_id, event)
+  return [...merged.values()].sort((left, right) => left.run_sequence - right.run_sequence)
+}
+const coalesceStreamEvents = (events: RunEvent[]) => {
+  const result: RunEvent[] = []
+  for (const event of events) {
+    const itemId = typeof event.payload.item_id === 'string' ? event.payload.item_id : ''
+    const stream = itemId && ['assistant.message', 'reasoning.message', 'tool.output'].includes(event.kind)
+    const prior = result.at(-1)
+    if (stream && prior?.kind === event.kind && prior.channel === event.channel && prior.payload.item_id === itemId) {
+      const finalItem = event.provider_event_type === 'codex.item/completed'
+      const nextText = finalItem ? String(event.payload.text || prior.payload.text || '') : `${String(prior.payload.text || '')}${String(event.payload.text || '')}`
+      result[result.length - 1] = { ...prior, event_id: event.event_id, run_sequence: event.run_sequence, timestamp: event.timestamp, payload: { ...prior.payload, text: nextText } }
+    } else result.push(event)
+  }
+  return result
+}
+const currentBranchEvents = (events: RunEvent[]) => {
+  let rewindIndex = -1
+  for (let index = events.length - 1; index >= 0; index--) if (events[index].kind === 'thread.session' && (events[index].raw_payload as { action?: string })?.action === 'rewind') { rewindIndex = index; break }
+  if (rewindIndex < 0) return events
+  const lastTurnId = typeof events[rewindIndex].payload.last_turn_id === 'string' ? events[rewindIndex].payload.last_turn_id : null
+  if (!lastTurnId) return events.slice(rewindIndex)
+  let prefixEnd = -1
+  for (let index = 0; index < rewindIndex; index++) if (events[index].payload.turn_id === lastTurnId) prefixEnd = index
+  return [...events.slice(0, prefixEnd + 1), ...events.slice(rewindIndex)]
+}
+const pendingQueue = (events: RunEvent[]) => {
+  const queued = new Map<string, { id: string; message: string; error?: string }>()
+  for (const event of events) {
+    const id = typeof event.payload.queue_id === 'string' ? event.payload.queue_id : ''
+    if (!id) continue
+    if (event.kind === 'queue.added' || event.kind === 'queue.failed') { const raw = event.raw_payload as { error?: { message?: string } }; queued.set(id, { id, message: String(event.payload.text || ''), error: event.kind === 'queue.failed' ? raw?.error?.message || 'Failed to start' : undefined }) }
+    else if (event.kind === 'queue.started' || event.kind === 'queue.removed') queued.delete(id)
+  }
+  return [...queued.values()]
+}
 const folderMatchScore = (entry: FileEntry, rawQuery: string) => {
   const query = rawQuery.trim().toLowerCase(); const name = entry.name.toLowerCase(); const fullPath = entry.path.toLowerCase()
   if (!query) return 0
@@ -96,7 +135,8 @@ export function App() {
   useEffect(() => {
     const origin = gatewayOrigin ? gatewayOrigin.replace('http://', 'ws://').replace('https://', 'wss://') : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
     let ws: WebSocket | null = null; let stopped = false; let retry = 500
-    const connect = () => { if (stopped) return; ws = new WebSocket(`${origin}/ws`); ws.onopen = () => { retry = 500 }; ws.onmessage = (message) => { const envelope = JSON.parse(message.data); if (envelope.type === 'daemon.event') { const event = envelope.payload.event as RunEvent; setEvents((current) => { const prior = current[event.run_id] || []; return prior.some((item) => item.event_id === event.event_id) ? current : { ...current, [event.run_id]: [...prior, event].sort((a, b) => a.run_sequence - b.run_sequence) } }); if (event.kind.startsWith('run.') || event.kind.startsWith('control.')) void reload(); if (['run.completed','run.failed','run.interrupted','run.killed','run.orphaned','input.required','approval.required'].includes(event.kind) && !notified.current.has(event.event_id)) { notified.current.add(event.event_id); localStorage.setItem('codesk.notifications', JSON.stringify([...notified.current].slice(-500))); void notify(`Codesk · ${event.kind.replaceAll('.', ' ')}`, String(event.payload.text || 'Agent run updated'), event.event_id) } } else if (envelope.type.startsWith('host.') || envelope.type.startsWith('draft.')) void reload() }; ws.onclose = () => { if (!stopped) { window.setTimeout(connect, retry); retry = Math.min(10000, retry * 1.8) } }; ws.onerror = () => ws?.close() }
+    const replay = async () => { const snapshot = await api.state(); await Promise.all(snapshot.runs.map(async (item) => { const incoming = await api.events(item.hostId, item.id); setEvents((current) => ({ ...current, [item.id]: mergeEvents(current[item.id] || [], incoming) })) })) }
+    const connect = () => { if (stopped) return; ws = new WebSocket(`${origin}/ws`); ws.onopen = () => { retry = 500; void reload(); void replay().catch(() => {}) }; ws.onmessage = (message) => { const envelope = JSON.parse(message.data); if (envelope.type === 'daemon.event') { const event = envelope.payload.event as RunEvent; setEvents((current) => { const prior = current[event.run_id] || []; return prior.some((item) => item.event_id === event.event_id) ? current : { ...current, [event.run_id]: [...prior, event].sort((a, b) => a.run_sequence - b.run_sequence) } }); if (event.kind.startsWith('run.') || event.kind.startsWith('control.') || event.kind.startsWith('turn.') || event.kind.startsWith('thread.') || event.kind.startsWith('queue.')) void reload(); if (['run.completed','run.failed','run.interrupted','run.killed','run.orphaned','input.required','approval.required'].includes(event.kind) && !notified.current.has(event.event_id)) { notified.current.add(event.event_id); localStorage.setItem('codesk.notifications', JSON.stringify([...notified.current].slice(-500))); void notify(`Codesk · ${event.kind.replaceAll('.', ' ')}`, String(event.payload.text || 'Agent run updated'), event.event_id) } } else if (envelope.type.startsWith('host.') || envelope.type.startsWith('draft.')) void reload() }; ws.onclose = () => { if (!stopped) { window.setTimeout(connect, retry); retry = Math.min(10000, retry * 1.8) } }; ws.onerror = () => ws?.close() }
     connect(); return () => { stopped = true; ws?.close() }
   }, [])
   useEffect(() => {
@@ -191,14 +231,36 @@ function StartScreen({ state, draft, project, host, onProject, onStarted }: { st
 }
 
 function RunScreen({ run, events, project, host, provider }: { run: Run; events: RunEvent[]; project?: Project; host?: Host; provider?: Provider }) {
-  const [message, setMessage] = useState(''); const scroll = useRef<HTMLDivElement>(null)
+  const [message, setMessage] = useState(''); const [rewind, setRewind] = useState<{ turnId: string; lastTurnId: string | null; text: string } | null>(null); const scroll = useRef<HTMLDivElement>(null); const lastEscape = useRef(0)
   useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }) }, [events.length])
-  const send = async (event: FormEvent) => { event.preventDefault(); if (!message.trim()) return; if (provider?.live_input && active.has(run.status)) await api.input(run.hostId, run.id, message.trim()); else if (run.sessionId && provider?.resume) await api.resumeRun(run, message.trim()); else return; setMessage('') }
+  const turnRunning = run.status === 'running'
+  const canUseAttachedSession = Boolean(provider?.live_input && active.has(run.status))
+  const send = async (event: FormEvent) => { event.preventDefault(); if (!message.trim()) return; if (rewind && canUseAttachedSession) await api.input(run.hostId, run.id, message.trim(), 'fork', rewind.lastTurnId); else if (canUseAttachedSession) await api.input(run.hostId, run.id, message.trim()); else if (run.sessionId && provider?.resume) await api.resumeRun(run, message.trim()); else return; setMessage(''); setRewind(null) }
+  const queue = async () => { if (!message.trim()) return; await api.input(run.hostId, run.id, message.trim(), 'queue'); setMessage('') }
+  const branchEvents = currentBranchEvents(events)
+  const hasUserEvents = branchEvents.some((event) => event.kind === 'user.message')
+  const displayEvents = coalesceStreamEvents(branchEvents)
+  const queued = pendingQueue(branchEvents)
+  const backtrackable = branchEvents.filter((event, index, all) => event.kind === 'user.message' && typeof event.payload.turn_id === 'string' && typeof event.payload.text === 'string' && all.findIndex((candidate) => candidate.kind === 'user.message' && candidate.payload.turn_id === event.payload.turn_id) === index)
+  const backtrackableEventIds = new Set(backtrackable.map((event) => event.event_id))
+  const resolvedRequests = new Set(branchEvents.filter((event) => event.provider_event_type === 'codex.serverRequest/resolved' && event.payload.request_id !== undefined).map((event) => String(event.payload.request_id)))
+  const selectRewind = (turnId: string, text: string) => { const index = backtrackable.findIndex((event) => event.payload.turn_id === turnId); if (index < 0) return; setRewind({ turnId, lastTurnId: index > 0 ? String(backtrackable[index - 1].payload.turn_id) : null, text }); setMessage(text) }
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Escape') { lastEscape.current = 0; return }
+    if (run.status !== 'waiting_for_input' || queued.length || (!rewind && message)) return
+    event.preventDefault()
+    const now = Date.now()
+    if (!rewind && now - lastEscape.current > 900) { lastEscape.current = now; return }
+    lastEscape.current = now
+    const current = rewind ? backtrackable.findIndex((item) => item.payload.turn_id === rewind.turnId) : backtrackable.length
+    const selected = backtrackable[Math.max(0, current - 1)]
+    if (selected) selectRewind(selected.payload.turn_id as string, String(selected.payload.text))
+  }
   return <div className="thread-screen">
     <header className="thread-header"><FolderGit2 size={16} /><strong>{run.title}</strong><button><MoreHorizontal size={18} /></button><span /><button className="open-in">Open in <ChevronDown size={14} /></button><button><Settings2 size={17} /></button></header>
-    <div className="thread-scroll" ref={scroll}><div className="thread-column"><div className="user-message">{run.prompt}</div>{events.map((event) => <ThreadEvent key={event.event_id} event={event} />)}</div></div>
+    <div className="thread-scroll" ref={scroll}><div className="thread-column">{!hasUserEvents && <div className="user-message">{run.prompt}</div>}{displayEvents.map((event) => <ThreadEvent key={event.event_id} event={event} run={run} resolved={event.payload.rpc_id !== undefined && resolvedRequests.has(String(event.payload.rpc_id))} canRewind={run.status === 'waiting_for_input' && queued.length === 0 && backtrackableEventIds.has(event.event_id)} onRewind={selectRewind} />)}</div></div>
     <aside className="environment-card"><header><span>Environment</span><button onClick={() => api.openPath(run.hostId, run.cwd)}><Plus size={17} /></button></header><div><Terminal size={16} /><span>Provider</span><strong>{provider?.name || run.provider}</strong></div><div>{host?.type === 'ssh' ? <Globe2 size={16} /> : <Laptop size={16} />}<span>Location</span><strong>{host?.name}</strong></div><div><FolderGit2 size={16} /><span>Project</span><strong>{project?.name}</strong></div><div><GitBranch size={16} /><span>Workspace</span><strong>{run.worktreeId ? 'Worktree' : 'Current'}</strong></div>{run.worktreeId && !active.has(run.status) && <div className="worktree-actions"><button onClick={async () => { const status = await api.worktreeStatus(run.hostId, run.worktreeId!); alert(`${status.summary}\n\n${status.diff_stat}`) }}>Inspect</button><button onClick={async () => { const status = await api.worktreeStatus(run.hostId, run.worktreeId!); if (confirm(status.dirty ? 'This worktree has uncommitted changes. Force remove it?' : 'Remove this managed worktree?')) await api.removeWorktree(run.hostId, run.worktreeId!, status.dirty) }}>Remove</button></div>}{host?.status !== 'online' && <p><WifiOff size={13} />Viewer reconnecting; run remains on host.</p>}</aside>
-    <form className="thread-composer" onSubmit={send}><textarea disabled={active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume)} value={message} onChange={(event) => setMessage(event.target.value)} placeholder={active.has(run.status) ? (provider?.live_input ? 'Steer this run' : 'Live steering is not available for this provider') : (run.sessionId && provider?.resume ? 'Continue this session' : 'This provider session cannot be resumed')} /><div><button type="button"><Plus size={18} /></button>{active.has(run.status) && <button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}><Square size={14} />Interrupt</button>} {run.status === 'interrupting' && <><button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}>Terminate</button><button type="button" className="interrupt" onClick={() => confirm('Force kill the full process group?') && api.controlRun(run.hostId, run.id, 'kill')}>Kill</button></>}<span /><small>{run.model || provider?.name}</small>{!active.has(run.status) && run.sessionId && provider?.fork && <button type="button" onClick={() => message.trim() && api.resumeRun(run, message.trim(), true)}>Fork</button>}<button className="send" disabled={!message.trim() || (active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume))}><Send size={17} /></button></div></form>
+    <form className={`thread-composer ${rewind ? 'rewinding' : ''}`} onSubmit={send}>{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.length} queued</strong>{run.status === 'waiting_for_input' && <button type="button" onClick={() => api.startQueued(run.hostId, run.id)}>Run next</button>}</header>{queued.map((item) => <div key={item.id}><span title={item.error || item.message}>{item.message}{item.error ? ' · failed to start' : ''}</span><button type="button" title="Remove queued prompt" onClick={() => api.removeQueued(run.hostId, run.id, item.id)}><X size={12} /></button></div>)}</div>}{rewind && <div className="rewind-banner"><Pencil size={13} />Editing previous message · sending creates a branch<button type="button" title="Cancel editing previous message" onClick={() => { setRewind(null); setMessage('') }}><X size={13} /></button></div>}<textarea disabled={active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume)} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={active.has(run.status) ? (run.status === 'waiting_for_input' ? queued.length ? 'Run or remove queued prompts before editing history' : 'Continue this Codex thread · edit a message above or press Esc Esc' : provider?.live_input ? 'Steer this turn' : 'Live steering is not available for this provider') : (run.sessionId && provider?.resume ? 'Continue this session' : 'This provider session cannot be resumed')} /><div><button type="button"><Plus size={18} /></button>{turnRunning && <button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}><Square size={14} />Interrupt</button>}{run.provider === 'codex' && turnRunning && <button type="button" className="queue" disabled={!message.trim()} onClick={queue}><ListPlus size={14} />Queue</button>}{run.provider === 'codex' && run.status === 'waiting_for_input' && <button type="button" className="interrupt" onClick={() => confirm('Close this attached Codex app-server session?') && api.controlRun(run.hostId, run.id, 'terminate')}><Square size={14} />Close</button>}{run.status === 'interrupting' && <><button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}>Terminate</button><button type="button" className="interrupt" onClick={() => confirm('Force kill the full process group?') && api.controlRun(run.hostId, run.id, 'kill')}>Kill</button></>}<span /><small>{run.model || provider?.name}</small>{!active.has(run.status) && run.sessionId && provider?.fork && <button type="button" onClick={() => message.trim() && api.resumeRun(run, message.trim(), true)}>Fork</button>}<button className="send" disabled={!message.trim() || (active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume))}>{rewind ? <GitBranch size={16} /> : <Send size={17} />}</button></div></form>
   </div>
 }
 
@@ -220,7 +282,19 @@ function ObservedScreen({ host, project, agent }: { host?: Host; project?: Proje
   </div>
 }
 
-function ThreadEvent({ event }: { event: RunEvent }) { const text = event.payload.text; if (!text && !event.kind.startsWith('run.') && !event.kind.startsWith('control.')) return null; if (event.kind === 'output' || event.kind.includes('message')) return <div className={`thread-text ${event.channel === 'stderr' ? 'error' : ''}`}>{String(text || '')}</div>; return <div className="thread-status"><span>{event.kind.replaceAll('.', ' ')}</span>{event.payload.exit_code !== undefined && <code>{String(event.payload.exit_code)}</code>}</div> }
+function ThreadEvent({ event, run, resolved, canRewind, onRewind }: { event: RunEvent; run: Run; resolved: boolean; canRewind: boolean; onRewind: (turnId: string, text: string) => void }) {
+  const text = String(event.payload.text || '')
+  const rpcId = event.payload.rpc_id
+  const raw = event.raw_payload as { method?: string; params?: { permissions?: unknown; questions?: Array<{ id: string; question?: string; header?: string }> } }
+  if (event.kind.startsWith('queue.')) return null
+  if (event.kind === 'approval.required' && rpcId !== undefined && rpcId !== null && raw?.method === 'item/permissions/requestApproval') return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Permission request resolved' : 'Additional permissions required'}</strong><p>{text}</p>{!resolved && <div><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { permissions: raw.params?.permissions || {}, scope: 'turn' })}>Grant for turn</button><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { permissions: raw.params?.permissions || {}, scope: 'session' })}>Grant for session</button><button className="decline" onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { permissions: {} })}>Decline</button></div>}</div>
+  if (event.kind === 'approval.required' && rpcId !== undefined && rpcId !== null) return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Approval resolved' : 'Approval required'}</strong><p>{text}</p>{!resolved && <div><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { decision: 'accept' })}>Approve</button><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { decision: 'acceptForSession' })}>Approve for session</button><button className="decline" onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { decision: 'decline' })}>Decline</button></div>}</div>
+  if (event.kind === 'input.required' && rpcId !== undefined && rpcId !== null) return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Input submitted' : 'Codex needs input'}</strong><p>{text}</p>{!resolved && <div><button onClick={() => { const raw = event.raw_payload as { params?: { questions?: Array<{ id: string; question?: string; header?: string }> } }; const answers: Record<string, { answers: string[] }> = {}; for (const question of raw?.params?.questions || []) { const answer = prompt(question.question || question.header || 'Answer Codex'); if (answer === null) return; answers[question.id] = { answers: [answer] } } void api.providerResponse(run.hostId, run.id, rpcId, { answers }) }}>Answer</button></div>}</div>
+  if (event.kind === 'user.message') return <div className="user-message rewindable"><span>{text}</span>{canRewind && typeof event.payload.turn_id === 'string' && <button title="Edit this message and branch from here" onClick={() => onRewind(event.payload.turn_id as string, text)}><Pencil size={12} />Edit from here</button>}</div>
+  if (!text && !event.kind.startsWith('run.') && !event.kind.startsWith('control.') && !event.kind.startsWith('turn.') && !event.kind.startsWith('input.')) return null
+  if (event.kind === 'output' || event.kind.includes('message') || event.kind === 'tool.output') return <div className={`thread-text ${event.channel === 'stderr' ? 'error' : ''}`}>{text}</div>
+  return <div className="thread-status"><span>{event.kind.replaceAll('.', ' ')}</span>{event.payload.exit_code !== undefined && <code>{String(event.payload.exit_code)}</code>}</div>
+}
 
 function Dialog({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) { return <div className="dialog-backdrop"><div className="codex-dialog"><header><div><h2>{title}</h2><p>{subtitle}</p></div><button onClick={onClose}><X size={18} /></button></header>{children}</div></div> }
 function ProjectDialog({ hosts, onClose, onCreated }: { hosts: Host[]; onClose: () => void; onCreated: () => void }) {

@@ -1,4 +1,5 @@
 mod adapters;
+mod codex_app_server;
 mod db;
 mod discovery;
 mod model;
@@ -30,7 +31,8 @@ use crate::{
     db::Db,
     model::{
         CreateProjectRequest, CreateWorktreeRequest, DiscoverProjectsRequest, EventsQuery,
-        FilesQuery, Health, InputRequest, MessagesQuery, SessionsQuery, StartRunRequest,
+        FilesQuery, Health, InputRequest, MessagesQuery, ProviderResponseRequest, SessionsQuery,
+        StartRunRequest,
     },
     supervisor::Supervisor,
 };
@@ -116,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/runs/{id}", get(run))
         .route("/v1/runs/{id}/events", get(run_events))
         .route("/v1/runs/{id}/input", post(input))
+        .route("/v1/runs/{id}/response", post(provider_response))
+        .route("/v1/runs/{id}/queue/start", post(start_queued))
+        .route("/v1/runs/{id}/queue/{queue_id}", delete(remove_queued))
         .route("/v1/runs/{id}/interrupt", post(interrupt))
         .route("/v1/runs/{id}/terminate", post(terminate))
         .route("/v1/runs/{id}/kill", post(kill))
@@ -370,20 +375,56 @@ async fn input(
 ) -> ApiResult<Json<serde_json::Value>> {
     state
         .supervisor
-        .input(&id, &request.message)
+        .input(
+            &id,
+            &request.message,
+            request.request_id.as_deref(),
+            &request.delivery,
+            request.last_turn_id.as_deref(),
+        )
         .await
         .map_err(api_error)?;
     Ok(Json(json!({"ok":true,"request_id":request.request_id})))
 }
-async fn interrupt(
+async fn start_queued(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     state
         .supervisor
-        .signal(&id, libc::SIGINT, "interrupt", "interrupting")
+        .start_queued(&id)
         .await
         .map_err(api_error)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn remove_queued(
+    State(state): State<Arc<AppState>>,
+    Path((id, queue_id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state
+        .supervisor
+        .remove_queued(&id, &queue_id)
+        .await
+        .map_err(api_error)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn provider_response(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<ProviderResponseRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state
+        .supervisor
+        .provider_response(&id, request.rpc_id, request.result)
+        .await
+        .map_err(api_error)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn interrupt(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.supervisor.interrupt(&id).await.map_err(api_error)?;
     Ok(Json(json!({"ok":true})))
 }
 async fn terminate(

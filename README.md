@@ -17,8 +17,9 @@ Implemented today:
 
 - durable local and remote runs with sequenced replay;
 - Codex, Pi, Claude Code, and generic command adapters;
-- Pi live steering plus honest resume/fork fallbacks for supported provider sessions;
-- interrupt, terminate, and process-group kill;
+- persistent Codex app-server sessions with live steering, execution-host queued turns, resume/fork, Esc-Esc-style turn-boundary backtracking, and inline approval/input responses;
+- provider-native Codex turn interruption plus terminate and process-group kill escalation;
+- Pi live steering plus honest resume/fork fallbacks for other supported provider sessions;
 - managed worktree creation, inspection, retention, and cleanup;
 - SSH alias onboarding and same-OS/architecture daemon bootstrap;
 - execution-host folder browsing and recursive Git project discovery;
@@ -53,7 +54,7 @@ Run the integration suite with:
 npm test
 ```
 
-The suite verifies daemon restart survival, ordered event replay, interrupt delivery, managed-worktree isolation and cleanup, execution-host folder browsing, recursive project discovery, and non-invasive external-agent inspection.
+The suite verifies Codex app-server steering, queueing, approval responses, native interruption, prompt backtracking, daemon-restart recovery, ordered event replay, managed-worktree isolation and cleanup, execution-host folder browsing, recursive project discovery, and non-invasive external-agent inspection.
 
 Build the self-contained macOS app with:
 
