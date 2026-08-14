@@ -20,6 +20,7 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
     "dist",
     "build",
+    "__pycache__",
 ];
 
 pub fn home_dir() -> PathBuf {

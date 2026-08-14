@@ -28,6 +28,18 @@ const observedAgents = (state: AppState) => {
 }
 const providerName = (provider: string) => provider === 'codex' ? 'Codex' : provider === 'pi' ? 'Pi' : provider === 'claude' ? 'Claude Code' : 'Command'
 const recentFirst = (left: ProviderSession, right: ProviderSession) => right.sortAt.localeCompare(left.sortAt) || Number(right.status === 'running') - Number(left.status === 'running')
+const pathLike = (value: string) => { const query = value.trim(); return query.startsWith('/') || query.startsWith('~') || query.includes('/') }
+const folderMatchScore = (entry: FileEntry, rawQuery: string) => {
+  const query = rawQuery.trim().toLowerCase(); const name = entry.name.toLowerCase(); const fullPath = entry.path.toLowerCase()
+  if (!query) return 0
+  if (name === query) return 0
+  if (name.startsWith(query)) return 1
+  if (name.includes(query)) return 2
+  if (fullPath.includes(query)) return 3
+  let cursor = 0
+  for (const character of name) if (character === query[cursor]) cursor += 1
+  return cursor === query.length ? 4 : Number.POSITIVE_INFINITY
+}
 
 export function App() {
   const [state, setState] = useState<AppState>(empty)
@@ -214,33 +226,45 @@ function Dialog({ title, subtitle, onClose, children }: { title: string; subtitl
 function ProjectDialog({ hosts, onClose, onCreated }: { hosts: Host[]; onClose: () => void; onCreated: () => void }) {
   const online = hosts.filter((host) => host.status === 'online')
   const [hostId, setHost] = useState(online[0]?.id || '')
-  const [path, setPath] = useState('')
+  const [input, setInput] = useState('')
+  const [selectedPath, setSelectedPath] = useState('')
   const [currentPath, setCurrentPath] = useState('')
   const [parentPath, setParentPath] = useState<string | null>(null)
   const [homePath, setHomePath] = useState('')
   const [entries, setEntries] = useState<FileEntry[]>([])
+  const [highlighted, setHighlighted] = useState(0)
   const [busy, setBusy] = useState<'browse' | 'add' | ''>('')
   const [error, setError] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
   const selectedHost = online.find((host) => host.id === hostId)
-  const browse = async (nextPath = path) => {
+  const isPathInput = pathLike(input)
+  const filteredEntries = useMemo(() => {
+    if (isPathInput) return entries
+    return entries.map((entry) => ({ entry, score: folderMatchScore(entry, input) })).filter((item) => Number.isFinite(item.score)).sort((left, right) => left.score - right.score || left.entry.name.localeCompare(right.entry.name)).map((item) => item.entry)
+  }, [entries, input, isPathInput])
+  const browse = async (nextPath = currentPath) => {
     if (!hostId || busy === 'add') return
     setBusy('browse'); setError('')
     try {
       const listing = await api.files(hostId, nextPath)
-      setCurrentPath(listing.current_path); setPath(listing.current_path); setParentPath(listing.parent_path || null); setHomePath(listing.home_path); setEntries(listing.entries)
+      setCurrentPath(listing.current_path); setSelectedPath(listing.current_path); setInput(''); setHighlighted(0); setParentPath(listing.parent_path || null); setHomePath(listing.home_path); setEntries(listing.entries)
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setBusy('') }
   }
-  useEffect(() => { setEntries([]); setPath(''); setCurrentPath(''); setParentPath(null); setHomePath(''); if (hostId) void browse('') }, [hostId])
+  useEffect(() => { setEntries([]); setInput(''); setSelectedPath(''); setCurrentPath(''); setParentPath(null); setHomePath(''); setHighlighted(0); if (hostId) void browse('') }, [hostId])
+  useEffect(() => { setHighlighted(0) }, [input])
+  useEffect(() => { document.querySelector('.folder-entry.highlighted')?.scrollIntoView({ block: 'nearest' }) }, [highlighted])
   const segments = currentPath.split('/').filter(Boolean)
-  return <Dialog title="Add folder" subtitle="Choose a folder on this Mac or a connected host." onClose={onClose}><div className="folder-dialog">
+  const openInput = () => { const target = isPathInput ? input.trim() : filteredEntries[highlighted]?.path; if (target) void browse(target) }
+  return <Dialog title="Add folder" subtitle="Choose a folder on this Mac or a connected host." onClose={onClose}><div className="folder-dialog" onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); searchRef.current?.focus() } }}>
     <div className="folder-hosts">{online.map((host) => <button type="button" className={host.id === hostId ? 'selected' : ''} key={host.id} onClick={() => setHost(host.id)}>{host.type === 'ssh' ? <Server size={16} /> : <Laptop size={16} />}<span><strong>{host.name}</strong><small>{host.type === 'ssh' ? host.sshAlias : 'This Mac'}</small></span><i className={host.status} /></button>)}</div>
-    <div className="folder-toolbar"><button type="button" title="Parent folder" disabled={!parentPath || !!busy} onClick={() => parentPath && void browse(parentPath)}><ChevronLeft size={17} /></button><button type="button" title="Home folder" disabled={!homePath || !!busy} onClick={() => void browse(homePath)}><Home size={16} /></button><form onSubmit={(event) => { event.preventDefault(); void browse(path) }}><input aria-label="Folder path" value={path} onChange={(event) => setPath(event.target.value)} placeholder={selectedHost?.type === 'ssh' ? '/home/user/project' : '/Users/you/project'} /><button title="Go to path" disabled={!path.trim() || !!busy}><ChevronRight size={16} /></button></form><button type="button" title="Refresh" disabled={!!busy} onClick={() => void browse(currentPath)}><RefreshCw className={busy === 'browse' ? 'spin' : ''} size={15} /></button></div>
+    <div className="folder-toolbar"><button type="button" title="Parent folder" disabled={!parentPath || !!busy} onClick={() => parentPath && void browse(parentPath)}><ChevronLeft size={17} /></button><button type="button" title="Home folder" disabled={!homePath || !!busy} onClick={() => void browse(homePath)}><Home size={16} /></button><form onSubmit={(event) => { event.preventDefault(); openInput() }}><Search size={15} /><input ref={searchRef} aria-label="Search folders or enter a path" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'ArrowDown') { event.preventDefault(); setHighlighted((value) => Math.min(filteredEntries.length - 1, value + 1)) } else if (event.key === 'ArrowUp') { event.preventDefault(); setHighlighted((value) => Math.max(0, value - 1)) } else if (event.key === 'Escape') { event.preventDefault(); setInput(''); setHighlighted(0) } else if (event.key === 'Tab' && !isPathInput && filteredEntries[highlighted]) { event.preventDefault(); setInput(filteredEntries[highlighted].name) } }} placeholder={selectedHost?.type === 'ssh' ? 'Search folders or enter /home/…' : 'Search folders or enter /Users/…'} /><button title={isPathInput ? 'Go to path' : 'Open highlighted folder'} disabled={(!input.trim() && !filteredEntries[highlighted]) || !!busy}><ChevronRight size={16} /></button></form><button type="button" title="Refresh" disabled={!!busy} onClick={() => void browse(currentPath)}><RefreshCw className={busy === 'browse' ? 'spin' : ''} size={15} /></button></div>
     <div className="folder-breadcrumb"><button type="button" onClick={() => void browse('/')}><span>/</span></button>{segments.map((segment, index) => { const segmentPath = `/${segments.slice(0, index + 1).join('/')}`; return <span key={segmentPath}><ChevronRight size={12} /><button type="button" onClick={() => void browse(segmentPath)}>{segment}</button></span> })}</div>
-    <div className="folder-list">{busy === 'browse' && !entries.length ? <div className="folder-state"><RefreshCw className="spin" size={16} />Loading folders</div> : entries.length ? entries.map((entry) => <div className={`folder-entry ${path === entry.path && currentPath !== entry.path ? 'selected' : ''}`} key={entry.path}><button type="button" className="folder-entry-main" onDoubleClick={() => void browse(entry.path)} onClick={() => setPath(entry.path)}><span className="folder-icon">{entry.is_git ? <FolderGit2 size={17} /> : <Folder size={17} />}</span><span><strong>{entry.name}</strong><small>{entry.path}</small></span>{entry.is_git && <em>Git repository</em>}</button><button type="button" className="folder-open" title={`Open ${entry.name}`} onClick={() => void browse(entry.path)}><ChevronRight size={15} /></button></div>) : <div className="folder-state"><Folder size={18} /><strong>This folder is empty</strong><span>You can still add it as a project.</span></div>}</div>
-    <div className="folder-selection"><FolderGit2 size={16} /><span><small>Folder to add</small><strong>{path || currentPath || 'Choose a folder'}</strong></span>{path && currentPath && path !== currentPath && <button type="button" onClick={() => void browse(path)}>Open</button>}</div>
+    <div className="folder-search-status"><span>{input.trim() && !isPathInput ? `${filteredEntries.length} matching folder${filteredEntries.length === 1 ? '' : 's'}` : `${entries.length} folder${entries.length === 1 ? '' : 's'}`}</span><small><kbd>↑</kbd><kbd>↓</kbd> choose <kbd>Enter</kbd> open <kbd>Tab</kbd> complete <kbd>Esc</kbd> clear</small></div>
+    <div className="folder-list">{busy === 'browse' && !entries.length ? <div className="folder-state"><RefreshCw className="spin" size={16} />Loading folders</div> : filteredEntries.length ? filteredEntries.map((entry, index) => <div className={`folder-entry ${selectedPath === entry.path && currentPath !== entry.path ? 'selected' : ''} ${!isPathInput && index === highlighted ? 'highlighted' : ''}`} key={entry.path}><button type="button" className="folder-entry-main" onMouseEnter={() => setHighlighted(index)} onDoubleClick={() => void browse(entry.path)} onClick={() => setSelectedPath(entry.path)}><span className="folder-icon">{entry.is_git ? <FolderGit2 size={17} /> : <Folder size={17} />}</span><span><strong>{entry.name}</strong><small>{entry.path}</small></span>{entry.is_git && <em>Git repository</em>}</button><button type="button" className="folder-open" title={`Open ${entry.name}`} onClick={() => void browse(entry.path)}><ChevronRight size={15} /></button></div>) : <div className="folder-state">{input.trim() && !isPathInput ? <><Search size={18} /><strong>No matching folders</strong><span>Try another name or type a full path.</span></> : <><Folder size={18} /><strong>This folder is empty</strong><span>You can still add it as a project.</span></>}</div>}</div>
+    <div className="folder-selection"><FolderGit2 size={16} /><span><small>Folder to add</small><strong>{selectedPath || currentPath || 'Choose a folder'}</strong></span>{selectedPath && currentPath && selectedPath !== currentPath && <button type="button" onClick={() => void browse(selectedPath)}>Open</button>}</div>
     {error && <p className="dialog-error">{error}</p>}<p className="folder-note">Codesk registers the selected folder and Git repositories up to two levels below it. Existing agent processes are only observed and never modified.</p>
-    <footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="dialog-primary" disabled={!path.trim() || !!busy} onClick={async () => { setBusy('add'); setError(''); try { await api.discoverProjects(hostId, path.trim(), true, 2); onCreated() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setBusy('') } }}>{busy === 'add' ? <><RefreshCw className="spin" size={14} />Adding…</> : 'Add folder'}</button></footer>
+    <footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="dialog-primary" disabled={!selectedPath || !!busy} onClick={async () => { setBusy('add'); setError(''); try { await api.discoverProjects(hostId, selectedPath, true, 2); onCreated() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setBusy('') } }}>{busy === 'add' ? <><RefreshCw className="spin" size={14} />Adding…</> : 'Add folder'}</button></footer>
   </div></Dialog>
 }
 function ConnectionsDialog({ hosts, onClose, onChanged }: { hosts: Host[]; onClose: () => void; onChanged: () => void }) {
