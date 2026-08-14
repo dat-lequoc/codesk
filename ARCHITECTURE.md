@@ -155,6 +155,7 @@ POST   /v1/runs
 GET    /v1/runs/{run_id}
 GET    /v1/runs/{run_id}/events?after={sequence}
 POST   /v1/runs/{run_id}/input
+POST   /v1/runs/{run_id}/response
 POST   /v1/runs/{run_id}/interrupt
 POST   /v1/runs/{run_id}/terminate
 POST   /v1/runs/{run_id}/kill
@@ -338,10 +339,12 @@ During all disconnected states, the UI retains the daemon's last known run state
 
 ### Codex
 
-- Prefer the Codex app-server protocol if it exposes the needed streaming and interactive control reliably.
-- Use `codex exec --json` as a non-interactive fallback.
-- Extract the Codex thread/session ID.
-- Map resume/fork and cancellation to native operations when possible.
+- Codesk-managed Codex runs use the default stdio transport of `codex app-server` inside the execution-host durable runner.
+- The runner performs the JSON-RPC initialization handshake, creates/resumes/forks the thread, and keeps the app-server alive while the thread is idle so later turns do not require a new process.
+- `turn/steer`, `turn/interrupt`, approval responses, and request-user-input responses stay on the execution host and travel through the run's Unix control socket.
+- Codesk keeps queued prompts in the durable execution-host runner because the installed stable app-server schema does not expose `thread/queue/*`. A normally completed turn starts the next prompt automatically; interruption pauses the queue until the user starts or removes it.
+- Esc-Esc-style prompt editing uses the stable `thread/fork.lastTurnId` boundary. Codesk forks through the turn immediately before the selected prompt, or starts a fresh thread when editing the first prompt. Conversation history branches, but existing workspace file changes are not reverted automatically.
+- Raw app-server messages and normalized turn/item events are persisted in the same sequenced journal used for SSH reconnect and daemon recovery.
 
 ### Pi
 

@@ -145,6 +145,11 @@ impl Supervisor {
             args: run.args.clone(),
             run_dir: run_dir.to_string_lossy().into_owned(),
             input_socket: input_socket(&id).to_string_lossy().into_owned(),
+            prompt: request.prompt.clone(),
+            model: request.model.clone(),
+            operation: request.operation.clone(),
+            resume_session_id: request.resume_session_id.clone(),
+            last_turn_id: request.last_turn_id.clone(),
         };
         let spec_path = run_dir.join("runner.json");
         tokio::fs::write(&spec_path, serde_json::to_vec_pretty(&runner_spec)?).await?;
@@ -172,7 +177,7 @@ impl Supervisor {
         let pgid = pid as i32;
         let ready_path = run_dir.join("ready");
         let mut runner_ready = false;
-        for _ in 0..100 {
+        for _ in 0..500 {
             if ready_path.exists() {
                 runner_ready = true;
                 break;
@@ -253,6 +258,11 @@ impl Supervisor {
                                         if let Some(session) = session {
                                             let _ = this.db.set_provider_session(&run.id, &session);
                                         }
+                                        if let Some(status) =
+                                            adapters::status_from_event(&run.provider, raw.as_ref())
+                                        {
+                                            let _ = this.db.update_run_status(&run.id, status);
+                                        }
                                         let _ = this.emit(
                                             &run.id,
                                             &kind,
@@ -332,18 +342,128 @@ impl Supervisor {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+        let _ = tokio::fs::remove_file(input_socket(&run.id)).await;
     }
 
-    pub async fn input(&self, run_id: &str, message: &str) -> Result<()> {
+    pub async fn input(
+        &self,
+        run_id: &str,
+        message: &str,
+        request_id: Option<&str>,
+        delivery: &str,
+        last_turn_id: Option<&str>,
+    ) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
-        let encoded = adapters::encode_input(&run.provider, message)?;
+        let request_id = request_id
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let encoded =
+            adapters::encode_input(&run.provider, message, &request_id, delivery, last_turn_id)?;
         self.write_input(run_id, &encoded).await?;
         self.emit(
             run_id,
-            "input.accepted",
-            Some("steer"),
+            "input.submitted",
+            Some(delivery),
             None,
-            json!({"message":message}),
+            json!({"message":message,"request_id":request_id,"delivery":delivery,"last_turn_id":last_turn_id}),
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub async fn start_queued(&self, run_id: &str) -> Result<()> {
+        let run = self.db.run(run_id)?.context("run not found")?;
+        anyhow::ensure!(
+            run.provider == "codex",
+            "queued turns are only supported for Codex"
+        );
+        let request_id = Uuid::new_v4().to_string();
+        self.write_input(
+            run_id,
+            &json!({"type":"queueStart","requestId":request_id}).to_string(),
+        )
+        .await?;
+        self.emit(
+            run_id,
+            "queue.start.submitted",
+            Some("codex"),
+            None,
+            json!({"request_id":request_id}),
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub async fn remove_queued(&self, run_id: &str, queue_id: &str) -> Result<()> {
+        let run = self.db.run(run_id)?.context("run not found")?;
+        anyhow::ensure!(
+            run.provider == "codex",
+            "queued turns are only supported for Codex"
+        );
+        let request_id = Uuid::new_v4().to_string();
+        self.write_input(
+            run_id,
+            &json!({"type":"queueRemove","requestId":request_id,"queueId":queue_id}).to_string(),
+        )
+        .await?;
+        self.emit(
+            run_id,
+            "queue.remove.submitted",
+            Some("codex"),
+            None,
+            json!({"request_id":request_id,"queue_id":queue_id}),
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub async fn provider_response(
+        &self,
+        run_id: &str,
+        rpc_id: serde_json::Value,
+        result: serde_json::Value,
+    ) -> Result<()> {
+        let run = self.db.run(run_id)?.context("run not found")?;
+        anyhow::ensure!(
+            run.provider == "codex",
+            "provider responses are only supported for Codex"
+        );
+        self.write_input(
+            run_id,
+            &json!({"type":"respond","rpcId":rpc_id,"result":result}).to_string(),
+        )
+        .await?;
+        self.emit(
+            run_id,
+            "provider.response.submitted",
+            Some("codex"),
+            None,
+            json!({"rpc_id":rpc_id}),
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub async fn interrupt(&self, run_id: &str) -> Result<()> {
+        let run = self.db.run(run_id)?.context("run not found")?;
+        if run.provider != "codex" {
+            return self
+                .signal(run_id, libc::SIGINT, "interrupt", "interrupting")
+                .await;
+        }
+        let request_id = Uuid::new_v4().to_string();
+        self.write_input(
+            run_id,
+            &json!({"type":"interrupt","requestId":request_id}).to_string(),
+        )
+        .await?;
+        self.db.update_run_status(run_id, "interrupting")?;
+        self.emit(
+            run_id,
+            "control.submitted",
+            Some("codex.turn/interrupt"),
+            None,
+            json!({"action":"interrupt","request_id":request_id}),
             None,
         )?;
         Ok(())
@@ -430,7 +550,7 @@ fn process_alive(pgid: i32) -> bool {
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 fn input_socket(run_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("codesk-{}.sock", &run_id[..16.min(run_id.len())]))
+    std::env::temp_dir().join(format!("codesk-{run_id}.sock"))
 }
 fn is_terminal(run: Option<impl std::borrow::Borrow<Run>>) -> bool {
     run.map(|value| {

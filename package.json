@@ -8,7 +8,7 @@
     "build": "vite build",
     "build:gateway": "node scripts/build-gateway.mjs",
     "start": "node server/index.mjs",
-    "test": "cargo test --workspace && node scripts/test-daemon-survival.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs && node scripts/test-drafts.mjs",
+    "test": "cargo build -p codeskd && cargo test -p codeskd && node scripts/test-codex-app-server.mjs && node scripts/test-gateway-codex.mjs && node scripts/test-daemon-survival.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs && node scripts/test-drafts.mjs",
     "check": "tsc --noEmit",
     "desktop": "tauri dev",
     "desktop:build": "npm run build:gateway && cargo build -p codeskd && tauri build"

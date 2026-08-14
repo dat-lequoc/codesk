@@ -39,5 +39,8 @@ export const api = {
   resumeRun: (run: Run, prompt: string, fork = false) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify({ hostId: run.hostId, project_id: run.projectId, provider: run.provider, model: run.model, prompt, workspace_mode: fork ? 'managed_worktree' : (run.worktreeId ? 'existing_worktree' : 'current_checkout'), worktree_id: fork ? undefined : run.worktreeId, parent_run_id: run.id, operation: fork ? 'fork' : 'resume', resume_session_id: run.sessionId }) }),
   events: (hostId: string, id: string, after = 0) => request<RunEvent[]>(`/api/runs/${hostId}/${id}/events?after=${after}`),
   controlRun: (hostId: string, id: string, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/runs/${hostId}/${id}/${action}`, { method: 'POST' }),
-  input: (hostId: string, id: string, message: string) => request(`/api/runs/${hostId}/${id}/input`, { method: 'POST', body: JSON.stringify({ message, request_id: crypto.randomUUID() }) }),
+  input: (hostId: string, id: string, message: string, delivery: 'auto' | 'steer' | 'queue' | 'fork' = 'auto', lastTurnId?: string | null) => request(`/api/runs/${hostId}/${id}/input`, { method: 'POST', body: JSON.stringify({ message, delivery, last_turn_id: lastTurnId, request_id: crypto.randomUUID() }) }),
+  providerResponse: (hostId: string, id: string, rpcId: unknown, result: unknown) => request(`/api/runs/${hostId}/${id}/response`, { method: 'POST', body: JSON.stringify({ rpc_id: rpcId, result }) }),
+  startQueued: (hostId: string, id: string) => request(`/api/runs/${hostId}/${id}/queue/start`, { method: 'POST', body: '{}' }),
+  removeQueued: (hostId: string, id: string, queueId: string) => request(`/api/runs/${hostId}/${id}/queue/${encodeURIComponent(queueId)}`, { method: 'DELETE' }),
 }

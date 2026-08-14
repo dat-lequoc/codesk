@@ -98,6 +98,8 @@ pub struct StartRunRequest {
     pub args: Vec<String>,
     pub operation: Option<String>,
     pub resume_session_id: Option<String>,
+    #[serde(alias = "before_turn_id")]
+    pub last_turn_id: Option<String>,
 }
 
 fn default_workspace_mode() -> String {
@@ -108,6 +110,20 @@ fn default_workspace_mode() -> String {
 pub struct InputRequest {
     pub message: String,
     pub request_id: Option<String>,
+    #[serde(default = "default_input_delivery")]
+    pub delivery: String,
+    #[serde(alias = "before_turn_id")]
+    pub last_turn_id: Option<String>,
+}
+
+fn default_input_delivery() -> String {
+    "auto".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderResponseRequest {
+    pub rpc_id: Value,
+    pub result: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +251,11 @@ pub struct RunnerSpec {
     pub args: Vec<String>,
     pub run_dir: String,
     pub input_socket: String,
+    pub prompt: String,
+    pub model: Option<String>,
+    pub operation: Option<String>,
+    pub resume_session_id: Option<String>,
+    pub last_turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
