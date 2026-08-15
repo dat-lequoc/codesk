@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/health", get(health))
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/projects", get(projects).post(create_project))
+        .route("/v1/projects/{id}/git-context", get(project_git_context))
         .route("/v1/projects/{id}/sessions", get(project_sessions))
         .route(
             "/v1/projects/{id}/sessions/{provider}/{session_id}/messages",
@@ -214,6 +215,19 @@ async fn create_project(
     };
     state.db.create_project(&item).map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(item)))
+}
+async fn project_git_context(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<model::GitContext>> {
+    let project = state
+        .db
+        .project(&id)
+        .map_err(api_error)?
+        .ok_or_else(|| api_error("project not found"))?;
+    Ok(Json(
+        worktrees::git_context(PathBuf::from(project.path).as_path()).await,
+    ))
 }
 async fn files(Query(query): Query<FilesQuery>) -> ApiResult<Json<model::FileListing>> {
     Ok(Json(

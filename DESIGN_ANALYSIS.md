@@ -1,5 +1,7 @@
 # Codesk Design Audit: Matching Codex's Design and Organization
 
+> Implementation tracking: see [DESIGN_IMPLEMENTATION_STATUS.md](./DESIGN_IMPLEMENTATION_STATUS.md) for the current completed, partial, missing, and verified items. The audit below remains the design rationale and target state.
+
 ## Executive summary
 
 The central difference between Codesk and Codex is organizational, not merely visual.

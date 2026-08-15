@@ -1,4 +1,4 @@
-import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, FileListing, Host, Project, Run, RunEvent, SessionMessage } from './types'
+import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, FileListing, GitContext, Host, Project, ProviderSession, Run, RunEvent, SessionMessage } from './types'
 
 export const gatewayOrigin = location.protocol === 'http:' || location.protocol === 'https:' ? '' : 'http://127.0.0.1:4242'
 
@@ -14,6 +14,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   state: () => request<AppState>('/api/state'),
+  navigation: () => request<AppState>('/api/navigation'),
+  updateSettings: (input: Partial<AppState['settings']>) => request<AppState['settings']>('/api/settings', { method: 'PATCH', body: JSON.stringify(input) }),
   sshAliases: () => request<string[]>('/api/ssh-aliases'),
   createHost: (input: { name: string; sshAlias: string; daemonPort?: number }) => request<Host>('/api/hosts', { method: 'POST', body: JSON.stringify(input) }),
   removeHost: (id: string) => request(`/api/hosts/${id}`, { method: 'DELETE' }),
@@ -25,9 +27,10 @@ export const api = {
   discoverProjects: (hostId: string, path: string, register = true, maxDepth = 2) => request<DiscoveredProject[]>(`/api/hosts/${hostId}/projects/discover`, { method: 'POST', body: JSON.stringify({ path, register, max_depth: maxDepth }) }),
   discoveredAgents: (hostId: string) => request<DiscoveredAgent[]>(`/api/hosts/${hostId}/agents`),
   sessionMessages: (hostId: string, projectId: string, provider: string, sessionId: string, after?: string) => request<SessionMessage[]>(`/api/projects/${hostId}/${projectId}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}/messages${after ? `?after=${encodeURIComponent(after)}` : ''}`),
-  projectSessions: (hostId: string, projectId: string, limit: number) => request<import('./types').ProviderSession[]>(`/api/projects/${hostId}/${projectId}/sessions?limit=${limit}`),
+  projectSessions: (hostId: string, projectId: string, limit: number) => request<ProviderSession[]>(`/api/projects/${hostId}/${projectId}/sessions?limit=${limit}`),
+  projectContext: (hostId: string, projectId: string) => request<GitContext>(`/api/projects/${hostId}/${projectId}/git-context`),
   controlDiscoveredAgent: (hostId: string, pid: number, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/agents/${hostId}/${pid}/${action}`, { method: 'POST' }),
-  worktreeStatus: (hostId: string, id: string) => request<{ worktree: { path: string }; dirty: boolean; summary: string; diff_stat: string }>(`/api/worktrees/${hostId}/${id}/status`),
+  worktreeStatus: (hostId: string, id: string) => request<{ worktree: { path: string; branch?: string | null }; dirty: boolean; summary: string; diff_stat: string }>(`/api/worktrees/${hostId}/${id}/status`),
   removeWorktree: (hostId: string, id: string, force = false) => request(`/api/worktrees/${hostId}/${id}?force=${force}`, { method: 'DELETE' }),
   openPath: (hostId: string, path: string) => request('/api/open-path', { method: 'POST', body: JSON.stringify({ hostId, path }) }),
   createProject: (input: { hostId: string; name: string; path: string }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),

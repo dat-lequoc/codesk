@@ -20,6 +20,13 @@ export type Project = {
   createdAt: string
 }
 
+export type GitContext = {
+  branch?: string | null
+  available: boolean
+  detached: boolean
+  dirty: boolean
+}
+
 export type Provider = {
   id: 'codex' | 'pi' | 'claude' | 'shell'
   name: string
@@ -79,7 +86,11 @@ export type AppState = {
   sessions: ProviderSession[]
   drafts: DraftSession[]
   providersByHost: Record<string, Provider[]>
-  settings: { notifications: boolean }
+  settings: {
+    notifications: boolean
+    pinnedSessionKeys: string[]
+    pinnedSessions: ProviderSession[]
+  }
   discoveredAgentsByHost?: Record<string, DiscoveredAgent[]>
 }
 

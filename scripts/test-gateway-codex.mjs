@@ -121,6 +121,9 @@ try {
   await waitFor('gateway host connection', async () => (await jsonRequest(gatewayBase, '/api/state')).hosts.find((host) => host.id === 'local' && host.status === 'online'))
 
   const project = await jsonRequest(gatewayBase, '/api/projects', { method: 'POST', body: JSON.stringify({ hostId: 'local', name: 'gateway-codex', path: root }) })
+  await jsonRequest(gatewayBase, '/api/state')
+  const navigation = await jsonRequest(gatewayBase, '/api/navigation')
+  assert(navigation.projects.some((item) => item.id === project.id), 'fast navigation snapshot did not retain the project')
   const run = managedRun = await jsonRequest(gatewayBase, '/api/runs', { method: 'POST', body: JSON.stringify({ hostId: 'local', project_id: project.id, provider: 'codex', prompt: 'through gateway', workspace_mode: 'current_checkout' }) })
   await waitFor('gateway event stream', async () => (await jsonRequest(gatewayBase, `/api/runs/local/${run.id}/events?after=0`)).find((event) => event.kind === 'assistant.message' && event.payload.text === 'gateway:through gateway'))
 

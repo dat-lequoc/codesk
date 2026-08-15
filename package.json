@@ -18,13 +18,15 @@
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
-    "@tauri-apps/cli": "^2.11.4",
-    "@tauri-apps/api": "^2.11.1",
     "@vitejs/plugin-react": "^5.0.0",
     "concurrently": "^9.2.0",
     "typescript": "^5.9.2",

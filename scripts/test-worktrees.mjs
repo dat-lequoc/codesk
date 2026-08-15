@@ -12,6 +12,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); async fu
 try {
   for (let i=0;i<60;i++){try{await request('/v1/health');break}catch{await wait(100)}}
   const project=await request('/v1/projects',{method:'POST',body:JSON.stringify({name:'worktree-test',path:repo})})
+  const context=await request(`/v1/projects/${project.id}/git-context`);if(!context.available||context.branch!=='main'||context.detached||context.dirty)throw new Error(`unexpected Git context ${JSON.stringify(context)}`)
   const run=await request('/v1/runs',{method:'POST',body:JSON.stringify({project_id:project.id,provider:'shell',prompt:'isolated write',workspace_mode:'managed_worktree',base_ref:'main',command:'sh',args:['-c','echo isolated > result.txt']})})
   for(let i=0;i<40;i++){const state=await request(`/v1/runs/${run.id}`);if(state.status==='completed')break;await wait(100)}
   const finished=await request(`/v1/runs/${run.id}`);if(finished.status!=='completed'||!finished.worktree_id)throw new Error(`unexpected run state ${finished.status}`)

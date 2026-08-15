@@ -9,6 +9,8 @@ import { startDraft } from '../server/drafts.mjs'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codesk-drafts-'))
 try {
   const first = new Store(root)
+  assert.deepEqual(first.state.settings.pinnedSessionKeys, [])
+  assert.deepEqual(first.state.settings.pinnedSessions, [])
   const one = first.createDraft({ id: randomUUID(), hostId: 'remote', projectId: 'pi-agi' })
   const two = first.createDraft({ id: randomUUID(), hostId: 'remote', projectId: 'pi-agi' })
   assert.notEqual(one.id, two.id)
@@ -23,6 +25,14 @@ try {
   assert.equal(edited.provider, 'pi')
   assert.equal(edited.workspaceMode, 'managed_worktree')
   assert.equal(restarted.deleteDraft(two.id), true)
+
+  const pinnedSession = { id: 'session-1', hostId: 'remote', projectId: 'pi-agi', provider: 'codex', nativeSessionId: 'native-1', cwd: '/srv/pi-agi', title: 'Design analysis', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sortAt: new Date().toISOString(), status: 'idle' }
+  restarted.updateSettings({ pinnedSessionKeys: ['remote:session-1'], pinnedSessions: [pinnedSession] })
+  restarted.updateNavigationHost('remote', { hostId: 'remote', projects: [{ id: 'pi-agi', hostId: 'remote', name: 'pi-agi' }], sessions: [pinnedSession], runs: [], providers: [], updatedAt: new Date().toISOString() })
+  const withNavigation = new Store(root)
+  assert.deepEqual(withNavigation.state.settings.pinnedSessionKeys, ['remote:session-1'])
+  assert.equal(withNavigation.state.settings.pinnedSessions[0].title, 'Design analysis')
+  assert.equal(withNavigation.state.navigationByHost.remote.projects[0].name, 'pi-agi')
 
   const afterReconciliation = new Store(root)
   assert.deepEqual(afterReconciliation.state.drafts.map((draft) => draft.id), [one.id])

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     db::Db,
-    model::{CreateWorktreeRequest, Project, Worktree, WorktreeStatus},
+    model::{CreateWorktreeRequest, GitContext, Project, Worktree, WorktreeStatus},
 };
 
 pub async fn detect_repo(path: &Path) -> Option<String> {
@@ -18,6 +18,36 @@ pub async fn detect_repo(path: &Path) -> Option<String> {
         .await
         .ok()
         .map(|value| value.trim().to_string())
+}
+
+pub async fn git_context(path: &Path) -> GitContext {
+    let current_branch = git(path, ["branch", "--show-current"])
+        .await
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let revision = if current_branch.is_none() {
+        git(path, ["rev-parse", "--short", "HEAD"])
+            .await
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    let available = current_branch.is_some() || revision.is_some();
+    let detached = available && current_branch.is_none();
+    let branch = current_branch.or(revision);
+    let dirty = git(path, ["status", "--porcelain"])
+        .await
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    GitContext {
+        branch,
+        available,
+        detached,
+        dirty,
+    }
 }
 
 pub async fn status(item: &Worktree) -> Result<WorktreeStatus> {

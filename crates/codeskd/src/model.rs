@@ -30,6 +30,14 @@ pub struct WorktreeStatus {
     pub diff_stat: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GitContext {
+    pub branch: Option<String>,
+    pub available: bool,
+    pub detached: bool,
+    pub dirty: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
