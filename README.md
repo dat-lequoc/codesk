@@ -1,6 +1,11 @@
 # Codesk
 
-Codesk is one desktop app for monitoring and controlling coding-agent harnesses across local and remote machines.
+> Open-source control plane for coding agents, local or remote.
+
+Codesk is a desktop app for running, monitoring, inspecting, and steering coding-agent harnesses from one place. The agent stays on the machine where the project lives—your laptop, workstation, or VPS—and Codesk connects locally or over SSH.
+
+> [!WARNING]
+> Codesk is early-stage software. Provider adapters and UI surfaces may change while the project settles.
 
 <p align="center">
   <img src="./docs/for_readme.png" alt="Codesk showing a live agent trajectory and tool inspector" width="1200">
@@ -21,6 +26,10 @@ Codex has first-class support through its app server: persistent sessions, live 
 - **Keep work isolated.** Run in the current checkout or use managed Git worktrees that can be inspected and cleaned up from the app.
 
 The core rule is simple: **execution follows the project**. Codesk is the viewer and controller; the agent runs where the code lives.
+
+## Status
+
+The desktop client is currently developed and tested on macOS. Execution hosts can be macOS or Linux, including remote hosts reached through SSH.
 
 ## Development
 
@@ -64,3 +73,6 @@ The daemon binds to loopback and is reached through SSH forwarding.
 - [Requirements](./REQUIREMENTS.md)
 - [Roadmap](./docs/roadmap.md)
 - [Performance benchmark](./docs/performance-benchmark.md)
+- [Contributing](./CONTRIBUTING.md)
+- [Security policy](./SECURITY.md)
+- [License](./LICENSE)

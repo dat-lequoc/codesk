@@ -5,3 +5,11 @@ target/
 src-tauri/binaries/codesk-gateway
 .DS_Store
 *.log
+
+# Local QA captures and generated handoff files
+artifacts/
+Screenshot *.png
+Screenshot *.jpg
+main--*.js
+preload.js
+logo.jpg

@@ -2502,14 +2502,14 @@ mod tests {
     fn resolves_pi_and_claude_transcripts_by_native_id() {
         let home =
             std::env::temp_dir().join(format!("codesk-source-path-{}", uuid::Uuid::new_v4()));
-        let project_path = PathBuf::from("/home/nightfury/thinkling/pi-agi");
+        let project_path = PathBuf::from("/home/me/thinkling/pi-agi");
         let project = test_project(&project_path);
         let pi_dir = home
             .join(".pi/agent/sessions")
-            .join("--home-nightfury-thinkling-pi-agi--");
+            .join("--home-me-thinkling-pi-agi--");
         let claude_dir = home
             .join(".claude/projects")
-            .join("-home-nightfury-thinkling-pi-agi");
+            .join("-home-me-thinkling-pi-agi");
         fs::create_dir_all(&pi_dir).unwrap();
         fs::create_dir_all(&claude_dir).unwrap();
         let pi_path = pi_dir.join("2026-08-13T200000Z_pi-native.jsonl");
