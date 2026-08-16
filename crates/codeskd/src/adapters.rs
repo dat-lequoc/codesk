@@ -13,6 +13,9 @@ pub struct CommandSpec {
 pub fn capabilities() -> Vec<AdapterCapability> {
     vec![
         capability("codex", "Codex", "codex", true, true, true, true, true, vec!["Esc-Esc style rewind creates a source-preserving thread fork; it does not revert files already changed in the workspace".into()]),
+        capability("kiro", "Kiro CLI", "kiro-cli", true, true, true, false, true, vec!["Kiro ACP does not expose mid-turn steering; messages sent during an active turn are queued by Codesk".into()]),
+        capability("dsh", "DeepSeek Harness", "dsh", true, true, true, true, true, vec!["Codesk starts a private loopback DSH web host for durable resume, fork, steer, and queue support".into()]),
+        capability("agy", "Antigravity", "agy", true, false, true, false, false, vec!["Antigravity print-mode turns cannot be steered; follow-ups resume the same conversation in a new managed process".into(), "Antigravity CLI does not expose a safe conversation fork operation".into()]),
         capability("pi", "Pi", "pi", true, true, true, true, false, vec![]),
         capability("claude", "Claude Code", "claude", true, false, true, true, false, vec!["Active print-mode sessions cannot accept live steering; use resume or fork after completion".into()]),
         AdapterCapability {
@@ -56,7 +59,11 @@ fn capability(
     }
 }
 
-pub fn build(request: &StartRunRequest, session_key: &str) -> anyhow::Result<CommandSpec> {
+pub fn build(
+    request: &StartRunRequest,
+    session_key: &str,
+    cwd: &str,
+) -> anyhow::Result<CommandSpec> {
     let model = request
         .model
         .as_deref()
@@ -99,6 +106,79 @@ pub fn build(request: &StartRunRequest, session_key: &str) -> anyhow::Result<Com
                 } else {
                     session_key.into()
                 }),
+            }
+        }
+        "kiro" => {
+            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
+                anyhow::ensure!(
+                    request.resume_session_id.as_deref().is_some(),
+                    "resume_session_id is required"
+                );
+            }
+            anyhow::ensure!(
+                request.operation.as_deref() != Some("fork"),
+                "Kiro ACP does not expose a safe fork operation"
+            );
+            let mut args = vec!["acp".into()];
+            if let Some(value) = model {
+                args.extend(["--model".into(), value.into()]);
+            }
+            CommandSpec {
+                command: provider_command("kiro-cli")?,
+                args,
+                session_id: request.resume_session_id.clone(),
+            }
+        }
+        "dsh" => {
+            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
+                anyhow::ensure!(
+                    request.resume_session_id.as_deref().is_some(),
+                    "resume_session_id is required"
+                );
+            }
+            CommandSpec {
+                command: provider_command("dsh")?,
+                args: vec![
+                    "web".into(),
+                    "--host".into(),
+                    "127.0.0.1".into(),
+                    "--port".into(),
+                    "0".into(),
+                ],
+                session_id: request.resume_session_id.clone(),
+            }
+        }
+        "agy" => {
+            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
+                anyhow::ensure!(
+                    request.resume_session_id.as_deref().is_some(),
+                    "resume_session_id is required"
+                );
+            }
+            anyhow::ensure!(
+                request.operation.as_deref() != Some("fork"),
+                "Antigravity CLI does not expose a safe fork operation"
+            );
+            let mut args = Vec::new();
+            if let Some(session) = request.resume_session_id.as_deref() {
+                args.extend(["--conversation".into(), session.into()]);
+            }
+            args.extend([
+                "--add-dir".into(),
+                cwd.into(),
+                "--print".into(),
+                request.prompt.clone(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--dangerously-skip-permissions".into(),
+            ]);
+            if let Some(value) = model {
+                args.extend(["--model".into(), value.into()]);
+            }
+            CommandSpec {
+                command: provider_command("agy")?,
+                args,
+                session_id: request.resume_session_id.clone(),
             }
         }
         "claude" => {
@@ -179,6 +259,34 @@ pub fn encode_input(
             json!({"id":uuid::Uuid::new_v4().to_string(),"type":"steer","message":message})
                 .to_string(),
         ),
+        "kiro" => match delivery {
+            "auto" | "steer" | "queue" => Ok(json!({
+                "type":"submit",
+                "message":message,
+                "requestId":request_id,
+                "delivery":delivery,
+            })
+            .to_string()),
+            value => anyhow::bail!("unsupported Kiro input delivery: {value}"),
+        },
+        "dsh" => match delivery {
+            "auto" | "steer" | "queue" => Ok(json!({
+                "type":"submit",
+                "message":message,
+                "requestId":request_id,
+                "delivery":delivery,
+            })
+            .to_string()),
+            "fork" => Ok(json!({
+                "type":"submit",
+                "message":message,
+                "requestId":request_id,
+                "delivery":"fork",
+                "lastTurnId":last_turn_id,
+            })
+            .to_string()),
+            value => anyhow::bail!("unsupported DSH input delivery: {value}"),
+        },
         "shell" => Ok(message.to_string()),
         _ => anyhow::bail!("{provider} adapter does not support live steering yet"),
     }
@@ -203,6 +311,15 @@ pub fn normalize_line(
             None,
         );
     };
+    if provider == "kiro" {
+        return normalize_kiro(raw);
+    }
+    if provider == "dsh" {
+        return normalize_dsh(raw);
+    }
+    if provider == "agy" {
+        return normalize_agy(raw);
+    }
     let event_type = raw
         .get("method")
         .or_else(|| raw.get("type"))
@@ -320,11 +437,625 @@ pub fn normalize_line(
     )
 }
 
+fn normalize_agy(raw: Value) -> (String, Option<String>, Value, Option<Value>, Option<String>) {
+    let event_type = raw.get("event").and_then(Value::as_str).unwrap_or("event");
+    let session_id = raw
+        .get("conversation_id")
+        .or_else(|| raw.pointer("/step_update/conversation_id"))
+        .or_else(|| raw.pointer("/result/conversation_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if event_type == "init" {
+        return (
+            "thread.session".to_string(),
+            Some("agy.init".to_string()),
+            json!({
+                "text":"",
+                "cwd":raw.pointer("/init/cwd"),
+                "permission_mode":raw.pointer("/init/permission_mode"),
+            }),
+            Some(raw),
+            session_id,
+        );
+    }
+    if event_type == "result" {
+        let result = raw.get("result").unwrap_or(&Value::Null);
+        let usage = result.get("usage").unwrap_or(&Value::Null);
+        return (
+            if result.get("status").and_then(Value::as_str) == Some("SUCCESS") {
+                "usage.updated"
+            } else {
+                "run.error"
+            }
+            .to_string(),
+            Some("agy.result".to_string()),
+            json!({
+                "text":if result.get("status").and_then(Value::as_str) == Some("SUCCESS") { "" } else { result.get("response").and_then(Value::as_str).unwrap_or("Antigravity turn failed") },
+                "status":result.get("status"),
+                "duration_seconds":result.get("duration_seconds"),
+                "num_turns":result.get("num_turns"),
+                "input_tokens":usage.get("input_tokens"),
+                "output_tokens":usage.get("output_tokens"),
+                "thinking_tokens":usage.get("thinking_tokens"),
+                "cache_read_tokens":usage.get("cache_read_tokens"),
+                "total_tokens":usage.get("total_tokens"),
+            }),
+            Some(raw),
+            session_id,
+        );
+    }
+
+    let step = raw.get("step_update").unwrap_or(&Value::Null);
+    let step_type = step
+        .get("step_type")
+        .and_then(Value::as_str)
+        .unwrap_or("step_update");
+    let step_index = step.get("step_index").and_then(Value::as_u64);
+    let state = step.get("state").and_then(Value::as_str).unwrap_or("");
+    let tool = step.get("tool_info").unwrap_or(&Value::Null);
+    let tool_name = tool
+        .get("name")
+        .or_else(|| step.get("tool_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("Antigravity tool");
+    let parameters = tool.get("parameters").unwrap_or(&Value::Null);
+    let output = tool.get("output").unwrap_or(&Value::Null);
+    let path = agy_tool_path(parameters);
+    let file_change = agy_file_tool(tool_name) && path.is_some();
+    let text = if step_type == "agent_response" {
+        step.get("text_delta")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else if step_type.contains("thinking") || step_type.contains("reasoning") {
+        step.get("text_delta")
+            .or_else(|| step.get("thinking"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else {
+        agy_value_text(output)
+    };
+    let tool_title = parameters
+        .get("CommandLine")
+        .or_else(|| parameters.get("command"))
+        .or_else(|| parameters.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or(tool_name);
+    let kind = if step_type == "agent_response" {
+        "assistant.message"
+    } else if step_type.contains("thinking") || step_type.contains("reasoning") {
+        "reasoning.message"
+    } else if step_type == "tool" && file_change {
+        "file.change"
+    } else if step_type == "tool" {
+        "tool.output"
+    } else {
+        "agent.event"
+    };
+    let changes = path
+        .map(|path| vec![json!({"path":path,"kind":agy_change_kind(tool_name)})])
+        .unwrap_or_default();
+    (
+        kind.to_string(),
+        Some(format!("agy.{event_type}/{step_type}")),
+        json!({
+            "text":text,
+            "item_id":step_index.map(|index| format!("agy-step-{index}")),
+            "sequence":step_index,
+            "tool_title":if step_type == "tool" { Some(tool_title) } else { None },
+            "tool_kind":if step_type == "tool" { Some(tool_name) } else { None },
+            "tool_status":if step_type == "tool" { Some(if state == "DONE" { "completed" } else if state == "ERROR" || state == "FAILED" { "failed" } else { "in_progress" }) } else { None },
+            "raw_input":if step_type == "tool" { Some(parameters) } else { None },
+            "raw_output":if step_type == "tool" { Some(output) } else { None },
+            "changes":changes,
+        }),
+        Some(raw),
+        session_id,
+    )
+}
+
+fn agy_value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        value => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+fn agy_file_tool(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "write", "edit", "replace", "patch", "delete", "move", "rename",
+    ]
+    .iter()
+    .any(|candidate| name.contains(candidate))
+}
+
+fn agy_change_kind(name: &str) -> &'static str {
+    let name = name.to_ascii_lowercase();
+    if name.contains("delete") {
+        "delete"
+    } else if name.contains("move") || name.contains("rename") {
+        "move"
+    } else {
+        "edit"
+    }
+}
+
+fn agy_tool_path(parameters: &Value) -> Option<String> {
+    [
+        "path",
+        "Path",
+        "file_path",
+        "FilePath",
+        "AbsolutePath",
+        "TargetFile",
+        "TargetPath",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        parameters
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn normalize_dsh(raw: Value) -> (String, Option<String>, Value, Option<Value>, Option<String>) {
+    let base_type = raw.get("type").and_then(Value::as_str).unwrap_or("event");
+    let session_id = raw
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if base_type != "dsh.event" {
+        let kind = match base_type {
+            "codesk.input.ack" => {
+                if raw.get("accepted").and_then(Value::as_bool) == Some(true) {
+                    "input.accepted"
+                } else {
+                    "input.rejected"
+                }
+            }
+            "codesk.control.ack" => {
+                if raw.get("accepted").and_then(Value::as_bool) == Some(true) {
+                    "control.acknowledged"
+                } else {
+                    "control.rejected"
+                }
+            }
+            "codesk.session" => "thread.session",
+            "codesk.usage" => "usage.updated",
+            "codesk.queue" => match raw.get("action").and_then(Value::as_str) {
+                Some("added") => "queue.added",
+                Some("started") => "queue.started",
+                Some("paused") => "queue.paused",
+                Some("removed") => "queue.removed",
+                Some("failed") => "queue.failed",
+                _ => "queue.updated",
+            },
+            _ => "agent.event",
+        };
+        let usage = raw.get("usage").unwrap_or(&Value::Null);
+        let tokens = usage.get("tokenUsage").unwrap_or(&Value::Null);
+        let pressure = usage.get("contextPressure").unwrap_or(&Value::Null);
+        let projected = pressure
+            .get("projectedTokens")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let context_window = pressure
+            .get("contextWindow")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let context_percentage = if context_window > 0.0 {
+            Some(projected * 100.0 / context_window)
+        } else {
+            None
+        };
+        return (
+            kind.to_string(),
+            Some(format!("dsh.{base_type}")),
+            json!({
+                "text":raw.get("message").and_then(Value::as_str).unwrap_or(""),
+                "request_id":raw.get("requestId"),
+                "action":raw.get("action"),
+                "queue_id":raw.get("queueId"),
+                "pending":raw.get("pending"),
+                "last_turn_id":raw.get("lastTurnId"),
+                "token_usage":tokens,
+                "context_pressure":pressure,
+                "context_breakdown":usage.get("contextBreakdown"),
+                "session_stats":usage.get("sessionStats"),
+                "uncached_input_tokens":tokens.get("uncachedInputTokens"),
+                "output_tokens":tokens.get("outputTokens"),
+                "cache_read_tokens":tokens.get("cacheReadTokens"),
+                "cache_write_tokens":tokens.get("cacheWriteTokens"),
+                "pressure_tokens":pressure.get("pressureTokens"),
+                "projected_tokens":pressure.get("projectedTokens"),
+                "context_window":pressure.get("contextWindow"),
+                "context_usage_percentage":context_percentage,
+                "context_size":pressure.get("contextWindow"),
+            }),
+            Some(raw),
+            session_id,
+        );
+    }
+
+    let event = raw.get("event").unwrap_or(&Value::Null);
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("event");
+    let data = event.get("data").unwrap_or(&Value::Null);
+    let view = raw.pointer("/view/view").unwrap_or(&Value::Null);
+    let chunk_type = data.pointer("/chunk/type").and_then(Value::as_str);
+    let tool_kind = view
+        .get("kind")
+        .or_else(|| view.get("card"))
+        .and_then(Value::as_str)
+        .or_else(|| data.get("name").and_then(Value::as_str));
+    let file_change = matches!(
+        tool_kind,
+        Some("edit" | "write" | "delete" | "move" | "patch" | "str_replace_editor")
+    );
+    let kind = match event_type {
+        "turn/start" => "turn.started",
+        "turn/end" => "turn.completed",
+        "user/message" => "user.message",
+        "assistant/chunk" if chunk_type == Some("text-delta") => "assistant.message",
+        "assistant/chunk" if chunk_type == Some("reasoning-delta") => "reasoning.message",
+        "tool/call" | "tool/result" if file_change => "file.change",
+        "tool/call" | "tool/result" => "tool.output",
+        _ => "agent.event",
+    };
+    let text = match event_type {
+        "user/message" => dsh_content_text(data.get("content").unwrap_or(&Value::Null)),
+        "assistant/chunk" => data
+            .pointer("/chunk/text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "tool/result" => dsh_tool_result_text(data),
+        "tool/call" => view
+            .get("title")
+            .or_else(|| data.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "session/title" => data
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
+    };
+    let seq = event.get("seq").and_then(Value::as_u64);
+    let turn_id = if event_type == "user/message" {
+        seq.map(|value| value.to_string())
+    } else {
+        data.get("turn")
+            .and_then(Value::as_u64)
+            .map(|value| value.to_string())
+    };
+    let block = data.pointer("/chunk/index").and_then(Value::as_u64);
+    let item_id = match event_type {
+        "assistant/chunk" => Some(format!(
+            "dsh-{}-{}-{}",
+            data.get("turn").and_then(Value::as_u64).unwrap_or_default(),
+            data.get("step").and_then(Value::as_u64).unwrap_or_default(),
+            block.unwrap_or_default(),
+        )),
+        "tool/call" => data
+            .get("callId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        "tool/result" => data
+            .pointer("/message/source/callId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => seq.map(|value| format!("dsh-{value}")),
+    };
+    let locations = view.get("locations").cloned().unwrap_or_else(|| json!([]));
+    let changes = if file_change {
+        locations
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|location| location.get("path").and_then(Value::as_str))
+            .map(|path| json!({"path":path,"kind":tool_kind.unwrap_or("edit")}))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    (
+        kind.to_string(),
+        Some(format!("dsh.{event_type}")),
+        json!({
+            "text":text,
+            "turn_id":turn_id,
+            "item_id":item_id,
+            "sequence":seq,
+            "tool_title":view.get("title").or_else(|| data.get("name")),
+            "tool_kind":tool_kind,
+            "tool_status":if event_type == "tool/call" { Some("in_progress") } else if event_type == "tool/result" { Some(if data.pointer("/message/content/0/isError").and_then(Value::as_bool) == Some(true) { "failed" } else { "completed" }) } else { None },
+            "locations":locations,
+            "raw_input":data.get("arguments"),
+            "raw_output":data.get("message"),
+            "changes":changes,
+            "stop_reason":data.pointer("/reason/kind"),
+        }),
+        Some(raw),
+        session_id,
+    )
+}
+
+fn dsh_content_text(value: &Value) -> String {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn dsh_tool_result_text(data: &Value) -> String {
+    data.pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_kiro(raw: Value) -> (String, Option<String>, Value, Option<Value>, Option<String>) {
+    let method = raw.get("method").and_then(Value::as_str);
+    let base_event_type = method
+        .or_else(|| raw.get("type").and_then(Value::as_str))
+        .unwrap_or(if raw.get("id").is_some() {
+            "rpc.response"
+        } else {
+            "event"
+        });
+    let update = raw.pointer("/params/update");
+    let update_type = update
+        .and_then(|value| value.get("sessionUpdate"))
+        .and_then(Value::as_str);
+    let event_type = if let Some(update_type) = update_type {
+        format!("{base_event_type}/{update_type}")
+    } else {
+        base_event_type.to_string()
+    };
+    let session_id = raw
+        .pointer("/sessionId")
+        .or_else(|| raw.pointer("/result/sessionId"))
+        .or_else(|| raw.pointer("/params/sessionId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let tool_kind = update
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str);
+    let kind = match base_event_type {
+        "codesk.input.ack" => {
+            if raw.get("accepted").and_then(Value::as_bool) == Some(true) {
+                "input.accepted"
+            } else {
+                "input.rejected"
+            }
+        }
+        "codesk.control.ack" => {
+            if raw.get("accepted").and_then(Value::as_bool) == Some(true) {
+                "control.acknowledged"
+            } else {
+                "control.rejected"
+            }
+        }
+        "codesk.session" => "thread.session",
+        "codesk.user" => "user.message",
+        "codesk.turn" => match raw.get("action").and_then(Value::as_str) {
+            Some("started") => "turn.started",
+            Some("completed") => "turn.completed",
+            _ => "agent.event",
+        },
+        "codesk.usage" => "usage.updated",
+        "codesk.request.resolved" => "provider.response",
+        "codesk.queue" => match raw.get("action").and_then(Value::as_str) {
+            Some("added") => "queue.added",
+            Some("started") => "queue.started",
+            Some("paused") => "queue.paused",
+            Some("removed") => "queue.removed",
+            Some("failed") => "queue.failed",
+            _ => "queue.updated",
+        },
+        "session/request_permission" => "approval.required",
+        "session/update" | "_kiro.dev/session/update" => match update_type {
+            Some("user_message_chunk") => "user.message",
+            Some("agent_message_chunk") => "assistant.message",
+            Some("agent_thought_chunk") => "reasoning.message",
+            Some("tool_call") | Some("tool_call_update") | Some("tool_call_chunk") => {
+                if matches!(tool_kind, Some("edit") | Some("delete") | Some("move")) {
+                    "file.change"
+                } else {
+                    "tool.output"
+                }
+            }
+            Some("plan") => "reasoning.message",
+            Some("usage_update") => "usage.updated",
+            Some("available_commands_update") => "commands.updated",
+            _ => "agent.event",
+        },
+        "_kiro.dev/commands/available" => "commands.updated",
+        "_kiro.dev/metadata" | "_kiro.dev/subagent/list_update" => "agent.event",
+        "rpc.response" if raw.get("error").is_some() => "run.error",
+        "rpc.response" => "provider.response",
+        _ if base_event_type.contains("error") => "run.error",
+        _ => "agent.event",
+    };
+    let text = if base_event_type == "codesk.turn" {
+        raw.pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    } else if let Some(text) = raw.get("message").and_then(Value::as_str) {
+        text.to_string()
+    } else if base_event_type == "session/request_permission" {
+        raw.pointer("/params/toolCall/title")
+            .and_then(Value::as_str)
+            .map(|title| format!("Kiro wants to {title}"))
+            .unwrap_or_else(|| "Kiro requests permission to use a tool".to_string())
+    } else if let Some(update) = update {
+        kiro_update_text(update)
+    } else {
+        String::new()
+    };
+    let item_id = update
+        .and_then(|value| value.get("messageId"))
+        .or_else(|| update.and_then(|value| value.get("toolCallId")))
+        .or_else(|| raw.get("turnId"))
+        .or_else(|| raw.pointer("/params/sessionId"));
+    let changes = update.map(kiro_changes).unwrap_or_default();
+    let payload = json!({
+        "text":text,
+        "rpc_id":if base_event_type == "session/request_permission" { raw.get("id") } else { None },
+        "method":raw.get("method"),
+        "turn_id":raw.get("turnId"),
+        "item_id":item_id,
+        "request_id":raw.get("requestId"),
+        "action":raw.get("action"),
+        "queue_id":raw.get("queueId"),
+        "pending":raw.get("pending"),
+        "tool_title":update.and_then(|value| value.get("title")),
+        "tool_kind":update.and_then(|value| value.get("kind")),
+        "tool_status":update.and_then(|value| value.get("status")),
+        "locations":update.and_then(|value| value.get("locations")),
+        "raw_input":update.and_then(|value| value.get("rawInput")),
+        "raw_output":update.and_then(|value| value.get("rawOutput")),
+        "changes":changes,
+        "permission_options":raw.pointer("/params/options"),
+        "commands":raw.pointer("/params/commands")
+            .or_else(|| update.and_then(|value| value.get("availableCommands"))),
+        "context_usage_percentage":raw.pointer("/usage/contextUsagePercentage")
+            .or_else(|| raw.pointer("/params/contextUsagePercentage"))
+            .or_else(|| update.and_then(|value| value.get("used"))),
+        "context_size":update.and_then(|value| value.get("size")),
+        "metering_usage":raw.pointer("/usage/meteringUsage")
+            .or_else(|| raw.pointer("/params/meteringUsage")),
+        "cost":update.and_then(|value| value.get("cost")),
+        "effort":raw.pointer("/usage/effort").or_else(|| raw.pointer("/params/effort")),
+        "turn_duration_ms":raw.pointer("/usage/turnDurationMs")
+            .or_else(|| raw.pointer("/params/turnDurationMs")),
+        "stop_reason":raw.get("stopReason"),
+    });
+    (
+        kind.to_string(),
+        Some(format!("kiro.{event_type}")),
+        payload,
+        Some(raw),
+        session_id,
+    )
+}
+
+fn kiro_update_text(update: &Value) -> String {
+    if let Some(text) = update.pointer("/content/text").and_then(Value::as_str) {
+        return text.to_string();
+    }
+    if update.get("sessionUpdate").and_then(Value::as_str) == Some("plan") {
+        return update["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("content").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let Some(items) = update.pointer("/rawOutput/items").and_then(Value::as_array) {
+        let text = items
+            .iter()
+            .filter_map(|item| item.get("Text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    if let Some(content) = update.get("content").and_then(Value::as_array) {
+        let text = content
+            .iter()
+            .filter_map(|item| item.pointer("/content/text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    update
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn kiro_changes(update: &Value) -> Vec<Value> {
+    let mut changes = update
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("diff"))
+        .filter_map(|item| {
+            let path = item.get("path")?.as_str()?;
+            let old = item.get("oldText").and_then(Value::as_str).unwrap_or("");
+            let new = item.get("newText").and_then(Value::as_str).unwrap_or("");
+            Some(json!({
+                "path":path,
+                "kind":"edit",
+                "diff":format!("--- {path}\n+++ {path}\n@@\n-{old}\n+{new}"),
+            }))
+        })
+        .collect::<Vec<_>>();
+    if changes.is_empty()
+        && matches!(
+            update.get("kind").and_then(Value::as_str),
+            Some("edit") | Some("delete") | Some("move")
+        )
+    {
+        changes.extend(
+            update
+                .get("locations")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|location| location.get("path").and_then(Value::as_str))
+                .map(|path| json!({"path":path,"kind":update.get("kind")})),
+        );
+    }
+    changes
+}
+
 pub fn status_from_event(provider: &str, raw: Option<&Value>) -> Option<&'static str> {
+    let raw = raw?;
+    if provider == "dsh" && raw.get("type").and_then(Value::as_str) == Some("dsh.event") {
+        return match raw.pointer("/event/type").and_then(Value::as_str) {
+            Some("turn/start") => Some("running"),
+            Some("turn/end") => Some("waiting_for_input"),
+            _ => None,
+        };
+    }
+    if provider == "kiro" && raw.get("type").and_then(Value::as_str) == Some("codesk.turn") {
+        return match raw.get("action").and_then(Value::as_str) {
+            Some("started") => Some("running"),
+            Some("completed") => Some("waiting_for_input"),
+            _ => None,
+        };
+    }
     if provider != "codex" {
         return None;
     }
-    let raw = raw?;
     match raw.get("method").and_then(Value::as_str) {
         Some("turn/started") => Some("running"),
         Some("turn/completed") => Some("waiting_for_input"),
@@ -377,7 +1108,7 @@ fn extract_text(value: &Value) -> Option<String> {
     None
 }
 
-fn find_executable(binary: &str) -> Option<String> {
+pub(crate) fn find_executable(binary: &str) -> Option<String> {
     let mut directories = env::var_os("PATH")
         .map(|path| env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -411,7 +1142,11 @@ fn provider_command(binary: &str) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_line;
+    use serde_json::json;
+
+    use crate::model::StartRunRequest;
+
+    use super::{build, find_executable, normalize_line, status_from_event};
 
     #[test]
     fn normalizes_current_codex_request_and_message_shapes() {
@@ -443,5 +1178,268 @@ mod tests {
         );
         assert_eq!(kind, "agent.event");
         assert_eq!(payload["text"], "");
+    }
+
+    #[test]
+    fn normalizes_kiro_assistant_chunks_and_tool_updates() {
+        let (kind, provider_type, payload, raw, session) = normalize_line(
+            "kiro",
+            "stdout",
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","messageId":"message-1","content":{"type":"text","text":"Hello from Kiro"}}}}"#,
+        );
+        assert_eq!(kind, "assistant.message");
+        assert_eq!(
+            provider_type.as_deref(),
+            Some("kiro.session/update/agent_message_chunk")
+        );
+        assert_eq!(payload["text"], "Hello from Kiro");
+        assert_eq!(session.as_deref(), Some("session-1"));
+        assert_eq!(raw.unwrap()["params"]["update"]["messageId"], "message-1");
+
+        let (kind, _, payload, _, _) = normalize_line(
+            "kiro",
+            "stdout",
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","title":"Read package.json","kind":"read","status":"completed","rawOutput":{"items":[{"Text":"{\"name\":\"codesk\"}"}]}}}}"#,
+        );
+        assert_eq!(kind, "tool.output");
+        assert_eq!(payload["tool_title"], "Read package.json");
+        assert_eq!(payload["tool_status"], "completed");
+        assert_eq!(payload["text"], "{\"name\":\"codesk\"}");
+    }
+
+    #[test]
+    fn normalizes_kiro_permission_usage_and_status_events() {
+        let (kind, _, payload, _, session) = normalize_line(
+            "kiro",
+            "stdout",
+            r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"title":"Edit src/App.tsx"},"options":[{"optionId":"allow_once","name":"Allow once"}]}}"#,
+        );
+        assert_eq!(kind, "approval.required");
+        assert_eq!(payload["rpc_id"], 42);
+        assert_eq!(payload["text"], "Kiro wants to Edit src/App.tsx");
+        assert_eq!(payload["permission_options"][0]["optionId"], "allow_once");
+        assert_eq!(session.as_deref(), Some("session-1"));
+
+        let (kind, _, payload, _, _) = normalize_line(
+            "kiro",
+            "stdout",
+            &json!({
+                "method":"_kiro.dev/metadata",
+                "params":{
+                    "sessionId":"session-1",
+                    "contextUsagePercentage":12.5,
+                    "meteringUsage":[{"value":0.2,"unit":"credit"}],
+                    "turnDurationMs":1234,
+                    "effort":"low"
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(kind, "agent.event");
+        assert_eq!(payload["context_usage_percentage"], 12.5);
+        assert_eq!(payload["metering_usage"][0]["unit"], "credit");
+        assert_eq!(payload["turn_duration_ms"], 1234);
+
+        assert_eq!(
+            status_from_event(
+                "kiro",
+                Some(&json!({"type":"codesk.turn","action":"started"}))
+            ),
+            Some("running")
+        );
+        assert_eq!(
+            status_from_event(
+                "kiro",
+                Some(&json!({"type":"codesk.turn","action":"completed"}))
+            ),
+            Some("waiting_for_input")
+        );
+    }
+
+    #[test]
+    fn normalizes_dsh_messages_tools_usage_and_status() {
+        let (kind, provider_type, payload, _, session) = normalize_line(
+            "dsh",
+            "stdout",
+            &json!({
+                "type":"dsh.event",
+                "sessionId":"session-dsh-1",
+                "event":{
+                    "type":"assistant/chunk",
+                    "seq":12,
+                    "data":{"turn":1,"step":1,"chunk":{"type":"text-delta","index":0,"text":"Hello"}}
+                }
+            }).to_string(),
+        );
+        assert_eq!(kind, "assistant.message");
+        assert_eq!(provider_type.as_deref(), Some("dsh.assistant/chunk"));
+        assert_eq!(payload["text"], "Hello");
+        assert_eq!(payload["item_id"], "dsh-1-1-0");
+        assert_eq!(session.as_deref(), Some("session-dsh-1"));
+
+        let (kind, _, payload, _, _) = normalize_line(
+            "dsh",
+            "stdout",
+            &json!({
+                "type":"dsh.event",
+                "sessionId":"session-dsh-1",
+                "event":{"type":"tool/call","seq":14,"data":{"callId":"call-1","name":"read","arguments":"{\"file_path\":\"package.json\"}"}},
+                "view":{"for":"call","view":{"card":"generic","title":"Read package.json","kind":"read","locations":[{"path":"package.json","line":1}]}}
+            }).to_string(),
+        );
+        assert_eq!(kind, "tool.output");
+        assert_eq!(payload["tool_title"], "Read package.json");
+        assert_eq!(payload["tool_kind"], "read");
+        assert_eq!(payload["locations"][0]["path"], "package.json");
+
+        let (kind, _, payload, _, _) = normalize_line(
+            "dsh",
+            "stdout",
+            &json!({
+                "type":"codesk.usage",
+                "provider":"dsh",
+                "sessionId":"session-dsh-1",
+                "usage":{
+                    "tokenUsage":{"uncachedInputTokens":100,"outputTokens":20,"cacheReadTokens":50,"cacheWriteTokens":5},
+                    "contextPressure":{"pressureTokens":90,"projectedTokens":120,"contextWindow":1000}
+                }
+            }).to_string(),
+        );
+        assert_eq!(kind, "usage.updated");
+        assert_eq!(payload["uncached_input_tokens"], 100);
+        assert_eq!(payload["context_usage_percentage"], 12.0);
+
+        assert_eq!(
+            status_from_event(
+                "dsh",
+                Some(&json!({"type":"dsh.event","event":{"type":"turn/start"}}))
+            ),
+            Some("running")
+        );
+        assert_eq!(
+            status_from_event(
+                "dsh",
+                Some(&json!({"type":"dsh.event","event":{"type":"turn/end"}}))
+            ),
+            Some("waiting_for_input")
+        );
+    }
+
+    #[test]
+    fn builds_antigravity_new_and_resume_commands() {
+        if find_executable("agy").is_none() {
+            return;
+        }
+        let request = |operation: Option<&str>, resume_session_id: Option<&str>| StartRunRequest {
+            project_id: "project-1".into(),
+            title: None,
+            prompt: "hello from Codesk".into(),
+            provider: "agy".into(),
+            model: Some("gemini-3.1-pro".into()),
+            workspace_mode: "current_checkout".into(),
+            worktree_id: None,
+            base_ref: None,
+            branch: None,
+            parent_run_id: None,
+            command: None,
+            args: Vec::new(),
+            operation: operation.map(str::to_string),
+            resume_session_id: resume_session_id.map(str::to_string),
+            last_turn_id: None,
+        };
+        let new = build(
+            &request(None, None),
+            "codesk-session",
+            "/tmp/codesk-project",
+        )
+        .unwrap();
+        assert!(
+            new.args
+                .windows(2)
+                .any(|args| args == ["--add-dir", "/tmp/codesk-project"])
+        );
+        assert!(
+            new.args
+                .windows(2)
+                .any(|args| args == ["--print", "hello from Codesk"])
+        );
+        assert!(
+            new.args
+                .windows(2)
+                .any(|args| args == ["--output-format", "stream-json"])
+        );
+        assert!(
+            new.args
+                .contains(&"--dangerously-skip-permissions".to_string())
+        );
+        let resumed = build(
+            &request(Some("resume"), Some("1cbe7f1c-229a-4271-bc20-dc9d46433d96")),
+            "codesk-session",
+            "/tmp/codesk-project",
+        )
+        .unwrap();
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|args| { args == ["--conversation", "1cbe7f1c-229a-4271-bc20-dc9d46433d96"] })
+        );
+        assert_eq!(
+            resumed.session_id.as_deref(),
+            Some("1cbe7f1c-229a-4271-bc20-dc9d46433d96")
+        );
+        assert!(
+            build(
+                &request(Some("fork"), Some("1cbe7f1c-229a-4271-bc20-dc9d46433d96")),
+                "codesk-session",
+                "/tmp/codesk-project"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn normalizes_antigravity_session_text_tools_and_usage() {
+        let (kind, provider_type, payload, _, session) = normalize_line(
+            "agy",
+            "stdout",
+            r#"{"event":"init","conversation_id":"conversation-1","init":{"cwd":"/tmp/project","permission_mode":"always-proceed"}}"#,
+        );
+        assert_eq!(kind, "thread.session");
+        assert_eq!(provider_type.as_deref(), Some("agy.init"));
+        assert_eq!(payload["cwd"], "/tmp/project");
+        assert_eq!(session.as_deref(), Some("conversation-1"));
+
+        let (kind, _, payload, _, _) = normalize_line(
+            "agy",
+            "stdout",
+            r#"{"event":"step_update","step_update":{"conversation_id":"conversation-1","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"AGY_STREAM_OK"}}"#,
+        );
+        assert_eq!(kind, "assistant.message");
+        assert_eq!(payload["text"], "AGY_STREAM_OK");
+        assert_eq!(payload["item_id"], "agy-step-2");
+
+        let (kind, _, payload, _, _) = normalize_line(
+            "agy",
+            "stdout",
+            r#"{"event":"step_update","step_update":{"conversation_id":"conversation-1","step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"printf AGY_TOOL_OK"},"output":"AGY_TOOL_OK"}}}"#,
+        );
+        assert_eq!(kind, "tool.output");
+        assert_eq!(payload["tool_title"], "printf AGY_TOOL_OK");
+        assert_eq!(payload["tool_kind"], "run_command");
+        assert_eq!(payload["tool_status"], "completed");
+        assert_eq!(payload["text"], "AGY_TOOL_OK");
+
+        let (kind, provider_type, payload, _, session) = normalize_line(
+            "agy",
+            "stdout",
+            r#"{"event":"result","result":{"conversation_id":"conversation-1","status":"SUCCESS","response":"done","duration_seconds":4.19,"num_turns":1,"usage":{"input_tokens":24551,"output_tokens":731,"thinking_tokens":609,"cache_read_tokens":16297,"total_tokens":25282}}}"#,
+        );
+        assert_eq!(kind, "usage.updated");
+        assert_eq!(provider_type.as_deref(), Some("agy.result"));
+        assert_eq!(payload["input_tokens"], 24551);
+        assert_eq!(payload["thinking_tokens"], 609);
+        assert_eq!(payload["duration_seconds"], 4.19);
+        assert_eq!(session.as_deref(), Some("conversation-1"));
     }
 }

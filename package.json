@@ -11,9 +11,14 @@
     "test": "cargo build -p codeskd && cargo test -p codeskd && node scripts/test-codex-app-server.mjs && node scripts/test-gateway-codex.mjs && node scripts/test-daemon-survival.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs && node scripts/test-drafts.mjs",
     "check": "tsc --noEmit",
     "desktop": "tauri dev",
-    "desktop:build": "npm run build:gateway && cargo build -p codeskd && tauri build"
+    "desktop:build": "npm run build:gateway && cargo build -p codeskd && tauri build",
+    "desktop:redeploy": "node scripts/redeploy-local.mjs",
+    "desktop:handoff": "npm run desktop:redeploy",
+    "test:dsh-live": "node scripts/test-dsh-live.mjs",
+    "test:agy-live": "cargo build -p codeskd && node scripts/test-agy-live.mjs"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.9",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",

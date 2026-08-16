@@ -1,4 +1,4 @@
-import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, FileListing, GitContext, Host, Project, ProviderSession, Run, RunEvent, SessionMessage } from './types'
+import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, ExternalQueuedInput, FileContent, FileListing, GitContext, Host, Project, ProviderSession, Run, RunEvent, SessionMessage } from './types'
 
 export const gatewayOrigin = location.protocol === 'http:' || location.protocol === 'https:' ? '' : 'http://127.0.0.1:4242'
 
@@ -24,22 +24,29 @@ export const api = {
   installHost: (id: string, artifactUrl: string) => request(`/api/hosts/${id}/install`, { method: 'POST', body: JSON.stringify({ artifactUrl }) }),
   bootstrapHost: (id: string, artifactUrl?: string) => request(`/api/hosts/${id}/bootstrap`, { method: 'POST', body: JSON.stringify({ artifactUrl }) }),
   files: (hostId: string, path = '') => request<FileListing>(`/api/hosts/${hostId}/files?path=${encodeURIComponent(path)}`),
+  file: (hostId: string, path: string) => request<FileContent>(`/api/hosts/${hostId}/file?path=${encodeURIComponent(path)}`),
   discoverProjects: (hostId: string, path: string, register = true, maxDepth = 2) => request<DiscoveredProject[]>(`/api/hosts/${hostId}/projects/discover`, { method: 'POST', body: JSON.stringify({ path, register, max_depth: maxDepth }) }),
   discoveredAgents: (hostId: string) => request<DiscoveredAgent[]>(`/api/hosts/${hostId}/agents`),
   sessionMessages: (hostId: string, projectId: string, provider: string, sessionId: string, after?: string) => request<SessionMessage[]>(`/api/projects/${hostId}/${projectId}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}/messages${after ? `?after=${encodeURIComponent(after)}` : ''}`),
   projectSessions: (hostId: string, projectId: string, limit: number) => request<ProviderSession[]>(`/api/projects/${hostId}/${projectId}/sessions?limit=${limit}`),
   projectContext: (hostId: string, projectId: string) => request<GitContext>(`/api/projects/${hostId}/${projectId}/git-context`),
   controlDiscoveredAgent: (hostId: string, pid: number, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/agents/${hostId}/${pid}/${action}`, { method: 'POST' }),
+  externalSessionInput: (session: ProviderSession, message: string, delivery: 'steer' | 'queue') => request<{ ok: boolean; delivery: string; queued?: ExternalQueuedInput }>(`/api/external-sessions/${session.hostId}/${session.pid}/input`, { method: 'POST', body: JSON.stringify({ message, delivery, session_id: session.nativeSessionId }) }),
+  externalAgentInput: (hostId: string, pid: number, sessionId: string | null | undefined, message: string, delivery: 'steer' | 'queue') => request<{ ok: boolean; delivery: string; queued?: ExternalQueuedInput }>(`/api/external-sessions/${hostId}/${pid}/input`, { method: 'POST', body: JSON.stringify({ message, delivery, session_id: sessionId }) }),
+  externalSessionQueue: (hostId: string, pid: number) => request<ExternalQueuedInput[]>(`/api/external-sessions/${hostId}/${pid}/queue`),
+  removeExternalQueued: (hostId: string, pid: number, queueId: string) => request(`/api/external-sessions/${hostId}/${pid}/queue/${encodeURIComponent(queueId)}`, { method: 'DELETE' }),
   worktreeStatus: (hostId: string, id: string) => request<{ worktree: { path: string; branch?: string | null }; dirty: boolean; summary: string; diff_stat: string }>(`/api/worktrees/${hostId}/${id}/status`),
   removeWorktree: (hostId: string, id: string, force = false) => request(`/api/worktrees/${hostId}/${id}?force=${force}`, { method: 'DELETE' }),
   openPath: (hostId: string, path: string) => request('/api/open-path', { method: 'POST', body: JSON.stringify({ hostId, path }) }),
   createProject: (input: { hostId: string; name: string; path: string }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
+  removeProject: (hostId: string, projectId: string) => request(`/api/projects/${hostId}/${projectId}`, { method: 'DELETE' }),
   createDraft: (input: { hostId: string; projectId: string; provider?: string; workspaceMode?: string }) => request<DraftSession>('/api/drafts', { method: 'POST', body: JSON.stringify(input) }),
   updateDraft: (id: string, input: { prompt?: string; provider?: string; workspaceMode?: string }) => request<DraftSession>(`/api/drafts/${id}`, { method: 'PATCH', body: JSON.stringify(input) }),
   deleteDraft: (id: string) => request(`/api/drafts/${id}`, { method: 'DELETE' }),
   startDraft: (id: string, input: Record<string, unknown>) => request<Run>(`/api/drafts/${id}/start`, { method: 'POST', body: JSON.stringify(input) }),
   createRun: (input: Record<string, unknown>) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify(input) }),
   resumeRun: (run: Run, prompt: string, fork = false) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify({ hostId: run.hostId, project_id: run.projectId, provider: run.provider, model: run.model, prompt, workspace_mode: fork ? 'managed_worktree' : (run.worktreeId ? 'existing_worktree' : 'current_checkout'), worktree_id: fork ? undefined : run.worktreeId, parent_run_id: run.id, operation: fork ? 'fork' : 'resume', resume_session_id: run.sessionId }) }),
+  resumeSession: (session: ProviderSession, prompt: string) => request<Run>('/api/runs', { method: 'POST', body: JSON.stringify({ hostId: session.hostId, project_id: session.projectId, provider: session.provider, title: session.title, prompt, workspace_mode: 'current_checkout', operation: 'resume', resume_session_id: session.nativeSessionId }) }),
   events: (hostId: string, id: string, after = 0) => request<RunEvent[]>(`/api/runs/${hostId}/${id}/events?after=${after}`),
   controlRun: (hostId: string, id: string, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/runs/${hostId}/${id}/${action}`, { method: 'POST' }),
   input: (hostId: string, id: string, message: string, delivery: 'auto' | 'steer' | 'queue' | 'fork' = 'auto', lastTurnId?: string | null) => request(`/api/runs/${hostId}/${id}/input`, { method: 'POST', body: JSON.stringify({ message, delivery, last_turn_id: lastTurnId, request_id: crypto.randomUUID() }) }),

@@ -117,12 +117,21 @@ async function stopManagedRun() {
     try { process.kill(managedRun.pid, 0) } catch { return }
     await wait(100)
   }
-  const command = await fs.readFile(`/proc/${managedRun.pid}/cmdline`, 'utf8')
-  const status = await fs.readFile(`/proc/${managedRun.pid}/status`, 'utf8')
-  const stat = await fs.readFile(`/proc/${managedRun.pid}/stat`, 'utf8')
-  assert(command.includes('codeskd\0__runner') && command.includes(path.join(dataDir, 'runs', managedRun.id)), `refusing to stop unexpected runner ${command}`)
-  assert.equal(Number(status.match(/^Uid:\s+(\d+)/m)?.[1]), process.getuid(), 'runner process owner changed')
-  assert.equal(Number(stat.split(' ')[4]), managedRun.process_group_id, 'runner process group changed')
+  let command; let owner; let processGroupId
+  if (process.platform === 'linux') {
+    command = await fs.readFile(`/proc/${managedRun.pid}/cmdline`, 'utf8')
+    const status = await fs.readFile(`/proc/${managedRun.pid}/status`, 'utf8')
+    const stat = await fs.readFile(`/proc/${managedRun.pid}/stat`, 'utf8')
+    owner = Number(status.match(/^Uid:\s+(\d+)/m)?.[1])
+    processGroupId = Number(stat.split(' ')[4])
+  } else {
+    const { stdout } = await exec('ps', ['-o', 'uid=', '-o', 'pgid=', '-o', 'command=', '-p', String(managedRun.pid)])
+    const match = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+    owner = Number(match?.[1]); processGroupId = Number(match?.[2]); command = match?.[3] || ''
+  }
+  assert(command.includes('codeskd') && command.includes('__runner') && command.includes(path.join(dataDir, 'runs', managedRun.id)), `refusing to stop unexpected runner ${command}`)
+  assert.equal(owner, process.getuid(), 'runner process owner changed')
+  assert.equal(processGroupId, managedRun.process_group_id, 'runner process group changed')
   process.kill(-managedRun.process_group_id, 'SIGTERM')
   for (let attempt = 0; attempt < 30; attempt++) { try { process.kill(managedRun.pid, 0) } catch { return }; await wait(100) }
   throw new Error('managed test runner did not stop')

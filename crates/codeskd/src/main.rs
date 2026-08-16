@@ -2,6 +2,8 @@ mod adapters;
 mod codex_app_server;
 mod db;
 mod discovery;
+mod dsh_web;
+mod kiro_acp;
 mod model;
 mod runner;
 mod sessions;
@@ -9,7 +11,14 @@ mod supervisor;
 mod worktrees;
 
 use anyhow::Context;
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    env,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
@@ -24,6 +33,7 @@ use axum::{
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
@@ -31,19 +41,28 @@ use crate::{
     db::Db,
     model::{
         CreateProjectRequest, CreateWorktreeRequest, DiscoverProjectsRequest, EventsQuery,
-        FilesQuery, Health, InputRequest, MessagesQuery, ProviderResponseRequest, SessionsQuery,
-        StartRunRequest,
+        ExternalInputRequest, ExternalQueuedInput, FilesQuery, Health, InputRequest, MessagesQuery,
+        ProviderResponseRequest, SessionsQuery, StartRunRequest,
     },
     supervisor::Supervisor,
 };
 
-#[derive(Clone)]
 struct AppState {
     db: Db,
     supervisor: Supervisor,
     data_root: PathBuf,
     started: Instant,
+    discovery: Mutex<DiscoveryCache>,
+    external_queues: Mutex<HashMap<u32, Vec<ExternalQueuedInput>>>,
 }
+
+#[derive(Default)]
+struct DiscoveryCache {
+    updated_at: Option<Instant>,
+    agents: Vec<model::DiscoveredAgent>,
+}
+
+const DISCOVERY_TTL: Duration = Duration::from_secs(60);
 type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
 fn api_error(error: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -94,11 +113,14 @@ async fn main() -> anyhow::Result<()> {
         supervisor,
         data_root,
         started: Instant::now(),
+        discovery: Mutex::new(DiscoveryCache::default()),
+        external_queues: Mutex::new(HashMap::new()),
     });
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/projects", get(projects).post(create_project))
+        .route("/v1/projects/{id}", delete(remove_project))
         .route("/v1/projects/{id}/git-context", get(project_git_context))
         .route("/v1/projects/{id}/sessions", get(project_sessions))
         .route(
@@ -107,8 +129,21 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/projects/discover", post(discover_projects))
         .route("/v1/files", get(files))
+        .route("/v1/file", get(file))
         .route("/v1/agents/discover", get(discover_agents))
         .route("/v1/agents/{pid}/{action}", post(control_external_agent))
+        .route(
+            "/v1/external-sessions/{pid}/input",
+            post(input_external_session),
+        )
+        .route(
+            "/v1/external-sessions/{pid}/queue",
+            get(external_session_queue),
+        )
+        .route(
+            "/v1/external-sessions/{pid}/queue/{queue_id}",
+            delete(remove_external_session_queue),
+        )
         .route(
             "/v1/projects/{id}/worktrees",
             get(list_worktrees).post(create_worktree),
@@ -166,9 +201,7 @@ async fn project_sessions(
         .project(&id)
         .map_err(api_error)?
         .ok_or_else(|| api_error("project not found"))?;
-    let agents = discovery::discover_agents(&state.db)
-        .await
-        .map_err(api_error)?;
+    let agents = cached_agents(&state, false).await.map_err(api_error)?;
     Ok(Json(
         sessions::list(&project, &agents, query.limit)
             .await
@@ -204,6 +237,7 @@ async fn create_project(
         .project_by_path(path.to_string_lossy().as_ref())
         .map_err(api_error)?
     {
+        state.db.register_project(&existing.id).map_err(api_error)?;
         return Ok((StatusCode::OK, Json(existing)));
     }
     let item = model::Project {
@@ -215,6 +249,15 @@ async fn create_project(
     };
     state.db.create_project(&item).map_err(api_error)?;
     Ok((StatusCode::CREATED, Json(item)))
+}
+async fn remove_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state.db.unregister_project(&id).map_err(api_error)? {
+        return Err(api_error("project not found"));
+    }
+    Ok(Json(json!({"ok": true, "id": id})))
 }
 async fn project_git_context(
     State(state): State<Arc<AppState>>,
@@ -232,6 +275,13 @@ async fn project_git_context(
 async fn files(Query(query): Query<FilesQuery>) -> ApiResult<Json<model::FileListing>> {
     Ok(Json(
         discovery::list_files(query.path.as_deref())
+            .await
+            .map_err(api_error)?,
+    ))
+}
+async fn file(Query(query): Query<FilesQuery>) -> ApiResult<Json<model::FileContent>> {
+    Ok(Json(
+        discovery::read_file(query.path.as_deref())
             .await
             .map_err(api_error)?,
     ))
@@ -254,19 +304,13 @@ async fn discover_projects(
 async fn discover_agents(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<Vec<model::DiscoveredAgent>>> {
-    Ok(Json(
-        discovery::discover_agents(&state.db)
-            .await
-            .map_err(api_error)?,
-    ))
+    Ok(Json(cached_agents(&state, false).await.map_err(api_error)?))
 }
 async fn control_external_agent(
     State(state): State<Arc<AppState>>,
     Path((pid, action)): Path<(u32, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let agents = discovery::discover_agents(&state.db)
-        .await
-        .map_err(api_error)?;
+    let agents = cached_agents(&state, true).await.map_err(api_error)?;
     let agent = agents
         .into_iter()
         .find(|item| item.pid == pid)
@@ -284,6 +328,341 @@ async fn control_external_agent(
     Ok(Json(
         json!({"ok":true,"pid":pid,"process_group_id":agent.process_group_id,"action":action}),
     ))
+}
+
+async fn input_external_session(
+    State(state): State<Arc<AppState>>,
+    Path(pid): Path<u32>,
+    Json(request): Json<ExternalInputRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let message = request.message.trim().to_string();
+    if message.is_empty() {
+        return Err(api_error("message is required"));
+    }
+    if !matches!(request.delivery.as_str(), "auto" | "steer" | "queue") {
+        return Err(api_error(
+            "external session delivery must be steer or queue",
+        ));
+    }
+    let agent = external_agent(&state, pid).await.map_err(api_error)?;
+    if let Some(session_id) = request.session_id.as_deref() {
+        if agent.native_session_id.as_deref() != Some(session_id) {
+            return Err(api_error(
+                "the active process no longer owns this provider session",
+            ));
+        }
+    }
+    if request.delivery == "queue" {
+        let transcript = agent
+            .transcript_path
+            .as_deref()
+            .ok_or_else(|| api_error("queueing requires a provider transcript"))?;
+        if sessions::transcript_turn_active(std::path::Path::new(transcript), &agent.provider) {
+            let queued = ExternalQueuedInput {
+                id: Uuid::new_v4().to_string(),
+                pid,
+                session_id: agent.native_session_id.clone(),
+                message,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                status: "queued".to_string(),
+                error: None,
+            };
+            let start_worker = {
+                let mut queues = state.external_queues.lock().await;
+                let items = queues.entry(pid).or_default();
+                let start_worker = !items
+                    .iter()
+                    .any(|item| matches!(item.status.as_str(), "queued" | "sending"));
+                items.push(queued.clone());
+                start_worker
+            };
+            if start_worker {
+                let worker_state = state.clone();
+                tokio::spawn(async move {
+                    deliver_external_queue(worker_state, agent).await;
+                });
+            }
+            return Ok(Json(json!({"ok":true,"delivery":"queue","queued":queued})));
+        }
+    }
+    discovery::send_external_input(&agent, &message)
+        .await
+        .map_err(api_error)?;
+    Ok(Json(json!({"ok":true,"delivery":"steer","pid":pid})))
+}
+
+async fn external_session_queue(
+    State(state): State<Arc<AppState>>,
+    Path(pid): Path<u32>,
+) -> Json<Vec<ExternalQueuedInput>> {
+    Json(
+        state
+            .external_queues
+            .lock()
+            .await
+            .get(&pid)
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+async fn remove_external_session_queue(
+    State(state): State<Arc<AppState>>,
+    Path((pid, queue_id)): Path<(u32, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut queues = state.external_queues.lock().await;
+    let Some(items) = queues.get_mut(&pid) else {
+        return Err(api_error("queued message not found"));
+    };
+    let Some(index) = items.iter().position(|item| item.id == queue_id) else {
+        return Err(api_error("queued message not found"));
+    };
+    if items[index].status == "sending" {
+        return Err(api_error("queued message is already being delivered"));
+    }
+    items.remove(index);
+    if items.is_empty() {
+        queues.remove(&pid);
+    }
+    Ok(Json(json!({"ok":true,"queue_id":queue_id})))
+}
+
+async fn external_agent(state: &AppState, pid: u32) -> anyhow::Result<model::DiscoveredAgent> {
+    let agent = cached_agents(state, true)
+        .await?
+        .into_iter()
+        .find(|item| item.pid == pid)
+        .context("agent process not found")?;
+    anyhow::ensure!(
+        agent.managed_run_id.is_none(),
+        "managed runs must use the run input API"
+    );
+    anyhow::ensure!(
+        agent.tmux_pane.is_some(),
+        "this live session is not attached to a tmux pane"
+    );
+    Ok(agent)
+}
+
+async fn deliver_external_queue(state: Arc<AppState>, agent: model::DiscoveredAgent) {
+    loop {
+        let queued = state
+            .external_queues
+            .lock()
+            .await
+            .get(&agent.pid)
+            .and_then(|items| items.iter().find(|item| item.status == "queued"))
+            .cloned();
+        let Some(queued) = queued else { return };
+        if let Err(error) = wait_for_external_turn_idle(&state, &agent).await {
+            fail_pending_external_queue(&state, agent.pid, error).await;
+            return;
+        }
+        {
+            let mut queues = state.external_queues.lock().await;
+            let Some(item) = queues
+                .get_mut(&agent.pid)
+                .and_then(|items| items.iter_mut().find(|item| item.id == queued.id))
+            else {
+                continue;
+            };
+            item.status = "sending".to_string();
+        }
+        let transcript_size = agent
+            .transcript_path
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        match discovery::send_external_input(&agent, &queued.message).await {
+            Ok(()) => {
+                finish_external_queue(&state, agent.pid, &queued.id).await;
+                if has_pending_external_queue(&state, agent.pid).await {
+                    if let Err(error) =
+                        wait_for_external_turn_boundary(&state, &agent, transcript_size).await
+                    {
+                        fail_pending_external_queue(&state, agent.pid, error).await;
+                        return;
+                    }
+                }
+            }
+            Err(error) => {
+                fail_pending_external_queue(&state, agent.pid, &error.to_string()).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn wait_for_external_turn_idle(
+    state: &AppState,
+    agent: &model::DiscoveredAgent,
+) -> Result<(), &'static str> {
+    let deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+    loop {
+        if !has_pending_external_queue(state, agent.pid).await {
+            return Ok(());
+        }
+        if !discovery::external_process_alive(agent.pid) {
+            return Err("agent process stopped before the queued message could be delivered");
+        }
+        if Instant::now() >= deadline {
+            return Err("queued message expired after 24 hours");
+        }
+        let active = agent.transcript_path.as_deref().is_some_and(|path| {
+            sessions::transcript_turn_active(std::path::Path::new(path), &agent.provider)
+        });
+        if !active {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn wait_for_external_turn_boundary(
+    state: &AppState,
+    agent: &model::DiscoveredAgent,
+    initial_transcript_size: u64,
+) -> Result<(), &'static str> {
+    let deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+    let mut saw_active = false;
+    let mut saw_transcript_change = false;
+    loop {
+        if !has_pending_external_queue(state, agent.pid).await {
+            return Ok(());
+        }
+        if !discovery::external_process_alive(agent.pid) {
+            return Err("agent process stopped before the remaining queue could be delivered");
+        }
+        if Instant::now() >= deadline {
+            return Err("queued message expired while waiting for the previous turn to finish");
+        }
+        let active = agent.transcript_path.as_deref().is_some_and(|path| {
+            sessions::transcript_turn_active(std::path::Path::new(path), &agent.provider)
+        });
+        saw_active |= active;
+        saw_transcript_change |= agent
+            .transcript_path
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .is_some_and(|metadata| metadata.len() > initial_transcript_size);
+        if !active && (saw_active || saw_transcript_change) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn has_pending_external_queue(state: &AppState, pid: u32) -> bool {
+    state
+        .external_queues
+        .lock()
+        .await
+        .get(&pid)
+        .is_some_and(|items| items.iter().any(|item| item.status == "queued"))
+}
+
+async fn finish_external_queue(state: &AppState, pid: u32, queue_id: &str) {
+    let mut queues = state.external_queues.lock().await;
+    if let Some(items) = queues.get_mut(&pid) {
+        items.retain(|item| item.id != queue_id);
+        if items.is_empty() {
+            queues.remove(&pid);
+        }
+    }
+}
+
+async fn fail_pending_external_queue(state: &AppState, pid: u32, error: &str) {
+    if let Some(items) = state.external_queues.lock().await.get_mut(&pid) {
+        for item in items
+            .iter_mut()
+            .filter(|item| matches!(item.status.as_str(), "queued" | "sending"))
+        {
+            item.status = "failed".to_string();
+            item.error = Some(error.to_string());
+        }
+    }
+}
+
+async fn cached_agents(
+    state: &AppState,
+    force: bool,
+) -> anyhow::Result<Vec<model::DiscoveredAgent>> {
+    cached_agents_with(&state.discovery, force, || {
+        discovery::discover_agents(&state.db)
+    })
+    .await
+}
+
+async fn cached_agents_with<F, Fut>(
+    discovery: &Mutex<DiscoveryCache>,
+    force: bool,
+    scan: F,
+) -> anyhow::Result<Vec<model::DiscoveredAgent>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<model::DiscoveredAgent>>>,
+{
+    // Holding the lock while scanning intentionally makes refreshes single-flight:
+    // concurrent project/session requests reuse the one in-progress discovery.
+    let mut cache = discovery.lock().await;
+    if !force
+        && cache
+            .updated_at
+            .is_some_and(|updated| updated.elapsed() < DISCOVERY_TTL)
+    {
+        return Ok(cache.agents.clone());
+    }
+    let agents = scan().await?;
+    cache.updated_at = Some(Instant::now());
+    cache.agents = agents.clone();
+    Ok(agents)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn discovery_refresh_is_single_flight_within_the_ttl() {
+        let cache = Arc::new(Mutex::new(DiscoveryCache::default()));
+        let scans = Arc::new(AtomicUsize::new(0));
+        let first = {
+            let cache = cache.clone();
+            let scans = scans.clone();
+            tokio::spawn(async move {
+                cached_agents_with(&cache, false, || async move {
+                    scans.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok(Vec::new())
+                })
+                .await
+                .unwrap()
+            })
+        };
+        let second = {
+            let cache = cache.clone();
+            let scans = scans.clone();
+            tokio::spawn(async move {
+                cached_agents_with(&cache, false, || async move {
+                    scans.fetch_add(1, Ordering::SeqCst);
+                    Ok(Vec::new())
+                })
+                .await
+                .unwrap()
+            })
+        };
+        let _ = tokio::join!(first, second);
+        assert_eq!(scans.load(Ordering::SeqCst), 1);
+        cached_agents_with(&cache, true, || async {
+            scans.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+        .await
+        .unwrap();
+        assert_eq!(scans.load(Ordering::SeqCst), 2);
+    }
 }
 async fn list_worktrees(
     State(state): State<Arc<AppState>>,

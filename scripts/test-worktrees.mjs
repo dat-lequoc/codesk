@@ -20,5 +20,14 @@ try {
   if((await fs.readFile(path.join(finished.cwd,'result.txt'),'utf8')).trim()!=='isolated')throw new Error('worktree output missing')
   const trees=await request(`/v1/projects/${project.id}/worktrees`);if(trees.length!==1||trees[0].status!=='ready')throw new Error('managed worktree not registered')
   await request(`/v1/worktrees/${trees[0].id}?force=true`,{method:'DELETE'});if(await fs.stat(finished.cwd).then(()=>true).catch(()=>false))throw new Error('managed worktree was not removed');const retained=await request(`/v1/projects/${project.id}/worktrees`);if(retained[0].status!=='removed')throw new Error('worktree history was not retained')
+
+  const lateRepo=path.join(temp,'late-repo');await fs.mkdir(lateRepo)
+  const lateProject=await request('/v1/projects',{method:'POST',body:JSON.stringify({name:'late-repo',path:lateRepo})});if(lateProject.repo_root!==null)throw new Error('late repo should be registered without Git metadata')
+  await exec('git',['init','-b','main'],{cwd:lateRepo});await exec('git',['config','user.email','codesk@example.test'],{cwd:lateRepo});await exec('git',['config','user.name','Codesk Test'],{cwd:lateRepo});await fs.writeFile(path.join(lateRepo,'README.md'),'# late repo\n');await exec('git',['add','.'],{cwd:lateRepo});await exec('git',['commit','-m','initial'],{cwd:lateRepo})
+  const lateRun=await request('/v1/runs',{method:'POST',body:JSON.stringify({project_id:lateProject.id,provider:'shell',prompt:'repair stale repo metadata',workspace_mode:'managed_worktree',command:'sh',args:['-c','printf repaired > repaired.txt']})})
+  for(let i=0;i<40;i++){const state=await request(`/v1/runs/${lateRun.id}`);if(state.status==='completed')break;await wait(100)}
+  const repairedProject=(await request('/v1/projects')).find((item)=>item.id===lateProject.id);if(repairedProject?.repo_root!==lateProject.path)throw new Error(`stale repo metadata was not repaired: ${JSON.stringify(repairedProject)}`)
+  const lateFinished=await request(`/v1/runs/${lateRun.id}`);if(lateFinished.status!=='completed'||!lateFinished.worktree_id)throw new Error(`late repo run failed: ${JSON.stringify(lateFinished)}`)
+  const lateTrees=await request(`/v1/projects/${lateProject.id}/worktrees`);await request(`/v1/worktrees/${lateTrees[0].id}?force=true`,{method:'DELETE'})
   console.log(`ok - managed worktree ${trees[0].id} isolated the run and was removed safely`)
 } finally { if(daemon.exitCode===null)daemon.kill('SIGINT'); await fs.rm(temp,{recursive:true,force:true}) }

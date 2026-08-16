@@ -5,7 +5,7 @@ use chrono::Utc;
 use tokio::{io::copy, net::UnixListener, process::Command};
 
 use crate::{
-    codex_app_server,
+    codex_app_server, dsh_web, kiro_acp,
     model::{RunnerExit, RunnerSpec},
 };
 
@@ -20,6 +20,14 @@ pub async fn run(spec_path: &Path) -> Result<()> {
     }
     if spec.provider == "codex" {
         let status = codex_app_server::run(&spec).await?;
+        return write_exit(run_dir, status).await;
+    }
+    if spec.provider == "kiro" {
+        let status = kiro_acp::run(&spec).await?;
+        return write_exit(run_dir, status).await;
+    }
+    if spec.provider == "dsh" {
+        let status = dsh_web::run(&spec).await?;
         return write_exit(run_dir, status).await;
     }
     let stdout = StdOpenOptions::new()

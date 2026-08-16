@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { promisify } from 'node:util'
 
 const root = process.cwd()
 const binary = path.join(root, 'target/debug/codeskd')
@@ -18,6 +19,7 @@ const gatewayBase = `http://127.0.0.1:${gatewayPort}`
 let daemon
 let gateway
 let managedRun
+const exec = promisify(execFile)
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 async function jsonRequest(base, route, options) {
@@ -38,12 +40,21 @@ async function waitFor(description, callback) {
 }
 async function verifyOwnedChild(child, expected) {
   assert(child && child.exitCode === null, `${expected} is not running`)
-  const command = await fs.readFile(`/proc/${child.pid}/cmdline`, 'utf8')
-  const status = await fs.readFile(`/proc/${child.pid}/status`, 'utf8')
-  const stat = await fs.readFile(`/proc/${child.pid}/stat`, 'utf8')
+  let command; let owner; let parent
+  if (process.platform === 'linux') {
+    command = await fs.readFile(`/proc/${child.pid}/cmdline`, 'utf8')
+    const status = await fs.readFile(`/proc/${child.pid}/status`, 'utf8')
+    const stat = await fs.readFile(`/proc/${child.pid}/stat`, 'utf8')
+    owner = Number(status.match(/^Uid:\s+(\d+)/m)?.[1])
+    parent = Number(stat.split(' ')[3])
+  } else {
+    const { stdout } = await exec('ps', ['-o', 'ppid=', '-o', 'uid=', '-o', 'command=', '-p', String(child.pid)])
+    const match = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+    parent = Number(match?.[1]); owner = Number(match?.[2]); command = match?.[3] || ''
+  }
   assert(command.includes(expected), `refusing to stop unexpected process ${command}`)
-  assert.equal(Number(status.match(/^Uid:\s+(\d+)/m)?.[1]), process.getuid(), `${expected} owner changed`)
-  assert.equal(Number(stat.split(' ')[3]), process.pid, `${expected} is no longer the test process child`)
+  assert.equal(owner, process.getuid(), `${expected} owner changed`)
+  assert.equal(parent, process.pid, `${expected} is no longer the test process child`)
 }
 async function stopOwned(child, expected) {
   if (!child || child.exitCode !== null) return
@@ -58,12 +69,21 @@ async function stopManagedRun() {
     try { process.kill(managedRun.pid, 0) } catch { return }
     await wait(100)
   }
-  const command = await fs.readFile(`/proc/${managedRun.pid}/cmdline`, 'utf8')
-  const status = await fs.readFile(`/proc/${managedRun.pid}/status`, 'utf8')
-  const stat = await fs.readFile(`/proc/${managedRun.pid}/stat`, 'utf8')
-  assert(command.includes('codeskd\0__runner') && command.includes(path.join(daemonData, 'runs', managedRun.id)), `refusing to stop unexpected runner ${command}`)
-  assert.equal(Number(status.match(/^Uid:\s+(\d+)/m)?.[1]), process.getuid(), 'runner process owner changed')
-  assert.equal(Number(stat.split(' ')[4]), managedRun.processGroupId, 'runner process group changed')
+  let command; let owner; let processGroupId
+  if (process.platform === 'linux') {
+    command = await fs.readFile(`/proc/${managedRun.pid}/cmdline`, 'utf8')
+    const status = await fs.readFile(`/proc/${managedRun.pid}/status`, 'utf8')
+    const stat = await fs.readFile(`/proc/${managedRun.pid}/stat`, 'utf8')
+    owner = Number(status.match(/^Uid:\s+(\d+)/m)?.[1])
+    processGroupId = Number(stat.split(' ')[4])
+  } else {
+    const { stdout } = await exec('ps', ['-o', 'uid=', '-o', 'pgid=', '-o', 'command=', '-p', String(managedRun.pid)])
+    const match = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+    owner = Number(match?.[1]); processGroupId = Number(match?.[2]); command = match?.[3] || ''
+  }
+  assert(command.includes('codeskd') && command.includes('__runner') && command.includes(path.join(daemonData, 'runs', managedRun.id)), `refusing to stop unexpected runner ${command}`)
+  assert.equal(owner, process.getuid(), 'runner process owner changed')
+  assert.equal(processGroupId, managedRun.processGroupId, 'runner process group changed')
   process.kill(-managedRun.processGroupId, 'SIGTERM')
   for (let attempt = 0; attempt < 30; attempt++) { try { process.kill(managedRun.pid, 0) } catch { return }; await wait(100) }
   throw new Error('managed gateway test runner did not stop')
@@ -82,6 +102,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (method === 'initialize') send({ id, result: { userAgent: 'fake', platformFamily: 'unix', platformOs: 'linux' } })
   else if (method === 'initialized') {}
   else if (method === 'thread/start') send({ id, result: { thread: { id: thread, turns: [] } } })
+  else if (method === 'thread/resume') { thread = params.threadId; send({ id, result: { thread: { id: thread, turns: [] } } }) }
   else if (method === 'turn/start') {
     turn = 'gateway-turn-' + (++counter)
     send({ id, result: { turn: { id: turn, status: 'inProgress', items: [] } } })
@@ -144,7 +165,20 @@ try {
   await jsonRequest(gatewayBase, `/api/runs/local/${run.id}/terminate`, { method: 'POST', body: '{}' })
   await waitFor('runner cleanup', async () => (await jsonRequest(gatewayBase, '/api/state')).runs.find((item) => item.id === run.id && item.status === 'interrupted'))
 
-  console.log('ok - gateway restart preserves the remote-style Codex runner and replays missed events')
+  const resumed = managedRun = await jsonRequest(gatewayBase, '/api/runs', { method: 'POST', body: JSON.stringify({ hostId: 'local', project_id: project.id, provider: 'codex', title: 'Historical conversation', prompt: 'continued from history', workspace_mode: 'current_checkout', operation: 'resume', resume_session_id: 'historical-thread' }) })
+  assert.equal(resumed.sessionId, 'historical-thread')
+  await waitFor('historical session continuation', async () => (await jsonRequest(gatewayBase, `/api/runs/local/${resumed.id}/events?after=0`)).find((event) => event.kind === 'assistant.message' && event.payload.text === 'gateway:continued from history'))
+  await jsonRequest(gatewayBase, `/api/runs/local/${resumed.id}/terminate`, { method: 'POST', body: '{}' })
+  await waitFor('resumed runner cleanup', async () => (await jsonRequest(gatewayBase, '/api/state')).runs.find((item) => item.id === resumed.id && item.status === 'interrupted'))
+
+  await jsonRequest(gatewayBase, `/api/projects/local/${project.id}`, { method: 'DELETE' })
+  const removed = await jsonRequest(gatewayBase, '/api/navigation')
+  assert(!removed.projects.some((item) => item.id === project.id), 'removed project remained in the navigation cache')
+  assert(!removed.runs.some((item) => item.projectId === project.id), 'removed project runs remained in navigation')
+  const restored = await jsonRequest(gatewayBase, '/api/projects', { method: 'POST', body: JSON.stringify({ hostId: 'local', name: 'gateway-codex', path: root }) })
+  assert.equal(restored.id, project.id, 're-adding a project should restore the existing registration and history')
+
+  console.log('ok - gateway restart preserves Codex runners, historical sessions resume, and project removal updates navigation safely')
 } finally {
   let cleanupError
   try { await stopManagedRun() } catch (error) { cleanupError ||= error }

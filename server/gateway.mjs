@@ -4,6 +4,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
 import { promisify } from 'node:util'
+import WebSocket from 'ws'
 
 const sshOptions = ['-o','BatchMode=yes','-o','ExitOnForwardFailure=yes','-o','ConnectTimeout=7','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=3','-o','ControlMaster=auto','-o','ControlPersist=10m','-o','ControlPath=~/.ssh/codesk-%C']
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -25,6 +26,10 @@ export class Gateway {
     this.pollers = new Map()
     this.cursors = new Map()
     this.failures = new Map()
+    this.eventSockets = new Map()
+    this.eventFailures = new Map()
+    this.onDaemonEvent = null
+    this.onHostOnline = null
   }
 
   async start() {
@@ -62,12 +67,15 @@ export class Gateway {
     const changed = host.status !== 'online'
     host.status = 'online'; host.error = null; host.lastSeen = new Date().toISOString(); this.failures.set(host.id, 0); this.store.save()
     if (changed) this.broadcast('host.updated', host)
-    this.poll(host.id, 10)
+    this.connectEvents(host.id)
+    this.onHostOnline?.(host.id)
   }
 
   markOffline(host, error) {
     const changed = host.status !== 'offline' || host.error !== error
     host.status = 'offline'; host.error = error; this.store.save()
+    const socket = this.eventSockets.get(host.id)
+    if (socket) { this.eventSockets.delete(host.id); socket.close() }
     if (changed) this.broadcast('host.updated', host)
   }
 
@@ -160,24 +168,51 @@ export class Gateway {
     const child = this.processes.get(hostId); if (child) child.kill('SIGTERM'); else this.connect(hostId)
   }
 
-  poll(hostId, delay = 800) {
-    clearTimeout(this.pollers.get(`poll:${hostId}`))
-    this.pollers.set(`poll:${hostId}`, setTimeout(() => this.readEvents(hostId), delay))
-  }
-
-  async readEvents(hostId) {
+  connectEvents(hostId, delay = 0) {
+    clearTimeout(this.pollers.get(`events:${hostId}`))
+    if (delay > 0) {
+      this.pollers.set(`events:${hostId}`, setTimeout(() => this.connectEvents(hostId), delay))
+      return
+    }
     const host = this.host(hostId)
     if (!host || host.status !== 'online') return
-    try {
-      const cursor = this.cursors.get(hostId) || 0
-      const response = await fetch(`${this.endpoint(host)}/v1/events?after=${cursor}`, { signal: AbortSignal.timeout(5000) })
-      if (!response.ok) throw new Error(`daemon returned ${response.status}`)
-      const events = await response.json()
-      for (const event of events) { this.cursors.set(hostId, Math.max(this.cursors.get(hostId) || 0, event.global_sequence)); this.broadcast('daemon.event', { hostId, event }) }
-      this.poll(hostId, events.length ? 50 : 650)
-    } catch (cause) {
-      if (host.type === 'local') { this.markOffline(host, cause.message); setTimeout(() => this.ensureLocal(), 1200) }
-      else { const child = this.processes.get(host.id); if (child) child.kill('SIGTERM') }
+    const existing = this.eventSockets.get(hostId)
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return
+    const endpoint = this.endpoint(host).replace(/^http/, 'ws')
+    const cursor = this.cursors.get(hostId) || 0
+    const socket = new WebSocket(`${endpoint}/v1/events/ws?after=${cursor}`)
+    this.eventSockets.set(hostId, socket)
+    socket.on('open', () => this.eventFailures.set(hostId, 0))
+    socket.on('message', (payload) => {
+      try {
+        const event = JSON.parse(payload.toString())
+        this.cursors.set(hostId, Math.max(this.cursors.get(hostId) || 0, event.global_sequence || 0))
+        this.broadcast('daemon.event', { hostId, event })
+        this.onDaemonEvent?.(hostId, event)
+      } catch {}
+    })
+    socket.on('error', () => socket.close())
+    socket.on('close', async () => {
+      if (this.eventSockets.get(hostId) === socket) this.eventSockets.delete(hostId)
+      const current = this.host(hostId)
+      if (!current || current.status !== 'online') return
+      if (!(await this.health(current))) {
+        if (current.type === 'local') { this.markOffline(current, 'Local daemon event stream disconnected'); setTimeout(() => this.ensureLocal(), 1200) }
+        else { const child = this.processes.get(current.id); if (child) child.kill('SIGTERM') }
+        return
+      }
+      const failures = (this.eventFailures.get(hostId) || 0) + 1
+      this.eventFailures.set(hostId, failures)
+      this.connectEvents(hostId, Math.min(10_000, 400 * (2 ** Math.min(failures, 5))))
+    })
+  }
+
+  closeEvents(hostId) {
+    clearTimeout(this.pollers.get(`events:${hostId}`))
+    const socket = this.eventSockets.get(hostId)
+    if (socket) {
+      this.eventSockets.delete(hostId)
+      socket.close()
     }
   }
 

@@ -8,6 +8,7 @@ fn main() {
                 process::{Command, Stdio},
             };
             use tauri::Manager;
+            set_macos_app_icon();
             let resources = app.path().resource_dir()?;
             let gateway = resources.join("bin/codesk-gateway");
             let daemon = resources.join("bin/codeskd");
@@ -51,6 +52,26 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running Codesk desktop");
 }
+
+#[cfg(target_os = "macos")]
+fn set_macos_app_icon() {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(include_bytes!("../icons/icon.png"));
+    if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe {
+            NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&icon));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_macos_app_icon() {}
 
 fn reqwest_health_version(address: &str) -> Option<String> {
     use std::io::{Read, Write};

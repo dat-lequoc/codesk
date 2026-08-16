@@ -28,7 +28,7 @@ export type GitContext = {
 }
 
 export type Provider = {
-  id: 'codex' | 'pi' | 'claude' | 'shell'
+  id: 'codex' | 'kiro' | 'dsh' | 'agy' | 'pi' | 'claude' | 'shell'
   name: string
   color: string
   available: boolean
@@ -90,6 +90,8 @@ export type AppState = {
     notifications: boolean
     pinnedSessionKeys: string[]
     pinnedSessions: ProviderSession[]
+    archivedSessionKeys: string[]
+    archivedSessions: ProviderSession[]
   }
   discoveredAgentsByHost?: Record<string, DiscoveredAgent[]>
 }
@@ -119,6 +121,18 @@ export type ProviderSession = {
   sortAt: string
   status: 'running' | 'stopped' | 'idle'
   pid?: number | null
+  inputAvailable?: boolean
+  inputTransport?: 'tmux' | 'acp' | 'api' | null
+}
+
+export type ExternalQueuedInput = {
+  id: string
+  pid: number
+  session_id?: string | null
+  message: string
+  created_at: string
+  status: 'queued' | 'sending' | 'failed'
+  error?: string
 }
 
 export type SessionMessage = {
@@ -126,9 +140,24 @@ export type SessionMessage = {
   timestamp: string
   role: 'user' | 'assistant'
   text: string
+  kind?: 'message' | 'reasoning' | 'tool' | 'tool_output' | 'file_change' | 'turn_completed'
+  meta?: {
+    call_id?: string
+    command?: unknown
+    input?: unknown
+    output?: unknown
+    raw?: unknown
+    status?: string
+    tool?: string
+    server?: string
+    display?: string
+    changes?: Array<{ path?: string; kind?: string; diff?: string }>
+  }
+  duration_ms?: number
 }
 
 export type FileEntry = { name: string; path: string; is_dir: boolean; is_git: boolean }
 export type FileListing = { current_path: string; parent_path?: string | null; home_path: string; entries: FileEntry[] }
+export type FileContent = { path: string; name: string; content: string; mime_type?: string; data_url?: string; size: number; truncated: boolean }
 export type DiscoveredProject = { name: string; path: string; repo_root?: string | null; registered_project_id?: string | null }
-export type DiscoveredAgent = { id: string; provider: Provider['id']; pid: number; process_group_id: number; cwd?: string | null; command: string; managed_run_id?: string | null; native_session_id?: string | null; transcript_path?: string | null }
+export type DiscoveredAgent = { id: string; provider: Provider['id']; pid: number; process_group_id: number; cwd?: string | null; command: string; managed_run_id?: string | null; native_session_id?: string | null; transcript_path?: string | null; tmux_pane?: string | null }

@@ -1,26 +1,31 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, FormEvent, KeyboardEvent, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
-  Archive, Bell, Bot, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, Clock3, Command, Cpu, FileDiff, Folder, FolderGit2, Home, Info,
+  Archive, Bell, Bot, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, Clock3, Copy, Eye, FileDiff, FileText, Folder, FolderGit2, FolderOpen, Home, ImageIcon, Info,
   GitBranch, Globe2, Laptop, MoreHorizontal, Plug, Plus, Radio, RefreshCw,
-  ListPlus, Pencil, Pin, PinOff, Search, Send, Server, Settings2, ShieldAlert, Square, Terminal, TreePine,
+  ListPlus, Pencil, Pin, PinOff, Search, Send, Server, Settings2, ShieldAlert, Square, Terminal, Trash2, TreePine,
   WifiOff, X, Zap,
 } from 'lucide-react'
 import { api, gatewayOrigin } from './api'
-import type { AppState, DiscoveredAgent, DraftSession, FileEntry, GitContext, Host, Project, Provider, ProviderSession, Run, RunEvent, SessionMessage } from './types'
+import { ProviderIcon } from './ProviderIcon'
+import type { AppState, DiscoveredAgent, DraftSession, ExternalQueuedInput, FileContent, FileEntry, GitContext, Host, Project, Provider, ProviderSession, Run, RunEvent, SessionMessage } from './types'
 
-const empty: AppState = { hosts: [], projects: [], runs: [], sessions: [], drafts: [], providersByHost: {}, discoveredAgentsByHost: {}, settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [] } }
+const empty: AppState = { hosts: [], projects: [], runs: [], sessions: [], drafts: [], providersByHost: {}, discoveredAgentsByHost: {}, settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [] } }
 const active = new Set(['queued', 'starting', 'running', 'waiting_for_input', 'interrupting'])
 const markdownPlugins = [remarkGfm]
 const environmentContextPattern = /<environment_context>[\s\S]*?<\/environment_context>/gi
+const logoUrl = new URL('../logo.png', import.meta.url).href
+const FilePreviewContext = createContext<((href: string) => void) | null>(null)
 
-const providerIcon = (id: string) => id === 'codex' ? <Bot size={16} /> : id === 'pi' ? <Zap size={16} /> : id === 'claude' ? <Cpu size={16} /> : <Terminal size={16} />
+const providerIcon = (id: Provider['id'], size = 16) => <ProviderIcon provider={id} size={size} />
 const relative = (value?: string | null) => { if (!value) return ''; const seconds = Math.floor((Date.now() - new Date(value).getTime()) / 1000); return seconds < 60 ? 'now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h` }
 const prepareNotifications = async () => { if (!("Notification" in window)) return; if (Notification.permission === 'default') await Notification.requestPermission() }
 const notify = async (title: string, body: string, tag: string) => { if (!("Notification" in window)) return; await prepareNotifications(); if (Notification.permission === 'granted') new Notification(title, { body, tag }) }
 const projectKey = (project: Project) => `${project.hostId}:${project.id}`
-const projectForAgent = (projects: Project[], hostId: string, agent: DiscoveredAgent) => projects.filter((project) => project.hostId === hostId && agent.cwd && (agent.cwd === project.path || agent.cwd.startsWith(`${project.path}/`))).sort((left, right) => right.path.length - left.path.length)[0]
+const normalizedFolder = (value: string) => value.length > 1 ? value.replace(/\/+$/, '') : value
+const projectForAgent = (projects: Project[], hostId: string, agent: DiscoveredAgent) => projects.find((project) => project.hostId === hostId && agent.cwd && normalizedFolder(agent.cwd) === normalizedFolder(project.path))
 const observedAgents = (state: AppState) => {
   const sessions = new Map<string, { hostId: string; agent: DiscoveredAgent; project?: Project }>()
   for (const [hostId, agents] of Object.entries(state.discoveredAgentsByHost || {})) for (const agent of agents) {
@@ -30,9 +35,13 @@ const observedAgents = (state: AppState) => {
   }
   return [...sessions.values()]
 }
-const providerName = (provider: string) => provider === 'codex' ? 'Codex' : provider === 'pi' ? 'Pi' : provider === 'claude' ? 'Claude Code' : 'Command'
+const providerName = (provider: string) => provider === 'codex' ? 'Codex' : provider === 'kiro' ? 'Kiro CLI' : provider === 'dsh' ? 'DeepSeek Harness' : provider === 'agy' ? 'Antigravity' : provider === 'pi' ? 'Pi' : provider === 'claude' ? 'Claude Code' : 'Command'
+const harnessOrder: Provider['id'][] = ['codex', 'claude', 'kiro', 'pi', 'agy', 'dsh']
+const projectItemPageSize = 5
+function SidebarHarness({ provider }: { provider: Provider['id'] }) { const label = providerName(provider); return <span className={`sidebar-harness provider-${provider}`} title={label} aria-label={label}>{providerIcon(provider)}</span> }
 const sessionKey = (session: Pick<ProviderSession, 'hostId' | 'id'>) => `${session.hostId}:${session.id}`
 const recentFirst = (left: ProviderSession, right: ProviderSession) => right.sortAt.localeCompare(left.sortAt) || Number(right.status === 'running') - Number(left.status === 'running')
+const draftTitle = (draft: DraftSession) => { const text = draft.prompt?.trim().replace(/\s+/g, ' ') || ''; return text.length > 46 ? `${text.slice(0, 45)}…` : text }
 const pathLike = (value: string) => { const query = value.trim(); return query.startsWith('/') || query.startsWith('~') || query.includes('/') }
 const mergeEvents = (prior: RunEvent[], incoming: RunEvent[]) => {
   const merged = new Map(prior.map((event) => [event.event_id, event]))
@@ -46,9 +55,10 @@ const coalesceStreamEvents = (events: RunEvent[]) => {
     const stream = itemId && ['assistant.message', 'reasoning.message', 'tool.output'].includes(event.kind)
     const prior = result.at(-1)
     if (stream && prior?.kind === event.kind && prior.channel === event.channel && prior.payload.item_id === itemId) {
+      const replacePayload = event.kind === 'tool.output' || event.kind === 'file.change'
       const finalItem = event.provider_event_type === 'codex.item/completed'
-      const nextText = finalItem ? String(event.payload.text || prior.payload.text || '') : `${String(prior.payload.text || '')}${String(event.payload.text || '')}`
-      result[result.length - 1] = { ...prior, event_id: event.event_id, run_sequence: event.run_sequence, timestamp: event.timestamp, payload: { ...prior.payload, text: nextText } }
+      const nextText = replacePayload || finalItem ? String(event.payload.text || prior.payload.text || '') : `${String(prior.payload.text || '')}${String(event.payload.text || '')}`
+      result[result.length - 1] = { ...prior, ...event, payload: { ...prior.payload, ...event.payload, text: nextText } }
     } else result.push(event)
   }
   return result
@@ -90,7 +100,7 @@ const loadStringSet = (key: string) => {
 }
 const loadExpandedProjects = () => { const current = loadStringSet('codesk.expanded-projects:v1'); return current.size ? current : loadStringSet('codesk.expanded-projects') }
 const saveStringSet = (key: string, value: Set<string>) => { try { localStorage.setItem(key, JSON.stringify([...value])) } catch {} }
-const normalizeState = (value: AppState) => ({ ...value, drafts: value.drafts || [], settings: { notifications: value.settings?.notifications ?? true, pinnedSessionKeys: value.settings?.pinnedSessionKeys || [], pinnedSessions: value.settings?.pinnedSessions || [] } })
+const normalizeState = (value: AppState) => ({ ...value, drafts: value.drafts || [], settings: { notifications: value.settings?.notifications ?? true, pinnedSessionKeys: value.settings?.pinnedSessionKeys || [], pinnedSessions: value.settings?.pinnedSessions || [], archivedSessionKeys: value.settings?.archivedSessionKeys || [], archivedSessions: value.settings?.archivedSessions || [] } })
 const conversationText = (value: string) => {
   const hadContext = environmentContextPattern.test(value)
   environmentContextPattern.lastIndex = 0
@@ -116,6 +126,7 @@ export function App() {
   const [extraSessions, setExtraSessions] = useState<Record<string, ProviderSession[]>>({})
   const [newProject, setNewProject] = useState(false)
   const [settings, setSettings] = useState(false)
+  const [archives, setArchives] = useState(false)
   const [error, setError] = useState('')
   const initialized = useRef(false)
   const sessionMessagesRef = useRef<Record<string, SessionMessage[]>>({})
@@ -127,11 +138,23 @@ export function App() {
     const firstProject = firstDraft ? next.projects.find((item) => item.id === firstDraft.projectId && item.hostId === firstDraft.hostId) : firstSession ? next.projects.find((item) => item.id === firstSession.projectId && item.hostId === firstSession.hostId) : firstRun ? next.projects.find((item) => item.id === firstRun.projectId && item.hostId === firstRun.hostId) : next.projects[0]
     setSelectedProjectKey(firstProject ? projectKey(firstProject) : null); initialized.current = true
   }
-  const reload = async () => { try { const next = normalizeState(await api.state()); setState(next); setExtraSessions((current) => { const refreshed = { ...current }; for (const [key, items] of Object.entries(refreshed)) { const latest = new Map(next.sessions.filter((item) => `${item.hostId}:${item.projectId}` === key).map((item) => [sessionKey(item), item])); refreshed[key] = items.map((item) => latest.get(sessionKey(item)) || item) } return refreshed }); setError(''); if (!initialized.current) initializeSelection(next); else { setSelectedId((id) => id && next.runs.some((item) => item.id === id) ? id : null); setSelectedDraftId((id) => id && next.drafts.some((item) => item.id === id) ? id : null); setSelectedSessionKey((key) => key && [...next.sessions, ...next.settings.pinnedSessions].some((item) => sessionKey(item) === key) ? key : null) } } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } }
+  const reload = async () => { try { const next = normalizeState(await api.state()); setState(next); setExtraSessions((current) => { const refreshed = { ...current }; for (const [key, items] of Object.entries(refreshed)) { const latest = new Map(next.sessions.filter((item) => `${item.hostId}:${item.projectId}` === key).map((item) => [sessionKey(item), item])); refreshed[key] = items.map((item) => latest.get(sessionKey(item)) || item) } return refreshed }); setError(''); if (!initialized.current) initializeSelection(next); else { setSelectedId((id) => id && next.runs.some((item) => item.id === id) ? id : null); setSelectedDraftId((id) => id && next.drafts.some((item) => item.id === id) ? id : null); setSelectedSessionKey((key) => key && [...next.sessions, ...next.settings.pinnedSessions, ...next.settings.archivedSessions].some((item) => sessionKey(item) === key) ? key : null) } } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } }
   useEffect(() => { let cancelled = false; api.navigation().then((value) => { if (cancelled || initialized.current) return; const next = normalizeState(value); setState(next); if (next.projects.length || next.drafts.length || next.sessions.length || next.runs.length || next.settings.pinnedSessions.length) initializeSelection(next) }).catch(() => {}); return () => { cancelled = true } }, [])
-  useEffect(() => { let cancelled = false; let timer = 0; const poll = async () => { if (cancelled) return; await reload(); timer = window.setTimeout(poll, state.hosts.length ? 5000 : 650) }; void poll(); return () => { cancelled = true; clearTimeout(timer) } }, [])
+  useEffect(() => {
+    let cancelled = false; let timer = 0; let loading = false
+    const poll = async () => {
+      if (cancelled || loading || document.hidden) return
+      loading = true
+      try { await reload() } finally { loading = false }
+      if (!cancelled && !document.hidden) timer = window.setTimeout(poll, 15_000)
+    }
+    const visibility = () => { clearTimeout(timer); if (!document.hidden) void poll() }
+    document.addEventListener('visibilitychange', visibility)
+    void poll()
+    return () => { cancelled = true; clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
+  }, [])
   const run = state.runs.find((item) => item.id === selectedId) || null
-  const session = [...state.sessions, ...Object.values(extraSessions).flat(), ...state.settings.pinnedSessions].find((item) => sessionKey(item) === selectedSessionKey) || null
+  const session = [...state.sessions, ...Object.values(extraSessions).flat(), ...state.settings.pinnedSessions, ...state.settings.archivedSessions].find((item) => sessionKey(item) === selectedSessionKey) || null
   const sessionHostStatus = session ? state.hosts.find((item) => item.id === session.hostId)?.status : undefined
   const draft = state.drafts.find((item) => item.id === selectedDraftId) || null
   useEffect(() => { if (!run || events[run.id]) return; api.events(run.hostId, run.id).then((items) => setEvents((current) => ({ ...current, [run.id]: items }))).catch(() => {}) }, [run?.id])
@@ -139,12 +162,13 @@ export function App() {
     if (!session || !selectedSessionKey || sessionHostStatus !== 'online') return
     let stopped = false
     let timer = 0
+    let idleDelay = 2000
     const load = async () => {
       const prior = sessionMessagesRef.current[selectedSessionKey] || []
       const after = [...prior].reverse().find((item) => item.timestamp)?.timestamp
       try {
         const incoming = await api.sessionMessages(session.hostId, session.projectId, session.provider, session.nativeSessionId, after)
-        if (stopped || !incoming.length) return
+        if (stopped || !incoming.length) return false
         setSessionMessages((current) => {
           const existing = current[selectedSessionKey] || []
           const merged = new Map(existing.map((item) => [item.id, item]))
@@ -155,19 +179,30 @@ export function App() {
           sessionMessagesRef.current = updated
           return updated
         })
+        return true
       } catch (cause) {
         if (!stopped) setError(cause instanceof Error ? cause.message : String(cause))
+        return false
       }
     }
-    const poll = async () => { await load(); if (!stopped) timer = window.setTimeout(poll, 2000) }
+    const poll = async () => {
+      if (stopped || document.hidden) return
+      const changed = await load()
+      if (stopped || document.hidden) return
+      if (session.status === 'running' || changed) idleDelay = 2000
+      else idleDelay = Math.min(15_000, idleDelay * 2)
+      timer = window.setTimeout(poll, session.status === 'running' ? 2000 : idleDelay)
+    }
+    const visibility = () => { clearTimeout(timer); if (!document.hidden) { idleDelay = 2000; void poll() } }
+    document.addEventListener('visibilitychange', visibility)
     void poll()
-    return () => { stopped = true; clearTimeout(timer) }
-  }, [selectedSessionKey, session?.hostId, session?.projectId, session?.provider, session?.nativeSessionId, sessionHostStatus])
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
+  }, [selectedSessionKey, session?.hostId, session?.projectId, session?.provider, session?.nativeSessionId, session?.status, sessionHostStatus])
   useEffect(() => {
     const origin = gatewayOrigin ? gatewayOrigin.replace('http://', 'ws://').replace('https://', 'wss://') : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
     let ws: WebSocket | null = null; let stopped = false; let retry = 500
     const replay = async () => { const snapshot = await api.state(); await Promise.all(snapshot.runs.map(async (item) => { const incoming = await api.events(item.hostId, item.id); setEvents((current) => ({ ...current, [item.id]: mergeEvents(current[item.id] || [], incoming) })) })) }
-    const connect = () => { if (stopped) return; ws = new WebSocket(`${origin}/ws`); ws.onopen = () => { retry = 500; void reload(); void replay().catch(() => {}) }; ws.onmessage = (message) => { const envelope = JSON.parse(message.data); if (envelope.type === 'daemon.event') { const event = envelope.payload.event as RunEvent; setEvents((current) => { const prior = current[event.run_id] || []; return prior.some((item) => item.event_id === event.event_id) ? current : { ...current, [event.run_id]: [...prior, event].sort((a, b) => a.run_sequence - b.run_sequence) } }); if (event.kind.startsWith('run.') || event.kind.startsWith('control.') || event.kind.startsWith('turn.') || event.kind.startsWith('thread.') || event.kind.startsWith('queue.')) void reload(); if (['run.completed','run.failed','run.interrupted','run.killed','run.orphaned','input.required','approval.required'].includes(event.kind) && !notified.current.has(event.event_id)) { notified.current.add(event.event_id); localStorage.setItem('codesk.notifications', JSON.stringify([...notified.current].slice(-500))); void notify(`Codesk · ${event.kind.replaceAll('.', ' ')}`, String(event.payload.text || 'Agent run updated'), event.event_id) } } else if (envelope.type.startsWith('host.') || envelope.type.startsWith('draft.') || envelope.type === 'settings.updated') void reload() }; ws.onclose = () => { if (!stopped) { window.setTimeout(connect, retry); retry = Math.min(10000, retry * 1.8) } }; ws.onerror = () => ws?.close() }
+    const connect = () => { if (stopped) return; ws = new WebSocket(`${origin}/ws`); ws.onopen = () => { retry = 500; void reload(); void replay().catch(() => {}) }; ws.onmessage = (message) => { const envelope = JSON.parse(message.data); if (envelope.type === 'daemon.event') { const event = envelope.payload.event as RunEvent; setEvents((current) => { const prior = current[event.run_id] || []; return prior.some((item) => item.event_id === event.event_id) ? current : { ...current, [event.run_id]: [...prior, event].sort((a, b) => a.run_sequence - b.run_sequence) } }); if (event.kind.startsWith('run.') || event.kind.startsWith('control.') || event.kind.startsWith('turn.') || event.kind.startsWith('thread.') || event.kind.startsWith('queue.')) void reload(); if (['run.completed','run.failed','run.interrupted','run.killed','run.orphaned','input.required','approval.required'].includes(event.kind) && !notified.current.has(event.event_id)) { notified.current.add(event.event_id); localStorage.setItem('codesk.notifications', JSON.stringify([...notified.current].slice(-500))); void notify(`Codesk · ${event.kind.replaceAll('.', ' ')}`, String(event.payload.text || 'Agent run updated'), event.event_id) } } else if (envelope.type.startsWith('host.') || envelope.type.startsWith('draft.') || envelope.type === 'settings.updated' || envelope.type === 'state.updated') void reload() }; ws.onclose = () => { if (!stopped) { window.setTimeout(connect, retry); retry = Math.min(10000, retry * 1.8) } }; ws.onerror = () => ws?.close() }
     connect(); return () => { stopped = true; ws?.close() }
   }, [])
   useEffect(() => {
@@ -182,18 +217,24 @@ export function App() {
     }
   }, [state.sessions, state.settings.notifications])
   const allSessions = useMemo(() => {
-    const merged = new Map([...state.settings.pinnedSessions, ...state.sessions].map((item) => [sessionKey(item), item]))
+    const merged = new Map([...state.settings.pinnedSessions, ...state.settings.archivedSessions, ...state.sessions].map((item) => [sessionKey(item), item]))
     for (const items of Object.values(extraSessions)) for (const item of items) merged.set(sessionKey(item), item)
     return [...merged.values()]
-  }, [state.sessions, state.settings.pinnedSessions, extraSessions])
+  }, [state.sessions, state.settings.pinnedSessions, state.settings.archivedSessions, extraSessions])
+  const archivedSessions = state.settings.archivedSessionKeys.map((key) => allSessions.find((item) => sessionKey(item) === key)).filter((item): item is ProviderSession => Boolean(item)).sort(recentFirst)
   const agents = useMemo(() => observedAgents(state), [state])
   const selectedAgent = agents.find(({ hostId, agent }) => `${hostId}:${agent.id}` === selectedAgentKey) || null
   const project = draft ? state.projects.find((item) => item.id === draft.projectId && item.hostId === draft.hostId) : session ? state.projects.find((item) => item.id === session.projectId && item.hostId === session.hostId) : run ? state.projects.find((item) => item.id === run.projectId && item.hostId === run.hostId) : selectedAgent?.project || state.projects.find((item) => projectKey(item) === selectedProjectKey) || state.projects[0]
   const host = project ? state.hosts.find((item) => item.id === project.hostId) : state.hosts[0]
   const provider = run ? state.providersByHost[run.hostId]?.find((item) => item.id === run.provider) : undefined
+  const sessionProvider = session ? state.providersByHost[session.hostId]?.find((item) => item.id === session.provider) : undefined
   const selectProject = (next: Project) => { setSelectedProjectKey(projectKey(next)); setSelectedId(null); setSelectedSessionKey(null); setSelectedAgentKey(null); setSelectedDraftId(null) }
   const selectRun = (next: Run) => { setSelectedId(next.id); setSelectedSessionKey(null); setSelectedAgentKey(null); setSelectedDraftId(null); setSelectedProjectKey(`${next.hostId}:${next.projectId}`) }
-  const selectSession = (next: ProviderSession) => { setSelectedSessionKey(`${next.hostId}:${next.id}`); setSelectedId(null); setSelectedAgentKey(null); setSelectedDraftId(null); setSelectedProjectKey(`${next.hostId}:${next.projectId}`) }
+  const selectSession = (next: ProviderSession) => {
+    const activeRun = state.runs.find((item) => item.hostId === next.hostId && item.projectId === next.projectId && item.provider === next.provider && item.sessionId === next.nativeSessionId && active.has(item.status))
+    if (activeRun) { selectRun(activeRun); return }
+    setSelectedSessionKey(`${next.hostId}:${next.id}`); setSelectedId(null); setSelectedAgentKey(null); setSelectedDraftId(null); setSelectedProjectKey(`${next.hostId}:${next.projectId}`)
+  }
   const selectDraft = (next: DraftSession) => { setSelectedDraftId(next.id); setSelectedId(null); setSelectedSessionKey(null); setSelectedAgentKey(null); setSelectedProjectKey(`${next.hostId}:${next.projectId}`) }
   const selectAgent = (hostId: string, agent: DiscoveredAgent, nextProject?: Project) => { setSelectedAgentKey(`${hostId}:${agent.id}`); setSelectedId(null); setSelectedSessionKey(null); setSelectedDraftId(null); if (nextProject) setSelectedProjectKey(projectKey(nextProject)) }
   const newDraft = async (nextProject = project) => { if (!nextProject) return; try { selectDraft(await api.createDraft({ hostId: nextProject.hostId, projectId: nextProject.id })) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } }
@@ -206,27 +247,52 @@ export function App() {
     try { const settings = await api.updateSettings({ pinnedSessionKeys, pinnedSessions }); setState((current) => ({ ...current, settings })) }
     catch (cause) { setState((current) => ({ ...current, settings: prior })); setError(cause instanceof Error ? cause.message : String(cause)) }
   }
+  const toggleArchive = async (nextSession: ProviderSession) => {
+    const key = sessionKey(nextSession); const archived = state.settings.archivedSessionKeys; const isArchived = archived.includes(key)
+    const archivedSessionKeys = isArchived ? archived.filter((item) => item !== key) : [...archived, key]
+    const archivedSnapshots = isArchived ? state.settings.archivedSessions.filter((item) => sessionKey(item) !== key) : [...state.settings.archivedSessions.filter((item) => sessionKey(item) !== key), nextSession]
+    const pinnedSessionKeys = isArchived ? state.settings.pinnedSessionKeys : state.settings.pinnedSessionKeys.filter((item) => item !== key)
+    const pinnedSessions = isArchived ? state.settings.pinnedSessions : state.settings.pinnedSessions.filter((item) => sessionKey(item) !== key)
+    const prior = state.settings; const nextSettings = { ...prior, archivedSessionKeys, archivedSessions: archivedSnapshots, pinnedSessionKeys, pinnedSessions }
+    setState((current) => ({ ...current, settings: nextSettings }))
+    if (!isArchived && selectedSessionKey === key) setSelectedSessionKey(null)
+    try { const saved = await api.updateSettings({ archivedSessionKeys, archivedSessions: archivedSnapshots, pinnedSessionKeys, pinnedSessions }); setState((current) => ({ ...current, settings: saved })) }
+    catch (cause) { setState((current) => ({ ...current, settings: prior })); if (!isArchived && selectedSessionKey === key) setSelectedSessionKey(key); setError(cause instanceof Error ? cause.message : String(cause)) }
+  }
+  const removeProject = async (nextProject: Project) => {
+    if (!confirm(`Remove ${nextProject.name} from Codesk?\n\nThe folder and its files will not be deleted.`)) return
+    const key = projectKey(nextProject)
+    try {
+      await api.removeProject(nextProject.hostId, nextProject.id)
+      setExtraSessions((current) => { const next = { ...current }; delete next[key]; return next })
+      if (selectedProjectKey === key) { setSelectedId(null); setSelectedSessionKey(null); setSelectedAgentKey(null); setSelectedDraftId(null); setSelectedProjectKey(null) }
+      await reload()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+  }
   return <div className="codex-shell">
-    <Sidebar state={state} runs={state.runs} sessions={allSessions} agents={agents} selectedId={selectedId} selectedSessionKey={selectedSessionKey} selectedAgentKey={selectedAgentKey} selectedDraftId={selectedDraftId} selectedProjectKey={selectedProjectKey} query={query} onQuery={setQuery} onSelectRun={selectRun} onSelectSession={selectSession} onSelectDraft={selectDraft} onSelectAgent={selectAgent} onSelectProject={selectProject} onTogglePin={togglePin} onShowMore={async (project) => { const key = projectKey(project); try { const items = await api.projectSessions(project.hostId, project.id, 150); setExtraSessions((current) => ({ ...current, [key]: items })); return true } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false } }} onNewRun={() => void newDraft()} onNewProject={() => setNewProject(true)} onSettings={() => setSettings(true)} />
+    <Sidebar state={state} runs={state.runs} sessions={allSessions} agents={agents} selectedId={selectedId} selectedSessionKey={selectedSessionKey} selectedAgentKey={selectedAgentKey} selectedDraftId={selectedDraftId} selectedProjectKey={selectedProjectKey} query={query} onQuery={setQuery} onSelectRun={selectRun} onSelectSession={selectSession} onSelectDraft={selectDraft} onSelectAgent={selectAgent} onSelectProject={selectProject} onRemoveProject={removeProject} onTogglePin={togglePin} onToggleArchive={toggleArchive} onShowMore={async (project, visibleLimit) => { const key = projectKey(project); try { const items = await api.projectSessions(project.hostId, project.id, visibleLimit + 1); setExtraSessions((current) => ({ ...current, [key]: items })); return true } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false } }} onNewRun={() => void newDraft()} onNewProject={() => setNewProject(true)} onSettings={() => setSettings(true)} onArchives={() => setArchives(true)} />
     <section className="codex-main">
-      {session ? <SessionScreen session={session} messages={sessionMessages[selectedSessionKey!] || []} project={project} host={host} /> : run ? <RunScreen run={run} events={events[run.id] || []} project={project} host={host} provider={provider} /> : selectedAgent ? <ObservedScreen host={state.hosts.find((item) => item.id === selectedAgent.hostId)} project={selectedAgent.project} agent={selectedAgent.agent} /> : <StartScreen key={draft?.id || (project ? projectKey(project) : 'empty')} state={state} draft={draft || undefined} project={project} host={host} onProject={() => setNewProject(true)} onStarted={(next) => { selectRun(next); void reload() }} />}
+      {session ? <SessionScreen session={session} messages={sessionMessages[selectedSessionKey!] || []} project={project} host={host} provider={sessionProvider} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} /> : run ? <RunScreen run={run} events={events[run.id] || []} project={project} host={host} provider={provider} onStarted={(next) => { selectRun(next); void reload() }} /> : selectedAgent ? <ObservedScreen host={state.hosts.find((item) => item.id === selectedAgent.hostId)} project={selectedAgent.project} agent={selectedAgent.agent} onError={setError} /> : <StartScreen key={draft?.id || (project ? projectKey(project) : 'empty')} state={state} draft={draft || undefined} project={project} host={host} onProject={() => setNewProject(true)} onStarted={(next) => { selectRun(next); void reload() }} />}
     </section>
     {error && <div className="toast-error">{error}<button onClick={() => setError('')}><X size={14} /></button></div>}
     {newProject && <ProjectDialog hosts={state.hosts} onClose={() => setNewProject(false)} onCreated={async () => { setNewProject(false); await reload() }} />}
     {settings && <ConnectionsDialog hosts={state.hosts} onClose={() => setSettings(false)} onChanged={reload} />}
+    {archives && <ArchivedChatsDialog sessions={archivedSessions} projects={state.projects} hosts={state.hosts} onOpen={(next) => { selectSession(next); setArchives(false) }} onRestore={toggleArchive} onClose={() => setArchives(false)} />}
   </div>
 }
 
-function Sidebar({ state, runs, sessions, agents, selectedId, selectedSessionKey, selectedAgentKey, selectedDraftId, selectedProjectKey, query, onQuery, onSelectRun, onSelectSession, onSelectDraft, onSelectAgent, onSelectProject, onTogglePin, onShowMore, onNewRun, onNewProject, onSettings }: {
+function Sidebar({ state, runs, sessions, agents, selectedId, selectedSessionKey, selectedAgentKey, selectedDraftId, selectedProjectKey, query, onQuery, onSelectRun, onSelectSession, onSelectDraft, onSelectAgent, onSelectProject, onRemoveProject, onTogglePin, onToggleArchive, onShowMore, onNewRun, onNewProject, onSettings, onArchives }: {
   state: AppState; runs: Run[]; sessions: ProviderSession[]; agents: ReturnType<typeof observedAgents>
   selectedId: string | null; selectedSessionKey: string | null; selectedAgentKey: string | null; selectedDraftId: string | null; selectedProjectKey: string | null
   query: string; onQuery: (value: string) => void; onSelectRun: (run: Run) => void; onSelectSession: (session: ProviderSession) => void; onSelectDraft: (draft: DraftSession) => void
-  onSelectAgent: (hostId: string, agent: DiscoveredAgent, project?: Project) => void; onSelectProject: (project: Project) => void; onTogglePin: (session: ProviderSession) => Promise<void>
-  onShowMore: (project: Project) => Promise<boolean>; onNewRun: () => void; onNewProject: () => void; onSettings: () => void
+  onSelectAgent: (hostId: string, agent: DiscoveredAgent, project?: Project) => void; onSelectProject: (project: Project) => void; onRemoveProject: (project: Project) => Promise<void>; onTogglePin: (session: ProviderSession) => Promise<void>; onToggleArchive: (session: ProviderSession) => Promise<void>
+  onShowMore: (project: Project, visibleLimit: number) => Promise<boolean>; onNewRun: () => void; onNewProject: () => void; onSettings: () => void; onArchives: () => void
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(loadExpandedProjects)
-  const [expandedSessionLists, setExpandedSessionLists] = useState<Set<string>>(() => new Set())
+  const [projectItemLimits, setProjectItemLimits] = useState<Map<string, number>>(() => new Map())
+  const [searchOpen, setSearchOpen] = useState(Boolean(query))
   const scroller = useRef<HTMLDivElement>(null)
+  const searchInput = useRef<HTMLInputElement>(null)
   const preSearchScroll = useRef(0)
   const restoreSearchScroll = useRef(false)
   const searchScrollCaptured = useRef(false)
@@ -236,7 +302,8 @@ function Sidebar({ state, runs, sessions, agents, selectedId, selectedSessionKey
   onNewRunRef.current = onNewRun
   const needle = query.trim().toLowerCase()
   const pinnedKeys = state.settings.pinnedSessionKeys
-  const pinnedSessions = pinnedKeys.map((key) => sessions.find((session) => sessionKey(session) === key)).filter((session): session is ProviderSession => Boolean(session)).filter((session) => {
+  const archivedKeys = new Set(state.settings.archivedSessionKeys)
+  const pinnedSessions = pinnedKeys.map((key) => sessions.find((session) => sessionKey(session) === key)).filter((session): session is ProviderSession => Boolean(session)).filter((session) => !archivedKeys.has(sessionKey(session))).filter((session) => {
     if (!needle) return true
     const project = state.projects.find((item) => item.id === session.projectId && item.hostId === session.hostId); const host = state.hosts.find((item) => item.id === session.hostId)
     return `${session.title} ${session.provider} ${project?.name || ''} ${host?.name || ''}`.toLowerCase().includes(needle)
@@ -262,66 +329,84 @@ function Sidebar({ state, runs, sessions, agents, selectedId, selectedSessionKey
   useEffect(() => {
     const shortcuts = (event: globalThis.KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return
-      if (event.key.toLowerCase() === 'k') { event.preventDefault(); if (!queryRef.current && !searchScrollCaptured.current) { preSearchScroll.current = scroller.current?.scrollTop || 0; searchScrollCaptured.current = true } document.querySelector<HTMLInputElement>('.navigation-search input')?.focus() }
+      if (event.key.toLowerCase() === 'k') { event.preventDefault(); if (!queryRef.current && !searchScrollCaptured.current) { preSearchScroll.current = scroller.current?.scrollTop || 0; searchScrollCaptured.current = true } setSearchOpen(true); window.setTimeout(() => searchInput.current?.focus(), 0) }
       if (event.key.toLowerCase() === 'n') { event.preventDefault(); onNewRunRef.current() }
     }
     document.addEventListener('keydown', shortcuts)
     return () => document.removeEventListener('keydown', shortcuts)
   }, [])
   const toggle = (key: string) => setExpanded((current) => { const next = new Set(current); next.has(key) ? next.delete(key) : next.add(key); saveStringSet('codesk.expanded-projects:v1', next); return next })
-  const expandSessions = async (project: Project) => { if (await onShowMore(project)) setExpandedSessionLists((current) => new Set(current).add(projectKey(project))) }
+  const expandSessions = async (project: Project) => {
+    const key = projectKey(project)
+    const nextLimit = (projectItemLimits.get(key) || projectItemPageSize) + projectItemPageSize
+    if (await onShowMore(project, nextLimit)) setProjectItemLimits((current) => new Map(current).set(key, nextLimit))
+  }
   const updateQuery = (value: string) => {
     if (!query && value && !searchScrollCaptured.current) { preSearchScroll.current = scroller.current?.scrollTop || 0; searchScrollCaptured.current = true }
     const restore = Boolean(query && !value)
     if (restore) restoreSearchScroll.current = true
     onQuery(value)
   }
+  const openSearch = () => { setSearchOpen(true); window.setTimeout(() => searchInput.current?.focus(), 0) }
   let visibleProjectCount = 0
   return <aside className="codex-sidebar">
-    <div className="sidebar-top"><strong>Codesk</strong><ChevronDown size={14} /><span /><button title="Search conversations" onClick={() => document.querySelector<HTMLInputElement>('.navigation-search input')?.focus()}><Search size={17} /></button><button title="Notifications"><Bell size={17} /></button></div>
+    <div className="sidebar-top"><img className="app-logo" src={logoUrl} alt="" /><strong>Codesk</strong><ChevronDown size={14} /><span /><button title="Search conversations" onClick={openSearch}><Search size={17} /></button><button title="Notifications"><Bell size={17} /></button></div>
     <button className="side-action" onClick={onNewRun}><Plus size={17} />New chat</button>
     <button className="side-action"><GitBranch size={17} />Pull requests</button>
     <button className="side-action"><Clock3 size={17} />Scheduled</button>
     <button className="side-action"><Plug size={17} />Plugins</button>
     <div className="navigation-scroller" ref={scroller} onScroll={(event) => { if (needle || restoreSearchScroll.current) return; try { localStorage.setItem('codesk.navigation-scroll:v1', String(event.currentTarget.scrollTop)) } catch {} }}>
-      <div className="navigation-search"><Search size={13} /><input aria-label="Search projects and conversations" value={query} onPointerDown={() => { if (!query && !searchScrollCaptured.current) { preSearchScroll.current = scroller.current?.scrollTop || 0; searchScrollCaptured.current = true } }} onFocus={() => { if (!query && !searchScrollCaptured.current) { preSearchScroll.current = scroller.current?.scrollTop || 0; searchScrollCaptured.current = true } }} onChange={(event) => updateQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { updateQuery(''); event.currentTarget.blur() } }} placeholder="Search" />{query && <button title="Clear search" onClick={() => updateQuery('')}><X size={12} /></button>}</div>
+      <div className={`navigation-search ${searchOpen || query ? 'open' : ''}`} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node) && !query) setSearchOpen(false) }}><Search size={13} /><input ref={searchInput} aria-label="Search projects and conversations" value={query} onPointerDown={() => { if (!query && !searchScrollCaptured.current) { preSearchScroll.current = scroller.current?.scrollTop || 0; searchScrollCaptured.current = true } }} onFocus={() => { setSearchOpen(true); if (!query && !searchScrollCaptured.current) { preSearchScroll.current = scroller.current?.scrollTop || 0; searchScrollCaptured.current = true } }} onChange={(event) => updateQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { updateQuery(''); setSearchOpen(false); event.currentTarget.blur() } }} placeholder="Search" />{query && <button title="Clear search" onClick={() => updateQuery('')}><X size={12} /></button>}</div>
       {pinnedSessions.length > 0 && <section className="pinned-section" aria-label="Pinned conversations"><div className="side-heading"><span>Pinned</span></div>{pinnedSessions.map((session) => {
         const key = sessionKey(session); const project = state.projects.find((item) => item.id === session.projectId && item.hostId === session.hostId); const host = state.hosts.find((item) => item.id === session.hostId)
-        return <div className="pinned-row" key={key}><button data-session-key={key} className={`pinned-session ${key === selectedSessionKey ? 'selected' : ''}`} title={`${project?.name || session.cwd} · ${host?.name || session.hostId}`} onClick={() => onSelectSession(session)} onContextMenu={(event) => { event.preventDefault(); void onTogglePin(session) }}><Pin size={12} /><span><strong>{session.title}</strong><small>{project?.name || 'Unknown project'} · {host?.name || session.hostId}</small></span></button><button className="session-pin" title="Unpin conversation" onClick={() => void onTogglePin(session)}><PinOff size={12} /></button></div>
+        return <div className="pinned-row" key={key}><button data-session-key={key} className={`pinned-session ${key === selectedSessionKey ? 'selected' : ''}`} title={`${providerName(session.provider)} · ${project?.name || session.cwd} · ${host?.name || session.hostId}`} onClick={() => onSelectSession(session)} onContextMenu={(event) => { event.preventDefault(); void onTogglePin(session) }}><Pin size={12} /><span><strong><SidebarHarness provider={session.provider} /><span>{session.title}</span></strong><small>{project?.name || 'Unknown project'} · {host?.name || session.hostId}</small></span></button><button className="session-pin" title="Unpin conversation" onClick={() => void onTogglePin(session)}><PinOff size={12} /></button></div>
       })}</section>}
       <section className="projects-section" aria-label="Projects"><div className="side-heading"><span>Projects</span><button title="Add project" onClick={onNewProject}><Plus size={15} /></button></div><div className="project-tree" role="tree">{state.projects.map((project) => {
         const key = projectKey(project); const host = state.hosts.find((item) => item.id === project.hostId)
-        const allProjectDrafts = state.drafts.filter((draft) => draft.projectId === project.id && draft.hostId === project.hostId)
-        const allProjectSessions = sessions.filter((session) => session.projectId === project.id && session.hostId === project.hostId).sort(recentFirst)
-        const allProjectRuns = runs.filter((run) => run.projectId === project.id && run.hostId === project.hostId && !allProjectSessions.some((session) => session.nativeSessionId === run.sessionId))
-        const allProjectAgents = agents.filter((item) => item.project && projectKey(item.project) === key && !allProjectSessions.some((session) => session.provider === item.agent.provider && session.status === 'running'))
+        const allProjectDrafts = state.drafts.filter((draft) => draft.projectId === project.id && draft.hostId === project.hostId && draft.prompt?.trim())
+        const providerProjectSessions = sessions.filter((session) => session.projectId === project.id && session.hostId === project.hostId)
+        const allProjectSessions = providerProjectSessions.filter((session) => !archivedKeys.has(sessionKey(session))).sort(recentFirst)
+        const allProjectRuns = runs.filter((run) => run.projectId === project.id && run.hostId === project.hostId && !providerProjectSessions.some((session) => session.nativeSessionId === run.sessionId))
+        const allProjectAgents = agents.filter((item) => item.project && projectKey(item.project) === key && !providerProjectSessions.some((session) => session.provider === item.agent.provider && session.status === 'running'))
         const projectMatches = `${project.name} ${project.path} ${host?.name || ''}`.toLowerCase().includes(needle)
-        const projectDrafts = !needle || projectMatches || 'new chat'.includes(needle) ? allProjectDrafts : []
+        const projectDrafts = !needle || projectMatches ? allProjectDrafts : allProjectDrafts.filter((draft) => `${draftTitle(draft)} draft`.toLowerCase().includes(needle))
         const matchingSessions = !needle || projectMatches ? allProjectSessions : allProjectSessions.filter((session) => `${session.title} ${session.provider}`.toLowerCase().includes(needle))
         const projectRuns = !needle || projectMatches ? allProjectRuns : allProjectRuns.filter((run) => `${run.title} ${run.prompt} ${run.provider}`.toLowerCase().includes(needle))
         const projectAgents = !needle || projectMatches ? allProjectAgents : allProjectAgents.filter(({ agent }) => `${providerName(agent.provider)} ${agent.cwd || ''}`.toLowerCase().includes(needle))
         if (needle && !projectMatches && !projectDrafts.length && !matchingSessions.length && !projectRuns.length && !projectAgents.length) return null
         visibleProjectCount += 1
-        const open = needle ? true : expanded.has(key); const sessionListExpanded = expandedSessionLists.has(key)
-        const projectSessions = needle && !projectMatches ? matchingSessions : sessionListExpanded ? matchingSessions : matchingSessions.slice(0, 5)
+        const open = needle ? true : expanded.has(key)
+        const totalProjectItems = projectDrafts.length + matchingSessions.length + projectRuns.length + projectAgents.length
+        const itemLimit = needle ? totalProjectItems : projectItemLimits.get(key) || projectItemPageSize
+        const visibleProjectDrafts = projectDrafts.slice(0, itemLimit)
+        const draftSlotsRemaining = Math.max(0, itemLimit - visibleProjectDrafts.length)
+        const visibleProjectSessions = matchingSessions.slice(0, draftSlotsRemaining)
+        const sessionSlotsRemaining = Math.max(0, draftSlotsRemaining - visibleProjectSessions.length)
+        const visibleProjectRuns = projectRuns.slice(0, sessionSlotsRemaining)
+        const runSlotsRemaining = Math.max(0, sessionSlotsRemaining - visibleProjectRuns.length)
+        const visibleProjectAgents = projectAgents.slice(0, runSlotsRemaining)
         const runningCount = allProjectSessions.filter((session) => session.status === 'running').length
         const projectOnlySelected = selectedProjectKey === key && !selectedId && !selectedSessionKey && !selectedAgentKey && !selectedDraftId
         const createProjectDraft = async () => { if (!open) toggle(key); onSelectDraft(await api.createDraft({ hostId: project.hostId, projectId: project.id })) }
         return <div className={`project-group host-${host?.status || 'offline'}`} key={key} role="treeitem" aria-expanded={open}>
-          <div className={`project-row ${projectOnlySelected ? 'selected' : ''}`}><button className="project-chevron" aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} onClick={() => toggle(key)}>{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button><button className="project-main" onClick={() => onSelectProject(project)}><FolderGit2 size={15} /><strong>{project.name}</strong></button>{runningCount > 0 && <span className="project-running-count"><Radio size={10} />{runningCount}</span>}<span className="project-host-tag">{host?.name || project.hostId}</span><i className={host?.status} title={host?.status || 'offline'} /><button className="project-new-chat" title={`Start new chat in ${project.name}`} onClick={() => void createProjectDraft()}><Plus size={14} /></button></div>
+          <div className={`project-row ${projectOnlySelected ? 'selected' : ''}`}><button className="project-chevron" aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} onClick={() => toggle(key)}>{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button><button className="project-main" onClick={() => onSelectProject(project)}><FolderGit2 size={15} /><strong>{project.name}</strong></button>{runningCount > 0 && <span className="project-running-count"><Radio size={10} />{runningCount}</span>}<span className="project-host-tag">{host?.name || project.hostId}</span><i className={host?.status} title={host?.status || 'offline'} /><button className="project-remove" title={`Remove ${project.name} from Codesk`} onClick={() => void onRemoveProject(project)}><Trash2 size={12} /></button><button className="project-new-chat" title={`Start new chat in ${project.name}`} onClick={() => void createProjectDraft()}><Plus size={14} /></button></div>
           {open && <div className="project-sessions" role="group">
-            {projectDrafts.map((draft) => <button key={draft.id} className={`project-session draft ${draft.id === selectedDraftId ? 'selected' : ''}`} onClick={() => onSelectDraft(draft)}><span className="recent-status"><Circle size={7} /></span><span>New chat</span></button>)}
-            {projectSessions.map((session) => { const sessionId = sessionKey(session); const pinned = pinnedKeys.includes(sessionId); return <div className="project-session-row" key={sessionId}><button data-session-key={sessionId} className={`project-session ${session.status} ${sessionId === selectedSessionKey ? 'selected' : ''}`} onClick={() => onSelectSession(session)} onContextMenu={(event) => { event.preventDefault(); void onTogglePin(session) }}><span className="recent-status">{session.status === 'running' ? <Radio size={11} /> : session.status === 'stopped' ? <Circle className="stopped-dot" size={7} fill="currentColor" /> : null}</span><span>{session.title}</span>{session.status === 'running' ? <small className="running-label">Running</small> : <small>{relative(session.updatedAt)}</small>}</button><button className={`session-pin ${pinned ? 'pinned' : ''}`} title={pinned ? 'Unpin conversation' : 'Pin conversation'} onClick={() => void onTogglePin(session)}>{pinned ? <PinOff size={12} /> : <Pin size={12} />}</button></div> })}
-            {!needle && !sessionListExpanded && allProjectSessions.length > 5 && <button className="project-show-more" onClick={() => void expandSessions(project)}>Show more</button>}
-            {projectRuns.map((run) => <button key={`${run.hostId}:${run.id}`} className={`project-session ${run.id === selectedId ? 'selected' : ''}`} onClick={() => onSelectRun(run)}><span className="recent-status">{active.has(run.status) ? <Radio size={11} /> : <Circle size={7} fill="currentColor" />}</span><span>{run.title}</span><small>{relative(run.createdAt)}</small></button>)}
-            {projectAgents.map(({ hostId, agent }) => <button key={`${hostId}:${agent.id}`} className={`project-session observed ${`${hostId}:${agent.id}` === selectedAgentKey ? 'selected' : ''}`} onClick={() => onSelectAgent(hostId, agent, project)}><span className="recent-status"><Radio size={11} /></span><span>{providerName(agent.provider)}</span><small>observed</small></button>)}
-            {!projectDrafts.length && !projectSessions.length && !projectRuns.length && !projectAgents.length && <div className="project-empty">No chats</div>}
+            {visibleProjectDrafts.map((draft) => <button key={draft.id} className={`project-session draft ${draft.id === selectedDraftId ? 'selected' : ''}`} onClick={() => onSelectDraft(draft)}><span className="recent-status"><Pencil size={10} /></span><span className="sidebar-session-title"><SidebarHarness provider={draft.provider} /><span>{draftTitle(draft)}</span></span><small className="sidebar-session-meta">{relative(draft.updatedAt)}</small></button>)}
+            {visibleProjectSessions.map((session) => { const sessionId = sessionKey(session); const pinned = pinnedKeys.includes(sessionId); return <div className="project-session-row" key={sessionId}><button data-session-key={sessionId} className={`project-session ${session.status} ${sessionId === selectedSessionKey ? 'selected' : ''}`} title={`${providerName(session.provider)} · ${session.title}`} onClick={() => onSelectSession(session)} onContextMenu={(event) => { event.preventDefault(); void onTogglePin(session) }}><span className="recent-status">{session.status === 'running' ? <Radio size={11} /> : session.status === 'stopped' ? <Circle className="stopped-dot" size={7} fill="currentColor" /> : null}</span><span className="sidebar-session-title"><SidebarHarness provider={session.provider} /><span>{session.title}</span></span>{session.status === 'running' ? <small className="running-label sidebar-session-meta"><b>Running</b></small> : <small className="sidebar-session-meta">{relative(session.updatedAt)}</small>}</button><button className="session-archive" title="Archive conversation" onClick={() => void onToggleArchive(session)}><Archive size={12} /></button><button className={`session-pin ${pinned ? 'pinned' : ''}`} title={pinned ? 'Unpin conversation' : 'Pin conversation'} onClick={() => void onTogglePin(session)}>{pinned ? <PinOff size={12} /> : <Pin size={12} />}</button></div> })}
+            {visibleProjectRuns.map((run) => <button key={`${run.hostId}:${run.id}`} className={`project-session ${run.id === selectedId ? 'selected' : ''}`} title={`${providerName(run.provider)} · ${run.title}`} onClick={() => onSelectRun(run)}><span className="recent-status">{active.has(run.status) ? <Radio size={11} /> : <Circle size={7} fill="currentColor" />}</span><span className="sidebar-session-title"><SidebarHarness provider={run.provider} /><span>{run.title}</span></span><small className="sidebar-session-meta">{relative(run.createdAt)}</small></button>)}
+            {visibleProjectAgents.map(({ hostId, agent }) => <button key={`${hostId}:${agent.id}`} className={`project-session observed ${`${hostId}:${agent.id}` === selectedAgentKey ? 'selected' : ''}`} onClick={() => onSelectAgent(hostId, agent, project)}><span className="recent-status"><Radio size={11} /></span><span className="sidebar-session-title"><SidebarHarness provider={agent.provider} /><span>Observed session</span></span><small>observed</small></button>)}
+            {!needle && totalProjectItems > itemLimit && <button className="project-show-more" onClick={() => void expandSessions(project)}>Show more</button>}
+            {totalProjectItems === 0 && <div className="project-empty">No chats</div>}
           </div>}
         </div>
       })}{needle && visibleProjectCount === 0 && <div className="navigation-empty">No matching projects or conversations</div>}</div></section>
     </div>
-    <div className="side-bottom"><button onClick={onSettings}><Settings2 size={17} /><span>Gateway / Settings</span></button><button><Archive size={17} /><span>Archived chats</span></button></div>
+    <div className="side-bottom"><button onClick={onSettings}><Settings2 size={17} /><span>Gateway / Settings</span></button><button onClick={onArchives}><Archive size={17} /><span>Archived chats</span>{state.settings.archivedSessionKeys.length > 0 && <small>{state.settings.archivedSessionKeys.length}</small>}</button></div>
   </aside>
+}
+
+function ArchivedChatsDialog({ sessions, projects, hosts, onOpen, onRestore, onClose }: { sessions: ProviderSession[]; projects: Project[]; hosts: Host[]; onOpen: (session: ProviderSession) => void; onRestore: (session: ProviderSession) => Promise<void>; onClose: () => void }) {
+  return <div className="dialog-backdrop"><div className="codex-dialog archived-dialog"><header><div><h2>Archived chats</h2><p>Archived conversations stay available without cluttering project navigation.</p></div><button title="Close" onClick={onClose}><X size={19} /></button></header><div className="archived-list">{sessions.length ? sessions.map((session) => { const project = projects.find((item) => item.id === session.projectId && item.hostId === session.hostId); const host = hosts.find((item) => item.id === session.hostId); return <div className="archived-row" key={sessionKey(session)}><button className="archived-main" onClick={() => onOpen(session)}><Archive size={14} /><span><strong>{session.title}</strong><small>{project?.name || session.cwd} · {host?.name || session.hostId} · {relative(session.updatedAt)}</small></span></button><button className="archived-restore" onClick={() => void onRestore(session)}>Unarchive</button></div> }) : <div className="archived-empty"><Archive size={24} /><strong>No archived chats</strong><span>Use the archive button beside a project conversation to move it here.</span></div>}</div></div></div>
 }
 
 function ComposerFrame({ className, onSubmit, children }: { className: string; onSubmit: (event: FormEvent) => void; children: React.ReactNode }) { return <form className={className} onSubmit={onSubmit}>{children}</form> }
@@ -331,13 +416,21 @@ function ComposerFooter({ className, children }: { className?: string; children:
 function StartScreen({ state, draft, project, host, onProject, onStarted }: { state: AppState; draft?: DraftSession; project?: Project; host?: Host; onProject: () => void; onStarted: (run: Run) => void }) {
   const [prompt, setPrompt] = useState(draft?.prompt || ''); const [provider, setProvider] = useState(draft?.provider || 'codex'); const [workspace, setWorkspace] = useState<'current_checkout' | 'managed_worktree'>(draft?.workspaceMode || 'current_checkout'); const [busy, setBusy] = useState(false); const [gitContext, setGitContext] = useState<GitContext | null>(null)
   const providers = project ? state.providersByHost[project.hostId] || [] : []
-  useEffect(() => { if (draft) return; const first = providers.find((item) => item.available); if (first) setProvider(first.id) }, [project?.id, draft?.id])
+  const harnesses = useMemo(() => providers.filter((item) => item.id !== 'shell').sort((left, right) => harnessOrder.indexOf(left.id) - harnessOrder.indexOf(right.id)), [providers])
+  const selectedHarness = harnesses.find((item) => item.id === provider)
+  useEffect(() => { if (selectedHarness?.available) return; const first = harnesses.find((item) => item.available); if (first) setProvider(first.id) }, [harnesses, selectedHarness?.available])
   useEffect(() => { if (!draft) return; const timer = window.setTimeout(() => { void api.updateDraft(draft.id, { prompt, provider, workspaceMode: workspace }) }, 250); return () => clearTimeout(timer) }, [draft?.id, prompt, provider, workspace])
   useEffect(() => { let cancelled = false; setGitContext(null); if (project && host?.status === 'online') api.projectContext(project.hostId, project.id).then((value) => { if (!cancelled) setGitContext(value) }).catch(() => {}); return () => { cancelled = true } }, [project?.hostId, project?.id, host?.status])
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (!project || !prompt.trim()) return; setBusy(true); try { const input = { hostId: project.hostId, project_id: project.id, provider, prompt, workspace_mode: workspace, base_ref: 'HEAD' }; onStarted(draft ? await api.startDraft(draft.id, input) : await api.createRun(input)) } finally { setBusy(false) } }
+  const canSubmit = Boolean(project && host?.status === 'online' && selectedHarness?.available && prompt.trim())
+  const submit = async (event: FormEvent) => { event.preventDefault(); if (!project || !canSubmit) return; setBusy(true); try { const input = { hostId: project.hostId, project_id: project.id, provider, prompt, workspace_mode: workspace, base_ref: 'HEAD' }; onStarted(draft ? await api.startDraft(draft.id, input) : await api.createRun(input)) } finally { setBusy(false) } }
   return <div className="start-screen">
-    <div className="start-center"><div className="agent-cloud"><Command size={28} /></div><h1>{project ? `What should we work on in ${project.name}?` : 'Add a project to get started'}</h1>{project && <div className="starter-cards"><button onClick={() => setPrompt('Explore and explain this codebase')}><Search size={17} /><span>Explore and<br />understand code</span></button><button onClick={() => setPrompt('Build a new feature for this project')}><Zap size={17} /><span>Build a new feature,<br />app, or tool</span></button><button onClick={() => setPrompt('Review the code and suggest improvements')}><RefreshCw size={17} /><span>Review code and<br />suggest changes</span></button><button onClick={() => setPrompt('Find and fix issues and failures')}><ShieldAlert size={17} /><span>Fix issues and failures</span></button></div>}</div>
-    {project ? <ComposerFrame className="codex-composer" onSubmit={submit}><div className="composer-context"><button type="button"><FolderGit2 size={15} />{project.name}</button><button type="button">{host?.type === 'ssh' ? <Globe2 size={15} /> : <Laptop size={15} />}{host?.type === 'ssh' ? 'Remote' : 'Local'}</button><button type="button" title={gitContext?.detached ? 'Detached HEAD' : gitContext?.dirty ? 'Working tree has changes' : gitContext?.available ? 'Current Git branch' : 'This folder is not a Git repository'}><GitBranch size={15} />{gitContext ? gitContext.available ? gitContext.branch : 'No Git repository' : host?.status === 'online' ? 'Loading branch' : 'Unavailable'}{gitContext?.dirty ? ' *' : ''}</button><span /><strong>{host?.name}<i className={host?.status} /></strong></div><ComposerInput value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Do anything" /><ComposerFooter className="composer-footer"><button type="button" className="plus"><Plus size={18} /></button><button type="button" className={`access ${workspace === 'managed_worktree' ? 'worktree' : ''}`} onClick={() => setWorkspace((value) => value === 'current_checkout' ? 'managed_worktree' : 'current_checkout')}>{workspace === 'managed_worktree' ? <TreePine size={15} /> : <ShieldAlert size={15} />}{workspace === 'managed_worktree' ? 'New worktree' : 'Current checkout'}</button><span /><select value={provider} onChange={(event) => setProvider(event.target.value as Provider['id'])}>{providers.filter((item) => item.available).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button className="send" disabled={busy || !prompt.trim()}>{busy ? <RefreshCw className="spin" size={17} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame> : <button className="add-project-cta" onClick={onProject}><Plus size={17} />Add project</button>}
+    <div className="start-center"><img className="start-logo" src={logoUrl} alt="Codesk" /><h1>{project ? `What should we work on in ${project.name}?` : 'Add a project to get started'}</h1>{project && <div className="starter-cards"><button onClick={() => setPrompt('Explore and explain this codebase')}><Search size={17} /><span>Explore and<br />understand code</span></button><button onClick={() => setPrompt('Build a new feature for this project')}><Zap size={17} /><span>Build a new feature,<br />app, or tool</span></button><button onClick={() => setPrompt('Review the code and suggest improvements')}><RefreshCw size={17} /><span>Review code and<br />suggest changes</span></button><button onClick={() => setPrompt('Find and fix issues and failures')}><ShieldAlert size={17} /><span>Fix issues and failures</span></button></div>}</div>
+    {project ? <ComposerFrame className="codex-composer" onSubmit={submit}>
+      <div className="composer-context"><button type="button"><FolderGit2 size={15} />{project.name}</button><button type="button">{host?.type === 'ssh' ? <Globe2 size={15} /> : <Laptop size={15} />}{host?.type === 'ssh' ? 'Remote' : 'Local'}</button><button type="button" title={gitContext?.detached ? 'Detached HEAD' : gitContext?.dirty ? 'Working tree has changes' : gitContext?.available ? 'Current Git branch' : 'This folder is not a Git repository'}><GitBranch size={15} />{gitContext ? gitContext.available ? gitContext.branch : 'No Git repository' : host?.status === 'online' ? 'Loading branch' : 'Unavailable'}{gitContext?.dirty ? ' *' : ''}</button><span /><strong>{host?.name}<i className={host?.status} /></strong></div>
+      <div className="harness-picker"><span>Start with</span><div className="harness-options" role="radiogroup" aria-label="Choose a harness">{harnesses.map((item) => <button type="button" role="radio" aria-checked={provider === item.id} className={`harness-option ${provider === item.id ? 'selected' : ''}`} key={item.id} disabled={!item.available} title={item.available ? `Start this chat with ${item.name}` : `${item.name} is not installed on ${host?.name || 'this host'}`} onClick={() => setProvider(item.id)}>{providerIcon(item.id)}<span>{item.name}</span><i className={item.available ? 'available' : ''} /></button>)}</div></div>
+      <ComposerInput value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={selectedHarness ? `Ask ${selectedHarness.name} to do anything` : 'Choose a harness to get started'} />
+      <ComposerFooter className="composer-footer"><button type="button" className="plus"><Plus size={18} /></button><button type="button" className={`access ${workspace === 'managed_worktree' ? 'worktree' : ''}`} onClick={() => setWorkspace((value) => value === 'current_checkout' ? 'managed_worktree' : 'current_checkout')}>{workspace === 'managed_worktree' ? <TreePine size={15} /> : <ShieldAlert size={15} />}{workspace === 'managed_worktree' ? 'New worktree' : 'Current checkout'}</button><span /><small className="selected-harness-label">{selectedHarness && providerIcon(selectedHarness.id)}{selectedHarness?.name || 'No harness available'}</small><button className="send" disabled={busy || !canSubmit} title={host?.status !== 'online' ? 'Execution host is offline' : !selectedHarness?.available ? 'Choose an installed harness' : 'Start chat'}>{busy ? <RefreshCw className="spin" size={17} /> : <Send size={17} />}</button></ComposerFooter>
+    </ComposerFrame> : <button className="add-project-cta" onClick={onProject}><Plus size={17} />Add project</button>}
   </div>
 }
 
@@ -360,52 +453,423 @@ const turnDurations = (events: RunEvent[]) => {
   }
   return durations
 }
-function MarkdownContent({ text, className = '' }: { text: string; className?: string }) { return <div className={`markdown-content ${className}`}><ReactMarkdown remarkPlugins={markdownPlugins}>{text}</ReactMarkdown></div> }
+const externalHrefPattern = /^[a-z][a-z\d+.-]*:/i
+const linkedFilePath = (href: string, cwd: string) => {
+  let value = href
+  if (value.startsWith('file://')) { try { value = new URL(value).pathname } catch {} }
+  else value = value.split(/[?#]/, 1)[0]
+  try { value = decodeURIComponent(value) } catch {}
+  value = value.replace(/:(\d+)(?::\d+)?$/, '')
+  if (value.startsWith('/')) return value
+  return `${cwd.replace(/\/$/, '')}/${value.replace(/^\.\//, '')}`
+}
+type FilePreviewState = { requestedPath: string; file?: FileContent; error?: string }
+function useFilePreview(hostId: string, cwd: string) {
+  const [preview, setPreview] = useState<FilePreviewState | null>(null)
+  useEffect(() => { setPreview(null) }, [hostId, cwd])
+  const open = (href: string) => {
+    const path = linkedFilePath(href, cwd)
+    setPreview({ requestedPath: path })
+    void api.file(hostId, path).then((file) => setPreview({ requestedPath: path, file })).catch((cause) => setPreview({ requestedPath: path, error: cause instanceof Error ? cause.message : String(cause) }))
+  }
+  return { preview, open, close: () => setPreview(null) }
+}
+function MarkdownContent({ text, className = '' }: { text: string; className?: string }) {
+  const openFile = useContext(FilePreviewContext)
+  return <div className={`markdown-content ${className}`}><ReactMarkdown remarkPlugins={markdownPlugins} components={{ a: ({ href = '', children, ...props }) => {
+    const isAnchor = href.startsWith('#'); const isExternal = externalHrefPattern.test(href) && !href.startsWith('file:')
+    if (!isAnchor && !isExternal && openFile) return <a {...props} href={href} onClick={(event) => { event.preventDefault(); openFile(href) }}>{children}</a>
+    return <a {...props} href={href} target={isExternal ? '_blank' : undefined} rel={isExternal ? 'noreferrer' : undefined}>{children}</a>
+  } }}>{text}</ReactMarkdown></div>
+}
+function FilePreviewPanel({ state, onClose }: { state: FilePreviewState; onClose: () => void }) {
+  const isImage = Boolean(state.file?.data_url)
+  return <aside className="file-preview-panel"><header>{isImage ? <ImageIcon size={15} /> : <FileText size={15} />}<span><strong>{state.file?.name || state.requestedPath.split('/').pop()}</strong><small title={state.file?.path || state.requestedPath}>{state.file?.path || state.requestedPath}</small></span><button title="Close file preview" onClick={onClose}><X size={16} /></button></header>{state.error ? <div className="file-preview-state"><ShieldAlert size={20} /><strong>Could not preview this file</strong><span>{state.error}</span></div> : state.file ? isImage ? <div className="file-preview-image"><img src={state.file.data_url} alt={state.file.name} /></div> : <><pre>{state.file.content}</pre>{state.file.truncated && <footer>Preview limited to the first 2 MB of {Math.ceil(state.file.size / 1024).toLocaleString()} KB.</footer>}</> : <div className="file-preview-state"><RefreshCw className="spin" size={18} /><span>Loading file from host…</span></div>}</aside>
+}
 function ConversationMessage({ role, text, className = '', children }: { role: 'user' | 'assistant'; text: string; className?: string; children?: React.ReactNode }) {
   const content = conversationText(text)
   if (!content.text && content.hadContext) return <div className="context-note"><Info size={13} />Environment context attached</div>
   if (role === 'user') return <div className={`user-message ${className}`}><MarkdownContent text={content.text} />{children}</div>
   return <MarkdownContent text={content.text} className={`assistant-message ${className}`} />
 }
-function ToolActivityGroup({ events }: { events: RunEvent[] }) {
-  const commandCount = events.filter((event) => String((event.raw_payload as { method?: string })?.method || '').includes('commandExecution')).length
-  const fileCount = events.filter((event) => event.kind === 'file.change' || String((event.raw_payload as { method?: string })?.method || '').includes('fileChange')).length
-  const failed = events.some((event) => event.channel === 'stderr' || event.kind === 'run.error')
-  const label = commandCount || fileCount ? `${commandCount ? `${commandCount} command${commandCount === 1 ? '' : 's'}` : ''}${commandCount && fileCount ? ' · ' : ''}${fileCount ? `${fileCount} file change${fileCount === 1 ? '' : 's'}` : ''}` : `${events.length} activity item${events.length === 1 ? '' : 's'}`
-  return <details className="tool-activity-group" open={failed || undefined}><summary><Terminal size={13} /><span>{failed ? 'Activity failed' : 'Activity'}</span><small>{label}</small><ChevronRight size={13} /></summary><div>{events.map((event) => <OperationalEvent event={event} key={event.event_id} />)}</div></details>
+type FileChange = { path?: string; kind?: string; diff?: string }
+type ActivityStatus = 'running' | 'completed' | 'failed'
+type ActivityEntry = {
+  id: string
+  correlationId?: string
+  type: 'tool' | 'files'
+  label: string
+  status: ActivityStatus
+  input?: unknown
+  output?: unknown
+  changes: FileChange[]
+  timestamp: string
+  raw: unknown
 }
-function OperationalEvent({ event }: { event: RunEvent }) {
-  const raw = event.raw_payload as { method?: string; params?: { command?: string; item?: { type?: string; command?: string; changes?: Array<{ path?: string; kind?: string; diff?: string }> } } }
+type ActivityLedgerItem = { type: 'reasoning'; id: string; text: string } | { type: 'entry'; entry: ActivityEntry }
+const diffCounts = (diff = '') => diff.split('\n').reduce((counts, line) => {
+  if (line.startsWith('+') && !line.startsWith('+++')) counts.additions += 1
+  if (line.startsWith('-') && !line.startsWith('---')) counts.deletions += 1
+  return counts
+}, { additions: 0, deletions: 0 })
+const changePath = (run: Run, path = '') => path.startsWith('/') ? path : `${run.cwd.replace(/\/$/, '')}/${path}`
+
+function FileChangeCard({ changes = [], text, run }: { changes?: FileChange[]; text: string; run: Run }) {
+  const [showAll, setShowAll] = useState(false); const [reviewing, setReviewing] = useState(false)
+  const stats = changes.reduce((total, change) => { const next = diffCounts(change.diff); total.additions += next.additions; total.deletions += next.deletions; return total }, { additions: 0, deletions: 0 })
+  if (!changes.length && text) { const fallback = diffCounts(text); stats.additions = fallback.additions; stats.deletions = fallback.deletions }
+  const visible = showAll ? changes : changes.slice(0, 4); const hidden = Math.max(0, changes.length - visible.length)
+  const reviewText = changes.map((change) => change.diff ? `${change.path || 'Unknown file'}\n${change.diff}` : '').filter(Boolean).join('\n\n') || text
+  const label = changes.length ? `Edited ${changes.length} file${changes.length === 1 ? '' : 's'}` : 'File changes'
+  return <section className="file-change-card">
+    <header><span className="file-change-icon"><FileDiff size={15} /></span><div className="file-change-title"><strong>{label}</strong>{(stats.additions > 0 || stats.deletions > 0) && <small><b>+{stats.additions}</b><i>-{stats.deletions}</i></small>}</div><span />{reviewText && <button className={reviewing ? 'active' : ''} onClick={() => setReviewing((value) => !value)}><Eye size={13} />{reviewing ? 'Hide diff' : 'Review'}</button>}</header>
+    {visible.length > 0 && <div className="file-change-list">{visible.map((change, index) => { const counts = diffCounts(change.diff); return <div className="file-change-row" key={`${change.path || 'file'}:${index}`}><code title={change.path}>{change.path || 'Unknown file'}</code><small>{counts.additions > 0 && <b>+{counts.additions}</b>}{counts.deletions > 0 && <i>-{counts.deletions}</i>}</small><button title="Copy path" onClick={() => void navigator.clipboard.writeText(change.path || '')}><Copy size={12} /></button><button title="Open file" onClick={() => void api.openPath(run.hostId, changePath(run, change.path))}><FolderOpen size={12} /></button></div> })}</div>}
+    {hidden > 0 && <button className="file-change-more" onClick={() => setShowAll(true)}>Show {hidden} more file{hidden === 1 ? '' : 's'}<ChevronDown size={13} /></button>}
+    {showAll && changes.length > 4 && <button className="file-change-more" onClick={() => setShowAll(false)}>Show fewer<ChevronDown className="up" size={13} /></button>}
+    {reviewing && reviewText && <pre className="file-change-review">{reviewText}</pre>}
+    {!changes.length && text && !reviewing && <pre>{text}</pre>}
+  </section>
+}
+
+const activityText = (value: unknown) => {
+  if (value === undefined || value === null || value === '') return ''
+  if (typeof value === 'string') return value
+  try { return JSON.stringify(value, null, 2) } catch { return String(value) }
+}
+const compactActivityValue = (value: unknown, limit = 150) => {
+  if (value === undefined || value === null || value === '') return ''
+  const text = activityText(value).replace(/\s+/g, ' ').trim()
+  if (text.length <= limit) return text
+  return `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`
+}
+const wrappedExecCommand = (value: unknown) => {
+  if (typeof value !== 'string' || !value.includes('tools.exec_command')) return ''
+  const match = value.match(/tools\.exec_command\(\s*\{\s*cmd\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)/s)
+  if (!match) return ''
+  const literal = match[1]
+  let command = literal.slice(1, -1)
+  if (literal.startsWith('"')) {
+    try { command = JSON.parse(literal) as string } catch {}
+  } else command = command.replace(/\\(['\\`])/g, '$1').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+  command = compactActivityValue(command, 600)
+  if (!command) return ''
+  return /^\/bin\/zsh\s+-lc\b/.test(command) ? command : `/bin/zsh -lc ${command}`
+}
+const activityCommandValue = (value: unknown) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const record = value as Record<string, unknown>
+  return record.command ?? record.cmd ?? record.argv ?? record.args ?? record.path ?? record.paths ?? value
+}
+const activityFileSummary = (entry: ActivityEntry) => {
+  if (entry.type === 'files') {
+    const paths = entry.changes.map((change) => change.path).filter(Boolean).slice(0, 3) as string[]
+    const hidden = Math.max(0, entry.changes.filter((change) => change.path).length - paths.length)
+    const stats = entry.changes.reduce((total, change) => {
+      const counts = diffCounts(change.diff)
+      total.additions += counts.additions
+      total.deletions += counts.deletions
+      return total
+    }, { additions: 0, deletions: 0 })
+    const pathText = paths.join(' · ')
+    const countText = `${stats.additions > 0 ? `+${stats.additions}` : ''}${stats.deletions > 0 ? `${stats.additions > 0 ? ' ' : ''}-${stats.deletions}` : ''}`
+    return [pathText || (entry.changes.length ? `${entry.changes.length} changed paths` : ''), hidden > 0 ? `+${hidden} more` : '', countText].filter(Boolean).join('  ')
+  }
+  return ''
+}
+const activityRowLabel = (entry: ActivityEntry) => {
+  if (entry.type === 'files') return [entry.label, activityFileSummary(entry)].filter(Boolean).join(' · ')
+  return wrappedExecCommand(entry.input) || compactActivityValue(activityCommandValue(entry.input), 600) || compactActivityValue(entry.label, 600) || 'Tool activity'
+}
+const isWrappedExecEntry = (entry: ActivityEntry) => Boolean(wrappedExecCommand(entry.input))
+const mergeWrappedExecEntry = (items: ActivityLedgerItem[], entry: ActivityEntry) => {
+  if (entry.type !== 'tool' || isWrappedExecEntry(entry)) return false
+  const label = activityRowLabel(entry)
+  for (let index = items.length - 1; index >= 0; index--) {
+    const candidate = items[index]
+    if (candidate.type === 'reasoning') break
+    if (candidate.entry.type === 'tool' && isWrappedExecEntry(candidate.entry) && activityRowLabel(candidate.entry) === label) {
+      items[index] = { type: 'entry', entry: mergeActivityEntries(candidate.entry, entry) }
+      return true
+    }
+  }
+  return false
+}
+const activityStatus = (value: unknown, failed = false): ActivityStatus => {
+  const status = String(value || '').toLowerCase()
+  if (failed || ['failed', 'error', 'errored', 'cancelled'].includes(status)) return 'failed'
+  if (['in_progress', 'running', 'pending', 'started'].includes(status)) return 'running'
+  return 'completed'
+}
+const liveActivityEntry = (event: RunEvent): ActivityEntry | null => {
+  if (event.kind === 'reasoning.message') return null
+  const raw = event.raw_payload as { method?: string; params?: { command?: unknown; item?: { type?: string; command?: unknown; changes?: FileChange[] }; update?: { title?: string; kind?: string; status?: string } } }
+  const method = raw?.method || ''
+  const item = raw?.params?.item
+  const payloadChanges = Array.isArray(event.payload.changes) ? event.payload.changes as FileChange[] : []
+  const changes = payloadChanges.length ? payloadChanges : item?.changes || []
+  const files = event.kind === 'file.change' || method.includes('fileChange') || item?.type === 'fileChange' || changes.length > 0
+  const text = String(event.payload.text || '')
+  const command = event.payload.tool_title ?? event.payload.tool_name ?? raw?.params?.update?.title ?? raw?.params?.command ?? item?.command
+  const label = files ? changes.length ? `Edited ${changes.length} file${changes.length === 1 ? '' : 's'}` : 'File changes' : activityText(command) || (event.kind === 'tool.output' ? 'Tool output' : event.kind.replaceAll('.', ' '))
+  const status = event.payload.tool_status ?? raw?.params?.update?.status
+  const input = event.payload.raw_input ?? event.payload.input ?? (!files && command !== undefined ? command : undefined)
+  const rawOutput = event.payload.raw_output ?? event.payload.output
+  const output = rawOutput !== undefined ? rawOutput : text && text !== label && text !== activityText(command) ? text : undefined
+  const correlationId = typeof event.payload.item_id === 'string' ? event.payload.item_id : undefined
+  return {
+    id: `run:${event.run_id}:${correlationId || event.event_id}`,
+    correlationId,
+    type: files ? 'files' : 'tool',
+    label,
+    status: activityStatus(status, event.channel === 'stderr' || event.kind === 'run.error'),
+    input,
+    output,
+    changes,
+    timestamp: event.timestamp,
+    raw: { kind: event.kind, provider_event_type: event.provider_event_type, channel: event.channel, payload: event.payload, provider_payload: event.raw_payload },
+  }
+}
+const liveActivityItems = (events: RunEvent[]): ActivityLedgerItem[] => {
+  const items: ActivityLedgerItem[] = []
+  for (const event of events) {
+    if (event.kind === 'reasoning.message') { items.push({ type: 'reasoning', id: event.event_id, text: String(event.payload.text || '') }); continue }
+    const entry = liveActivityEntry(event)
+    if (!entry) continue
+    if (event.kind === 'tool.output' && entry.label === 'Tool output') {
+      let match = -1
+      for (let index = items.length - 1; index >= 0; index--) {
+        const candidate = items[index]
+        if (candidate.type === 'reasoning') break
+        if (candidate.entry.type === 'tool' && (candidate.entry.correlationId === entry.correlationId || index === items.length - 1)) { match = index; break }
+      }
+      if (match >= 0) {
+        const candidate = items[match]
+        if (candidate.type === 'entry') { items[match] = { type: 'entry', entry: mergeActivityEntries(candidate.entry, entry) }; continue }
+      }
+      continue
+    }
+    if (mergeWrappedExecEntry(items, entry)) continue
+    items.push({ type: 'entry', entry })
+  }
+  return items
+}
+
+const historicalActivityEntry = (message: SessionMessage): ActivityEntry => {
+  const meta = message.meta || {}
+  const changes = meta.changes || []
+  const files = message.kind === 'file_change' || changes.length > 0
+  const output = meta.output !== undefined ? meta.output : message.text || undefined
+  const input = meta.input !== undefined ? meta.input : meta.command
+  const correlationId = meta.call_id || message.id
+  return {
+    id: `history:${correlationId}`,
+    correlationId,
+    type: files ? 'files' : 'tool',
+    label: files ? changes.length ? `Edited ${changes.length} file${changes.length === 1 ? '' : 's'}` : 'File changes' : activityText(meta.display || meta.tool || meta.command) || 'Tool output',
+    status: activityStatus(meta.status),
+    input,
+    output,
+    changes,
+    timestamp: message.timestamp,
+    raw: { id: message.id, kind: message.kind, text: message.text, meta: message.meta },
+  }
+}
+const mergeActivityEntries = (prior: ActivityEntry, next: ActivityEntry): ActivityEntry => ({
+  ...prior,
+  type: prior.type === 'files' || next.type === 'files' ? 'files' : 'tool',
+  label: prior.label === 'Tool output' ? next.label : prior.label,
+  status: next.status,
+  input: prior.input ?? next.input,
+  output: next.output ?? prior.output,
+  changes: next.changes.length ? next.changes : prior.changes,
+  timestamp: next.timestamp || prior.timestamp,
+  raw: [prior.raw, next.raw],
+})
+const historicalActivityItems = (messages: SessionMessage[]): ActivityLedgerItem[] => {
+  const items: ActivityLedgerItem[] = []
+  for (const message of messages) {
+    if (message.kind === 'reasoning') { items.push({ type: 'reasoning', id: message.id, text: message.text }); continue }
+    const entry = historicalActivityEntry(message)
+    let match = -1
+    if (message.kind === 'tool_output') {
+      for (let index = items.length - 1; index >= 0; index--) {
+        const candidate = items[index]
+        if (candidate.type === 'reasoning') break
+        if (candidate.entry.type === 'tool' && (candidate.entry.correlationId === entry.correlationId || index === items.length - 1)) { match = index; break }
+      }
+    }
+    if (match >= 0) {
+      const candidate = items[match]
+      if (candidate.type === 'entry') items[match] = { type: 'entry', entry: mergeActivityEntries(candidate.entry, entry) }
+    } else if (message.kind !== 'tool_output' && !mergeWrappedExecEntry(items, entry)) items.push({ type: 'entry', entry })
+  }
+  return items
+}
+function ActivityRow({ entry, selected, onSelect }: { entry: ActivityEntry; selected: boolean; onSelect: (entry: ActivityEntry) => void }) {
+  const label = activityRowLabel(entry)
+  const accessibleLabel = `${entry.type === 'files' ? 'Files' : 'Tool'}: ${label} · ${entry.status}`
+  return <button className={`activity-row ${entry.status} ${selected ? 'selected' : ''}`} aria-pressed={selected} aria-label={accessibleLabel} onClick={() => onSelect(entry)} title={label}><span className={`activity-row-icon ${entry.type}`}>{entry.type === 'files' ? <FileDiff size={14} /> : <Terminal size={14} />}</span><code className="activity-row-command">{label}</code></button>
+}
+function ActivityLedger({ items, selectedId, onSelect }: { items: ActivityLedgerItem[]; selectedId: string | null; onSelect: (entry: ActivityEntry) => void }) {
+  return <div className="activity-ledger">{items.map((item) => item.type === 'reasoning' ? <div className="reasoning-summary" key={item.id}><Bot size={13} /><MarkdownContent text={item.text} /></div> : <ActivityRow entry={item.entry} selected={selectedId === item.entry.id} onSelect={onSelect} key={item.entry.id} />)}</div>
+}
+function ActivityInspectorPanel({ entry, hostId, cwd, onClose }: { entry: ActivityEntry; hostId: string; cwd: string; onClose: () => void }) {
+  const [tab, setTab] = useState<'details' | 'raw'>('details')
+  useEffect(() => setTab('details'), [entry.id])
+  const input = activityText(entry.input)
+  const output = activityText(entry.output)
+  const raw = activityText(entry.raw)
+  const hasDetails = Boolean(input || output || entry.changes.length)
+  return <aside className="file-preview-panel activity-inspector-panel"><header>{entry.type === 'files' ? <FileDiff size={15} /> : <Terminal size={15} />}<span><strong>{entry.label}</strong><small>{entry.type === 'files' ? 'File changes' : 'Tool call'} · {entry.status}</small></span><button title="Close activity inspector" onClick={onClose}><X size={16} /></button></header><nav className="activity-inspector-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => setTab('details')}>Details</button><button className={tab === 'raw' ? 'active' : ''} onClick={() => setTab('raw')}>Raw</button></nav>{tab === 'raw' ? <pre className="activity-inspector-raw">{raw}</pre> : <div className="activity-inspector-details">{!hasDetails && <div className="activity-inspector-empty"><Info size={18} /><span>This tool did not provide additional details.</span></div>}{input && <section><header>Input</header><pre>{input}</pre></section>}{output && <section><header>{entry.status === 'failed' ? 'Error output' : 'Output'}</header><pre>{output}</pre></section>}{entry.changes.length > 0 && <section><header>Changed files</header><div className="activity-inspector-files">{entry.changes.map((change, index) => { const counts = diffCounts(change.diff); const path = change.path || 'Unknown file'; const resolved = path.startsWith('/') ? path : `${cwd.replace(/\/$/, '')}/${path}`; return <div key={`${path}:${index}`}><FileText size={13} /><code title={path}>{path}</code><small>{counts.additions > 0 && <b>+{counts.additions}</b>}{counts.deletions > 0 && <i>-{counts.deletions}</i>}</small>{change.path && <><button title="Copy path" onClick={() => void navigator.clipboard.writeText(path)}><Copy size={12} /></button><button title="Open file" onClick={() => void api.openPath(hostId, resolved)}><FolderOpen size={12} /></button></>}</div> })}</div></section>}</div>}</aside>
+}
+
+function ToolActivityGroup({ events, selectedId, onSelect }: { events: RunEvent[]; selectedId: string | null; onSelect: (entry: ActivityEntry) => void }) {
+  return <ActivityLedger items={liveActivityItems(events)} selectedId={selectedId} onSelect={onSelect} />
+}
+
+type HistoricalTimelineItem = SessionMessage | { type: 'activity'; id: string; messages: SessionMessage[] }
+const isHistoricalActivity = (item: HistoricalTimelineItem): item is Extract<HistoricalTimelineItem, { type: 'activity' }> => 'type' in item && item.type === 'activity'
+const historicalActivityKinds = new Set(['reasoning', 'tool', 'tool_output', 'file_change'])
+const normalizeHistoricalActivityMessages = (messages: SessionMessage[]) => {
+  const normalized: SessionMessage[] = []
+  for (const message of messages) {
+    if (message.kind === 'tool_output') {
+      let match = -1
+      for (let index = normalized.length - 1; index >= 0; index--) {
+        const prior = normalized[index]
+        if (prior.role === 'user' || prior.kind === 'turn_completed') break
+        if (prior.kind === 'tool' || prior.kind === 'file_change') { match = index; break }
+      }
+      if (match >= 0) {
+        const prior = normalized[match]
+        normalized[match] = {
+          ...prior,
+          text: prior.text || message.text,
+          meta: { ...prior.meta, output: message.meta?.output ?? (message.text || prior.meta?.output), status: message.meta?.status || prior.meta?.status, raw: [prior.meta?.raw, message.meta?.raw].filter(Boolean) },
+        }
+        continue
+      }
+    }
+    normalized.push(message)
+  }
+  return normalized
+}
+const historicalTimelineItems = (messages: SessionMessage[]) => {
+  const items: HistoricalTimelineItem[] = []; let activity: SessionMessage[] = []
+  const flush = () => { if (!activity.length) return; items.push({ type: 'activity', id: `history-activity:${activity[0].id}`, messages: activity }); activity = [] }
+  for (const message of normalizeHistoricalActivityMessages(messages)) {
+    if (historicalActivityKinds.has(message.kind || '')) activity.push(message)
+    else { flush(); items.push(message) }
+  }
+  flush(); return items
+}
+function HistoricalActivityGroup({ messages, selectedId, onSelect }: { messages: SessionMessage[]; selectedId: string | null; onSelect: (entry: ActivityEntry) => void }) {
+  return <ActivityLedger items={historicalActivityItems(messages)} selectedId={selectedId} onSelect={onSelect} />
+}
+function HistoricalOperationalEvent({ message, session }: { message: SessionMessage; session: ProviderSession }) {
+  const meta = message.meta || {}
+  if (message.kind === 'reasoning') return <div className="reasoning-summary"><Bot size={13} /><MarkdownContent text={message.text} /></div>
+  if (message.kind === 'file_change') {
+    const changes = meta.changes || []
+    return <section className="file-change-card historical-file-change"><header><span className="file-change-icon"><FileDiff size={15} /></span><div className="file-change-title"><strong>Edited {changes.length || 1} file{changes.length === 1 ? '' : 's'}</strong></div><span /></header>{changes.length > 0 && <div className="file-change-list">{changes.map((change, index) => <div className="file-change-row" key={`${change.path || 'file'}:${index}`}><code title={change.path}>{change.path || 'Unknown file'}</code><button title="Open file" onClick={() => change.path && void api.openPath(session.hostId, change.path.startsWith('/') ? change.path : `${session.cwd.replace(/\/$/, '')}/${change.path}`)}><FolderOpen size={12} /></button></div>)}</div>}</section>
+  }
+  if (message.kind === 'tool') {
+    const command = meta.command || ''
+    const label = meta.display || meta.tool || command || 'Tool activity'
+    const output = activityText(message.text || meta.output)
+    return <div className="command-row"><header><Terminal size={13} /><code>{activityText(label)}</code>{meta.status === 'failed' ? <ShieldAlert size={13} /> : <CheckCircle2 size={13} />}</header>{output && <pre>{output}</pre>}</div>
+  }
+  return <div className="tool-output"><code>{activityText(meta.tool) || 'Tool output'}</code>{message.text && <pre>{message.text}</pre>}</div>
+}
+function OperationalEvent({ event, run }: { event: RunEvent; run: Run }) {
+  const raw = event.raw_payload as { method?: string; params?: { command?: string; item?: { type?: string; command?: string; changes?: Array<{ path?: string; kind?: string; diff?: string }> }; update?: { title?: string; kind?: string; status?: string } } }
   const text = String(event.payload.text || ''); const method = raw?.method || ''; const item = raw?.params?.item
   if (event.kind === 'reasoning.message') return <div className="reasoning-summary"><Bot size={13} /><MarkdownContent text={text} /></div>
-  if (event.kind === 'file.change' || method.includes('fileChange') || item?.type === 'fileChange') {
-    return <div className="file-change-card"><header><FileDiff size={14} /><strong>File changes</strong></header>{item?.changes?.map((change, index) => <div key={`${change.path || 'file'}:${index}`}><span>{change.kind || 'updated'}</span><code>{change.path || 'Unknown file'}</code></div>)}{text && <pre>{text}</pre>}</div>
+  const payloadChanges = Array.isArray(event.payload.changes) ? event.payload.changes as Array<{ path?: string; kind?: string; diff?: string }> : []
+  if (event.kind === 'file.change' || method.includes('fileChange') || item?.type === 'fileChange' || payloadChanges.length > 0) {
+    return <FileChangeCard changes={payloadChanges.length ? payloadChanges : item?.changes} text={text} run={run} />
   }
-  const command = raw?.params?.command || item?.command || (method.includes('commandExecution') ? text : '')
-  if (command) return <div className={`command-row ${event.channel === 'stderr' ? 'failed' : ''}`}><header><Terminal size={13} /><code>{command}</code>{event.channel === 'stderr' ? <ShieldAlert size={13} /> : <CheckCircle2 size={13} />}</header>{text && text !== command && <pre>{text}</pre>}</div>
+  const command = String(event.payload.tool_title || raw?.params?.update?.title || raw?.params?.command || item?.command || (method.includes('commandExecution') ? text : ''))
+  const toolStatus = String(event.payload.tool_status || raw?.params?.update?.status || '')
+  if (command) return <div className={`command-row ${event.channel === 'stderr' || toolStatus === 'failed' ? 'failed' : ''}`}><header><Terminal size={13} /><code>{command}</code>{event.channel === 'stderr' || toolStatus === 'failed' ? <ShieldAlert size={13} /> : toolStatus === 'in_progress' ? <Clock3 size={13} /> : <CheckCircle2 size={13} />}</header>{text && text !== command && <pre>{text}</pre>}</div>
   return <div className={`tool-output ${event.channel === 'stderr' ? 'failed' : ''}`}><code>{event.kind.replaceAll('.', ' ')}</code>{text && <pre>{text}</pre>}</div>
+}
+
+function UsageCard({ event }: { event: RunEvent }) {
+  const agy = event.provider_event_type?.startsWith('agy.') || event.payload.thinking_tokens !== undefined
+  if (agy) {
+    const input = Number(event.payload.input_tokens)
+    const output = Number(event.payload.output_tokens)
+    const thinking = Number(event.payload.thinking_tokens)
+    const cacheRead = Number(event.payload.cache_read_tokens)
+    const total = Number(event.payload.total_tokens)
+    const duration = Number(event.payload.duration_seconds)
+    const modelTokens = Number.isFinite(total) ? total : [input, output].filter(Number.isFinite).reduce((sum, value) => sum + value, 0)
+    return <section className="usage-card"><header>{providerIcon('agy', 14)}<strong>Antigravity usage</strong><span>Turn result</span></header><div className="usage-grid"><div><small>Tokens</small><b>{modelTokens.toLocaleString()} total tokens</b><em>{Number.isFinite(output) ? output.toLocaleString() : 0} output · {Number.isFinite(thinking) ? thinking.toLocaleString() : 0} thinking</em></div><div><small>Cache & time</small><b>{Number.isFinite(cacheRead) ? cacheRead.toLocaleString() : 0} cached tokens</b>{Number.isFinite(duration) && <em>{duration.toFixed(2)} seconds</em>}</div></div></section>
+  }
+  const dsh = event.provider_event_type?.startsWith('dsh.') || event.payload.context_window !== undefined
+  if (dsh) {
+    const context = Number(event.payload.context_usage_percentage)
+    const pressure = Number(event.payload.pressure_tokens)
+    const projected = Number(event.payload.projected_tokens)
+    const contextWindow = Number(event.payload.context_window)
+    const input = Number(event.payload.uncached_input_tokens)
+    const output = Number(event.payload.output_tokens)
+    const cacheRead = Number(event.payload.cache_read_tokens)
+    const cacheWrite = Number(event.payload.cache_write_tokens)
+    const tokenTotal = [input, output].filter(Number.isFinite).reduce((total, value) => total + value, 0)
+    const cacheTotal = [cacheRead, cacheWrite].filter(Number.isFinite).reduce((total, value) => total + value, 0)
+    return <section className="usage-card"><header>{providerIcon('dsh', 14)}<strong>DeepSeek Harness usage</strong><span>Session snapshot</span></header><div className="usage-grid"><div><small>Context</small><b>{Number.isFinite(context) ? `${context.toFixed(2)}%` : 'Unavailable'}</b>{contextWindow > 0 && <em>{(projected || pressure).toLocaleString()} / {contextWindow.toLocaleString()} tokens</em>}</div><div><small>Tokens</small><b>{tokenTotal.toLocaleString()} model tokens</b><em>{cacheTotal.toLocaleString()} cached tokens</em></div></div></section>
+  }
+  const context = Number(event.payload.context_usage_percentage)
+  const size = Number(event.payload.context_size)
+  const used = Number(event.payload.context_usage_percentage)
+  const metering = Array.isArray(event.payload.metering_usage) ? event.payload.metering_usage as Array<{ value?: number; unit?: string; unitPlural?: string }> : []
+  const credits = metering.map((item) => `${Number(item.value || 0).toFixed(3)} ${item.unitPlural || item.unit || 'credits'}`).join(' + ')
+  return <section className="usage-card"><header>{providerIcon('kiro', 14)}<strong>Kiro usage</strong><span>Session snapshot</span></header><div className="usage-grid"><div><small>Context</small><b>{Number.isFinite(context) ? `${context.toFixed(1)}%` : 'Unavailable'}</b>{size > 0 && <em>{size.toLocaleString()} tokens</em>}</div><div><small>Metering</small><b>{credits || 'No credit data yet'}</b>{used > 0 && <em>{used.toFixed(1)}% context used</em>}</div></div></section>
 }
 
 function EnvironmentPopover({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) { return <aside className="environment-popover"><header><span>{title}</span><button title="Close environment inspector" onClick={onClose}><X size={14} /></button></header>{children}</aside> }
 function EnvironmentRow({ icon, label, value }: { icon: React.ReactNode; label: string; value?: React.ReactNode }) { return <div className="environment-row">{icon}<span>{label}</span><strong>{value || 'Unknown'}</strong></div> }
 
-function RunScreen({ run, events, project, host, provider }: { run: Run; events: RunEvent[]; project?: Project; host?: Host; provider?: Provider }) {
-  const [message, setMessage] = useState(''); const [rewind, setRewind] = useState<{ turnId: string; lastTurnId: string | null; text: string } | null>(null); const [showEnvironment, setShowEnvironment] = useState(false); const [workspaceLabel, setWorkspaceLabel] = useState(run.worktreeId ? 'Managed worktree' : 'Current checkout'); const scroll = useRef<HTMLDivElement>(null); const lastEscape = useRef(0)
-  useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }) }, [events.length])
+function VirtualTimeline<T>({ items, scrollRef, itemKey, renderItem, before }: { items: T[]; scrollRef: React.RefObject<HTMLDivElement | null>; itemKey: (item: T) => string; renderItem: (item: T) => React.ReactNode; before?: React.ReactNode }) {
+  const enabled = items.length > 40
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    enabled,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => itemKey(items[index]),
+    estimateSize: () => 110,
+    overscan: 8,
+  })
+  if (!enabled) return <div className="thread-column">{before}{items.map((item) => <div className="timeline-row" key={itemKey(item)}>{renderItem(item)}</div>)}</div>
+  return <><div className="thread-column">{before}</div><div className="thread-column virtual-timeline" style={{ height: virtualizer.getTotalSize() }}>{virtualizer.getVirtualItems().map((row) => { const item = items[row.index]; return <div className="virtual-timeline-row" data-index={row.index} key={row.key} ref={virtualizer.measureElement} style={{ transform: `translateY(${row.start}px)` }}>{renderItem(item)}</div> })}</div></>
+}
+
+function RunScreen({ run, events, project, host, provider, onStarted }: { run: Run; events: RunEvent[]; project?: Project; host?: Host; provider?: Provider; onStarted: (run: Run) => void }) {
+  const [message, setMessage] = useState(''); const [rewind, setRewind] = useState<{ turnId: string; lastTurnId: string | null; text: string } | null>(null); const [showEnvironment, setShowEnvironment] = useState(false); const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null); const [workspaceLabel, setWorkspaceLabel] = useState(run.worktreeId ? 'Managed worktree' : 'Current checkout'); const scroll = useRef<HTMLDivElement>(null); const following = useRef(true); const lastEscape = useRef(0)
+  const filePreview = useFilePreview(run.hostId, run.cwd)
+  useEffect(() => { if (following.current) requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight })) }, [events.length])
   useEffect(() => { let cancelled = false; if (run.worktreeId) api.worktreeStatus(run.hostId, run.worktreeId).then((status) => { if (!cancelled) setWorkspaceLabel(status.worktree.branch || 'Managed worktree') }).catch(() => {}); else if (project && host?.status === 'online') api.projectContext(project.hostId, project.id).then((context) => { if (!cancelled) setWorkspaceLabel(context.branch || 'Current checkout') }).catch(() => {}); return () => { cancelled = true } }, [run.hostId, run.worktreeId, project?.id, host?.status])
   const turnRunning = run.status === 'running'
   const canUseAttachedSession = Boolean(provider?.live_input && active.has(run.status))
-  const send = async (event: FormEvent) => { event.preventDefault(); if (!message.trim()) return; if (rewind && canUseAttachedSession) await api.input(run.hostId, run.id, message.trim(), 'fork', rewind.lastTurnId); else if (canUseAttachedSession) await api.input(run.hostId, run.id, message.trim()); else if (run.sessionId && provider?.resume) await api.resumeRun(run, message.trim()); else return; setMessage(''); setRewind(null) }
+  const send = async (event: FormEvent) => { event.preventDefault(); if (!message.trim()) return; if (rewind && canUseAttachedSession) await api.input(run.hostId, run.id, message.trim(), 'fork', rewind.lastTurnId); else if (canUseAttachedSession) await api.input(run.hostId, run.id, message.trim()); else if (run.sessionId && provider?.resume) onStarted(await api.resumeRun(run, message.trim())); else return; setMessage(''); setRewind(null) }
   const queue = async () => { if (!message.trim()) return; await api.input(run.hostId, run.id, message.trim(), 'queue'); setMessage('') }
   const branchEvents = currentBranchEvents(events)
   const hasUserEvents = branchEvents.some((event) => event.kind === 'user.message')
   const displayEvents = coalesceStreamEvents(branchEvents)
   const displayItems = timelineItems(displayEvents)
+  const activityEntries = displayItems.flatMap((item) => isActivityGroup(item) ? liveActivityItems(item.events).flatMap((activity) => activity.type === 'entry' ? [activity.entry] : []) : [])
+  const selectedActivity = selectedActivityId ? activityEntries.find((entry) => entry.id === selectedActivityId) || null : null
   const durations = turnDurations(displayEvents)
   const queued = pendingQueue(branchEvents)
   const backtrackable = branchEvents.filter((event, index, all) => event.kind === 'user.message' && typeof event.payload.turn_id === 'string' && typeof event.payload.text === 'string' && all.findIndex((candidate) => candidate.kind === 'user.message' && candidate.payload.turn_id === event.payload.turn_id) === index)
   const backtrackableEventIds = new Set(backtrackable.map((event) => event.event_id))
-  const resolvedRequests = new Set(branchEvents.filter((event) => event.provider_event_type === 'codex.serverRequest/resolved' && event.payload.request_id !== undefined).map((event) => String(event.payload.request_id)))
+  const resolvedRequests = new Set(branchEvents.filter((event) => (event.provider_event_type === 'codex.serverRequest/resolved' || event.kind === 'provider.response.submitted' || event.kind === 'provider.response') && (event.payload.request_id !== undefined || event.payload.rpc_id !== undefined)).map((event) => String(event.payload.request_id ?? event.payload.rpc_id)))
+  useEffect(() => { setSelectedActivityId(null); filePreview.close() }, [run.id])
+  useEffect(() => { if (selectedActivityId && !selectedActivity) setSelectedActivityId(null) }, [selectedActivityId, selectedActivity])
+  const openFile = (href: string) => { setSelectedActivityId(null); filePreview.open(href) }
+  const selectActivity = (entry: ActivityEntry) => { filePreview.close(); setShowEnvironment(false); setSelectedActivityId(entry.id) }
   const selectRewind = (turnId: string, text: string) => { const index = backtrackable.findIndex((event) => event.payload.turn_id === turnId); if (index < 0) return; setRewind({ turnId, lastTurnId: index > 0 ? String(backtrackable[index - 1].payload.turn_id) : null, text }); setMessage(text) }
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Escape') { lastEscape.current = 0; return }
@@ -418,46 +882,132 @@ function RunScreen({ run, events, project, host, provider }: { run: Run; events:
     const selected = backtrackable[Math.max(0, current - 1)]
     if (selected) selectRewind(selected.payload.turn_id as string, String(selected.payload.text))
   }
-  return <div className={`thread-screen ${showEnvironment ? 'environment-open' : ''}`}>
+  return <FilePreviewContext.Provider value={openFile}><div className={`thread-screen ${showEnvironment ? 'environment-open' : ''} ${filePreview.preview || selectedActivity ? 'file-preview-open' : ''}`}>
     <header className="thread-header"><FolderGit2 size={16} /><strong>{run.title}</strong><button title="Thread actions"><MoreHorizontal size={18} /></button><span /><button className="open-in">Open in <ChevronDown size={14} /></button><button className={`environment-toggle ${showEnvironment ? 'active' : ''}`} onClick={() => setShowEnvironment((value) => !value)}><Info size={15} />Environment</button></header>
-    <div className="thread-scroll" ref={scroll}><div className="thread-column">{!hasUserEvents && <ConversationMessage role="user" text={run.prompt} />}{displayItems.map((item) => isActivityGroup(item) ? <ToolActivityGroup events={item.events} key={item.id} /> : <ThreadEvent key={item.event_id} event={item} run={run} durationMs={durations.get(item.event_id)} resolved={item.payload.rpc_id !== undefined && resolvedRequests.has(String(item.payload.rpc_id))} canRewind={run.status === 'waiting_for_input' && queued.length === 0 && backtrackableEventIds.has(item.event_id)} onRewind={selectRewind} />)}</div></div>
+    <div className="thread-scroll" ref={scroll} onScroll={() => { const element = scroll.current; if (element) following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}><VirtualTimeline items={displayItems} scrollRef={scroll} itemKey={(item) => isActivityGroup(item) ? item.id : item.event_id} before={!hasUserEvents ? <ConversationMessage role="user" text={run.prompt} /> : undefined} renderItem={(item) => isActivityGroup(item) ? <ToolActivityGroup events={item.events} selectedId={selectedActivityId} onSelect={selectActivity} /> : <ThreadEvent event={item} run={run} durationMs={durations.get(item.event_id)} resolved={item.payload.rpc_id !== undefined && resolvedRequests.has(String(item.payload.rpc_id))} canRewind={Boolean(provider?.fork) && run.status === 'waiting_for_input' && queued.length === 0 && backtrackableEventIds.has(item.event_id)} onRewind={selectRewind} />} /></div>
     {showEnvironment && <EnvironmentPopover title="Environment" onClose={() => setShowEnvironment(false)}><EnvironmentRow icon={<Terminal size={16} />} label="Provider" value={provider?.name || run.provider} /><EnvironmentRow icon={host?.type === 'ssh' ? <Globe2 size={16} /> : <Laptop size={16} />} label="Location" value={host?.name} /><EnvironmentRow icon={<FolderGit2 size={16} />} label="Project" value={project?.name} /><EnvironmentRow icon={<GitBranch size={16} />} label="Workspace" value={workspaceLabel} /><EnvironmentRow icon={<Folder size={16} />} label="Path" value={run.cwd} /><div className="environment-actions"><button onClick={() => api.openPath(run.hostId, run.cwd)}>Open folder</button>{run.worktreeId && !active.has(run.status) && <><button onClick={async () => { const status = await api.worktreeStatus(run.hostId, run.worktreeId!); alert(`${status.summary}\n\n${status.diff_stat}`) }}>Inspect changes</button><button className="danger" onClick={async () => { const status = await api.worktreeStatus(run.hostId, run.worktreeId!); if (confirm(status.dirty ? 'This worktree has uncommitted changes. Force remove it?' : 'Remove this managed worktree?')) await api.removeWorktree(run.hostId, run.worktreeId!, status.dirty) }}>Remove worktree</button></>}</div>{host?.status !== 'online' && <p><WifiOff size={13} />Viewer reconnecting; run remains on host.</p>}</EnvironmentPopover>}
-    <ComposerFrame className={`thread-composer ${rewind ? 'rewinding' : ''}`} onSubmit={send}>{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.length} queued</strong>{run.status === 'waiting_for_input' && <button type="button" onClick={() => api.startQueued(run.hostId, run.id)}>Run next</button>}</header>{queued.map((item) => <div key={item.id}><span title={item.error || item.message}>{item.message}{item.error ? ' · failed to start' : ''}</span><button type="button" title="Remove queued prompt" onClick={() => api.removeQueued(run.hostId, run.id, item.id)}><X size={12} /></button></div>)}</div>}{rewind && <div className="rewind-banner"><Pencil size={13} />Editing previous message · sending creates a branch<button type="button" title="Cancel editing previous message" onClick={() => { setRewind(null); setMessage('') }}><X size={13} /></button></div>}<ComposerInput disabled={active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume)} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={active.has(run.status) ? (run.status === 'waiting_for_input' ? queued.length ? 'Run or remove queued prompts before editing history' : 'Continue this Codex thread · edit a message above or press Esc Esc' : provider?.live_input ? 'Steer this turn' : 'Live steering is not available for this provider') : (run.sessionId && provider?.resume ? 'Continue this session' : 'This provider session cannot be resumed')} /><ComposerFooter><button type="button"><Plus size={18} /></button>{turnRunning && <button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}><Square size={14} />Interrupt</button>}{run.provider === 'codex' && turnRunning && <button type="button" className="queue" disabled={!message.trim()} onClick={queue}><ListPlus size={14} />Queue</button>}{run.provider === 'codex' && run.status === 'waiting_for_input' && <button type="button" className="interrupt" onClick={() => confirm('Close this attached Codex app-server session?') && api.controlRun(run.hostId, run.id, 'terminate')}><Square size={14} />Close</button>}{run.status === 'interrupting' && <><button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}>Terminate</button><button type="button" className="interrupt" onClick={() => confirm('Force kill the full process group?') && api.controlRun(run.hostId, run.id, 'kill')}>Kill</button></>}<span /><small>{run.model || provider?.name}</small>{!active.has(run.status) && run.sessionId && provider?.fork && <button type="button" onClick={() => message.trim() && api.resumeRun(run, message.trim(), true)}>Fork</button>}<button className="send" disabled={!message.trim() || (active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume))}>{rewind ? <GitBranch size={16} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame>
-  </div>
+    {selectedActivity && <ActivityInspectorPanel entry={selectedActivity} hostId={run.hostId} cwd={run.cwd} onClose={() => setSelectedActivityId(null)} />}
+    {!selectedActivity && filePreview.preview && <FilePreviewPanel state={filePreview.preview} onClose={filePreview.close} />}
+    <ComposerFrame className={`thread-composer ${rewind ? 'rewinding' : ''}`} onSubmit={send}>{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.length} queued</strong>{run.status === 'waiting_for_input' && <button type="button" onClick={() => api.startQueued(run.hostId, run.id)}>Run next</button>}</header>{queued.map((item) => <div key={item.id}><span title={item.error || item.message}>{item.message}{item.error ? ' · failed to start' : ''}</span><button type="button" title="Remove queued prompt" onClick={() => api.removeQueued(run.hostId, run.id, item.id)}><X size={12} /></button></div>)}</div>}{rewind && <div className="rewind-banner"><Pencil size={13} />Editing previous message · sending creates a branch<button type="button" title="Cancel editing previous message" onClick={() => { setRewind(null); setMessage('') }}><X size={13} /></button></div>}<ComposerInput disabled={active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume)} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={active.has(run.status) ? (run.status === 'waiting_for_input' ? queued.length ? 'Run or remove queued prompts before editing history' : 'Continue this thread · edit a message above or press Esc Esc' : run.provider === 'kiro' ? 'Queue for after this Kiro turn' : provider?.live_input ? 'Steer this turn' : 'Live steering is not available for this provider') : (run.sessionId && provider?.resume ? 'Continue this session' : 'This provider session cannot be resumed')} /><ComposerFooter><button type="button"><Plus size={18} /></button>{turnRunning && <button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}><Square size={14} />Interrupt</button>}{(run.provider === 'codex' || run.provider === 'kiro' || run.provider === 'dsh') && turnRunning && <button type="button" className="queue" disabled={!message.trim()} onClick={queue}><ListPlus size={14} />Queue</button>}{(run.provider === 'codex' || run.provider === 'dsh') && run.status === 'waiting_for_input' && <button type="button" className="interrupt" onClick={() => confirm(`Close this attached ${providerName(run.provider)} session?`) && api.controlRun(run.hostId, run.id, 'terminate')}><Square size={14} />Close</button>}{run.status === 'interrupting' && <><button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}>Terminate</button><button type="button" className="interrupt" onClick={() => confirm('Force kill the full process group?') && api.controlRun(run.hostId, run.id, 'kill')}>Kill</button></>}<span /><small>{run.model || provider?.name}</small>{!active.has(run.status) && run.sessionId && provider?.fork && <button type="button" onClick={async () => { if (message.trim()) onStarted(await api.resumeRun(run, message.trim(), true)) }}>Fork</button>}<button className="send" disabled={!message.trim() || (active.has(run.status) ? !provider?.live_input : !(run.sessionId && provider?.resume))}>{rewind ? <GitBranch size={16} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame>
+  </div></FilePreviewContext.Provider>
 }
 
-function SessionScreen({ session, messages, project, host }: { session: ProviderSession; messages: SessionMessage[]; project?: Project; host?: Host }) {
-  const scroll = useRef<HTMLDivElement>(null); const [showEnvironment, setShowEnvironment] = useState(false)
-  useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight }) }, [messages.length])
-  return <div className={`thread-screen provider-thread ${showEnvironment ? 'environment-open' : ''}`}>
+function SessionScreen({ session, messages, project, host, provider, onStarted, onError }: { session: ProviderSession; messages: SessionMessage[]; project?: Project; host?: Host; provider?: Provider; onStarted: (run: Run) => void; onError: (message: string) => void }) {
+  const scroll = useRef<HTMLDivElement>(null); const following = useRef(true); const [showEnvironment, setShowEnvironment] = useState(false); const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false); const [delivery, setDelivery] = useState<'steer' | 'queue'>('steer'); const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
+  const filePreview = useFilePreview(session.hostId, session.cwd)
+  const timeline = useMemo(() => historicalTimelineItems(messages), [messages])
+  const activityEntries = timeline.flatMap((item) => isHistoricalActivity(item) ? historicalActivityItems(item.messages).flatMap((activity) => activity.type === 'entry' ? [activity.entry] : []) : [])
+  const selectedActivity = selectedActivityId ? activityEntries.find((entry) => entry.id === selectedActivityId) || null : null
+  const attached = Boolean(session.pid)
+  const canUseAttachedSession = attached && host?.status === 'online'
+  const canResume = !attached && session.status !== 'running' && host?.status === 'online' && provider?.available === true && provider.resume
+  const canSend = canUseAttachedSession || canResume
+  const submitMessage = async () => {
+    const prompt = message.trim()
+    if (!prompt || !canSend || busy) return
+    setBusy(true)
+    try {
+      if (canUseAttachedSession) {
+        const mode = session.status === 'running' ? delivery : 'steer'
+        const result = await api.externalSessionInput(session, prompt, mode)
+        if (result.queued) setQueued((items) => [...items.filter((item) => item.id !== result.queued!.id), result.queued!])
+        setMessage('')
+      } else {
+        const run = await api.resumeSession(session, prompt)
+        setMessage('')
+        onStarted(run)
+      }
+    }
+    catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setBusy(false) }
+  }
+  const continueSession = (event: FormEvent) => { event.preventDefault(); void submitMessage() }
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Tab' && canUseAttachedSession && session.status === 'running') {
+      event.preventDefault()
+      setDelivery((value) => value === 'steer' ? 'queue' : 'steer')
+      return
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      void submitMessage()
+    }
+  }
+  useEffect(() => { setMessage(''); setBusy(false); setDelivery('steer'); setQueued([]); setSelectedActivityId(null); filePreview.close() }, [session.hostId, session.id])
+  useEffect(() => { if (selectedActivityId && !selectedActivity) setSelectedActivityId(null) }, [selectedActivityId, selectedActivity])
+  useEffect(() => { if (session.status !== 'running') setDelivery('steer') }, [session.status])
+  useEffect(() => {
+    if (!session.pid || host?.status !== 'online') return
+    let cancelled = false
+    api.externalSessionQueue(session.hostId, session.pid).then((items) => { if (!cancelled) setQueued(items) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [session.hostId, session.pid, host?.status])
+  useEffect(() => {
+    if (!session.pid || queued.length === 0 || host?.status !== 'online') return
+    let stopped = false; let timer = 0
+    const poll = async () => {
+      if (stopped || document.hidden) return
+      try { const items = await api.externalSessionQueue(session.hostId, session.pid!); if (!stopped) setQueued(items) } catch {}
+      if (!stopped && !document.hidden) timer = window.setTimeout(poll, 1000)
+    }
+    const visibility = () => { clearTimeout(timer); if (!document.hidden) void poll() }
+    document.addEventListener('visibilitychange', visibility); timer = window.setTimeout(poll, 1000)
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
+  }, [session.hostId, session.pid, host?.status, queued.length > 0])
+  useEffect(() => { if (following.current) requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight })) }, [messages.length])
+  const openFile = (href: string) => { setSelectedActivityId(null); filePreview.open(href) }
+  const selectActivity = (entry: ActivityEntry) => { filePreview.close(); setShowEnvironment(false); setSelectedActivityId(entry.id) }
+  return <FilePreviewContext.Provider value={openFile}><div className={`thread-screen provider-thread ${showEnvironment ? 'environment-open' : ''} ${filePreview.preview || selectedActivity ? 'file-preview-open' : ''}`}>
     <header className="thread-header">{providerIcon(session.provider)}<strong>{session.title}</strong>{session.status === 'running' && <span className="observed-badge"><Radio size={11} />Running</span>}<span /><button title="Thread actions"><MoreHorizontal size={18} /></button><button className={`environment-toggle ${showEnvironment ? 'active' : ''}`} onClick={() => setShowEnvironment((value) => !value)}><Info size={15} />Environment</button></header>
-    <div className="thread-scroll history-scroll" ref={scroll}><div className="thread-column">{messages.length ? messages.map((message) => <ConversationMessage role={message.role} text={message.text} key={message.id} />) : host?.status !== 'online' ? <div className="thread-empty-state"><WifiOff size={20} /><strong>{host?.name || 'This host'} is offline</strong><p>The project and conversation remain in navigation. Messages will load when the host reconnects.</p></div> : <div className="thread-status"><RefreshCw className="spin" size={13} />Loading conversation</div>}</div></div>
+    <div className={`thread-scroll history-scroll ${canSend ? 'continuable' : ''}`} ref={scroll} onScroll={() => { const element = scroll.current; if (element) following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}>{messages.length ? <VirtualTimeline items={timeline} scrollRef={scroll} itemKey={(item) => isHistoricalActivity(item) ? item.id : item.id} renderItem={(item) => isHistoricalActivity(item) ? <HistoricalActivityGroup messages={item.messages} selectedId={selectedActivityId} onSelect={selectActivity} /> : item.kind === 'turn_completed' ? <div className="turn-boundary"><span />{item.duration_ms !== undefined ? `Worked for ${durationLabel(item.duration_ms)}` : 'Turn completed'}<span /></div> : <ConversationMessage role={item.role} text={item.text} />} /> : <div className="thread-column">{host?.status !== 'online' ? <div className="thread-empty-state"><WifiOff size={20} /><strong>{host?.name || 'This host'} is offline</strong><p>The project and conversation remain in navigation. Messages will load when the host reconnects.</p></div> : <div className="thread-status"><RefreshCw className="spin" size={13} />Loading conversation</div>}</div>}</div>
     {showEnvironment && <EnvironmentPopover title="Environment" onClose={() => setShowEnvironment(false)}><EnvironmentRow icon={providerIcon(session.provider)} label="Provider" value={providerName(session.provider)} /><EnvironmentRow icon={host?.type === 'ssh' ? <Globe2 size={16} /> : <Laptop size={16} />} label="Location" value={host?.name} /><EnvironmentRow icon={<FolderGit2 size={16} />} label="Project" value={project?.name} />{session.pid && <EnvironmentRow icon={<Terminal size={16} />} label="Process" value={`PID ${session.pid}`} />}</EnvironmentPopover>}
-    <div className="history-notice"><Info size={14} /><span><strong>{session.status === 'running' ? 'Read-only live session' : 'Historical provider session'}</strong>{session.status === 'running' ? 'Safe attachment is not available for this externally managed process.' : 'Resume or fork is unavailable until the provider exposes a safe continuation path.'}</span></div>
-  </div>
+    {selectedActivity && <ActivityInspectorPanel entry={selectedActivity} hostId={session.hostId} cwd={session.cwd} onClose={() => setSelectedActivityId(null)} />}
+    {!selectedActivity && filePreview.preview && <FilePreviewPanel state={filePreview.preview} onClose={filePreview.close} />}
+    {canSend ? <ComposerFrame className={`thread-composer history-composer ${delivery === 'queue' ? 'queue-mode' : ''}`} onSubmit={continueSession}>{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.filter((item) => item.status !== 'failed').length} queued</strong></header>{queued.map((item) => <div key={item.id} className={item.status === 'failed' ? 'failed' : ''}><span title={item.error || item.message}>{item.message}{item.status === 'sending' ? ' · sending' : item.error ? ` · ${item.error}` : ''}</span><button type="button" title="Remove queued prompt" onClick={async () => { await api.removeExternalQueued(session.hostId, session.pid!, item.id); setQueued((items) => items.filter((candidate) => candidate.id !== item.id)) }}><X size={12} /></button></div>)}</div>}<ComposerInput autoFocus disabled={busy} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={canUseAttachedSession ? session.status === 'running' ? delivery === 'queue' ? 'Queue for after this turn' : `Steer this ${providerName(session.provider)} turn` : `Continue this live ${providerName(session.provider)} session` : `Continue this ${providerName(session.provider)} conversation`} /><ComposerFooter><button type="button"><Plus size={18} /></button>{canUseAttachedSession && session.status === 'running' && <button type="button" className={`delivery-mode ${delivery}`} onClick={() => setDelivery((value) => value === 'steer' ? 'queue' : 'steer')} title="Press Tab to switch delivery mode">{delivery === 'queue' ? <ListPlus size={14} /> : <Send size={14} />}{delivery === 'queue' ? 'Queue' : 'Steer'}</button>}<span /><small>{canUseAttachedSession ? session.status === 'running' ? `${delivery === 'queue' ? 'Runs after this turn' : 'Sends now'} · Tab to switch` : `Live · ${session.inputTransport || 'terminal'}` : `Resume · ${provider?.name}`}</small><button className="send" disabled={!message.trim() || busy} title={canUseAttachedSession ? delivery === 'queue' ? 'Queue after current turn' : 'Send to live session' : 'Continue conversation'}>{busy ? <RefreshCw className="spin" size={15} /> : delivery === 'queue' && session.status === 'running' ? <ListPlus size={16} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame> : <div className="history-notice"><Info size={14} /><span><strong>{host?.status !== 'online' ? 'Host offline' : provider && !provider.available ? `${provider.name} unavailable` : 'Continuation unavailable'}</strong>{host?.status !== 'online' ? 'Reconnect the host to continue this conversation.' : provider && !provider.available ? `Install or reconnect ${provider.name} on this host to continue.` : 'This provider does not expose a supported resume path for this session.'}</span></div>}
+  </div></FilePreviewContext.Provider>
 }
 
-function ObservedScreen({ host, project, agent }: { host?: Host; project?: Project; agent: DiscoveredAgent }) {
+function ObservedScreen({ host, project, agent, onError }: { host?: Host; project?: Project; agent: DiscoveredAgent; onError: (message: string) => void }) {
+  const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false); const [delivery, setDelivery] = useState<'steer' | 'queue'>('steer')
+  const canQueue = Boolean(agent.transcript_path)
+  const submit = async () => {
+    const prompt = message.trim(); if (!prompt || busy || host?.status !== 'online') return
+    setBusy(true)
+    try { await api.externalAgentInput(host.id, agent.pid, agent.native_session_id, prompt, canQueue ? delivery : 'steer'); setMessage('') }
+    catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setBusy(false) }
+  }
+  const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Tab' && canQueue) { event.preventDefault(); setDelivery((value) => value === 'steer' ? 'queue' : 'steer'); return }
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit() }
+  }
   return <div className="thread-screen observed-screen">
     <header className="thread-header">{providerIcon(agent.provider)}<strong>{providerName(agent.provider)} session</strong><span className="observed-badge"><Radio size={11} />Observed</span><span /><button><MoreHorizontal size={18} /></button></header>
-    <div className="observed-content"><div className="observed-hero">{providerIcon(agent.provider)}<h1>{providerName(agent.provider)} is running</h1><p>Codesk found this session on {host?.name || 'the execution host'}. It was started outside Codesk, so it remains read-only.</p></div><div className="observed-details"><div><span>Project</span><strong>{project?.name || 'Unregistered folder'}</strong></div><div><span>Working directory</span><code>{agent.cwd || 'Unknown'}</code></div><div><span>Process</span><strong>PID {agent.pid}</strong></div><div><span>Command</span><code>{agent.command}</code></div></div><div className="observed-note"><ShieldAlert size={17} /><span><strong>No terminal attachment</strong>Existing output and stdin are unavailable unless the session was launched through Codesk or the provider exposes a safe attach protocol.</span></div></div>
+    <div className="observed-content"><div className="observed-hero">{providerIcon(agent.provider)}<h1>{providerName(agent.provider)} is running</h1><p>Codesk found this session on {host?.name || 'the execution host'}. Send input to its existing process without starting another writer.</p></div><div className="observed-details"><div><span>Project</span><strong>{project?.name || 'Unregistered folder'}</strong></div><div><span>Working directory</span><code>{agent.cwd || 'Unknown'}</code></div><div><span>Process</span><strong>PID {agent.pid}</strong></div><div><span>Command</span><code>{agent.command}</code></div></div><div className="observed-note"><Terminal size={17} /><span><strong>{agent.tmux_pane ? `Attached through tmux ${agent.tmux_pane}` : 'Terminal attachment required'}</strong>{agent.tmux_pane ? 'Enter steers now. Press Tab to queue a Codex message for after the current turn.' : 'Codesk will keep the input available and report if this process cannot be reached through tmux.'}</span></div></div>
+    <ComposerFrame className={`thread-composer history-composer ${delivery === 'queue' ? 'queue-mode' : ''}`} onSubmit={(event) => { event.preventDefault(); void submit() }}><ComposerInput autoFocus disabled={busy || host?.status !== 'online'} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={keyDown} placeholder={delivery === 'queue' && canQueue ? 'Queue for after this turn' : `Steer this ${providerName(agent.provider)} session`} /><ComposerFooter><button type="button"><Plus size={18} /></button>{canQueue && <button type="button" className={`delivery-mode ${delivery}`} onClick={() => setDelivery((value) => value === 'steer' ? 'queue' : 'steer')} title="Press Tab to switch delivery mode">{delivery === 'queue' ? <ListPlus size={14} /> : <Send size={14} />}{delivery === 'queue' ? 'Queue' : 'Steer'}</button>}<span /><small>{canQueue ? `${delivery === 'queue' ? 'Runs after this turn' : 'Sends now'} · Tab to switch` : 'Sends to live terminal'}</small><button className="send" disabled={!message.trim() || busy || host?.status !== 'online'}>{busy ? <RefreshCw className="spin" size={15} /> : delivery === 'queue' && canQueue ? <ListPlus size={16} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame>
   </div>
 }
 
 function ThreadEvent({ event, run, durationMs, resolved, canRewind, onRewind }: { event: RunEvent; run: Run; durationMs?: number; resolved: boolean; canRewind: boolean; onRewind: (turnId: string, text: string) => void }) {
   const text = String(event.payload.text || '')
   const rpcId = event.payload.rpc_id
-  const raw = event.raw_payload as { method?: string; params?: { permissions?: unknown; questions?: Array<{ id: string; question?: string; header?: string }> } }
+  const raw = event.raw_payload as { method?: string; params?: { permissions?: unknown; options?: Array<{ optionId?: string; name?: string; kind?: string }>; questions?: Array<{ id: string; question?: string; header?: string }> } }
   if (event.kind.startsWith('queue.')) return null
+  if (event.kind === 'usage.updated') return <UsageCard event={event} />
+  if (event.kind === 'commands.updated') return null
+  if (event.kind === 'approval.required' && run.provider === 'kiro' && rpcId !== undefined && rpcId !== null) {
+    const options = raw.params?.options || []
+    return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Permission request resolved' : 'Kiro permission required'}</strong><p>{text}</p>{!resolved && <div>{options.map((option) => <button key={option.optionId} onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { outcome: { outcome: 'selected', optionId: option.optionId } })}>{option.name || option.kind || option.optionId}</button>)}</div>}</div>
+  }
   if (event.kind === 'approval.required' && rpcId !== undefined && rpcId !== null && raw?.method === 'item/permissions/requestApproval') return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Permission request resolved' : 'Additional permissions required'}</strong><p>{text}</p>{!resolved && <div><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { permissions: raw.params?.permissions || {}, scope: 'turn' })}>Grant for turn</button><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { permissions: raw.params?.permissions || {}, scope: 'session' })}>Grant for session</button><button className="decline" onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { permissions: {} })}>Decline</button></div>}</div>
   if (event.kind === 'approval.required' && rpcId !== undefined && rpcId !== null) return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Approval resolved' : 'Approval required'}</strong><p>{text}</p>{!resolved && <div><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { decision: 'accept' })}>Approve</button><button onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { decision: 'acceptForSession' })}>Approve for session</button><button className="decline" onClick={() => api.providerResponse(run.hostId, run.id, rpcId, { decision: 'decline' })}>Decline</button></div>}</div>
-  if (event.kind === 'input.required' && rpcId !== undefined && rpcId !== null) return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Input submitted' : 'Codex needs input'}</strong><p>{text}</p>{!resolved && <div><button onClick={() => { const raw = event.raw_payload as { params?: { questions?: Array<{ id: string; question?: string; header?: string }> } }; const answers: Record<string, { answers: string[] }> = {}; for (const question of raw?.params?.questions || []) { const answer = prompt(question.question || question.header || 'Answer Codex'); if (answer === null) return; answers[question.id] = { answers: [answer] } } void api.providerResponse(run.hostId, run.id, rpcId, { answers }) }}>Answer</button></div>}</div>
+  if (event.kind === 'input.required' && rpcId !== undefined && rpcId !== null) return <div className={`request-card ${resolved ? 'resolved' : ''}`}><strong>{resolved ? 'Input submitted' : `${run.provider === 'kiro' ? 'Kiro' : 'Codex'} needs input`}</strong><p>{text}</p>{!resolved && <div><button onClick={() => { const raw = event.raw_payload as { params?: { questions?: Array<{ id: string; question?: string; header?: string }> } }; const answers: Record<string, { answers: string[] }> = {}; for (const question of raw?.params?.questions || []) { const answer = prompt(question.question || question.header || `Answer ${run.provider}`); if (answer === null) return; answers[question.id] = { answers: [answer] } } void api.providerResponse(run.hostId, run.id, rpcId, { answers }) }}>Answer</button></div>}</div>
   if (event.kind === 'user.message') return <ConversationMessage role="user" text={text} className="rewindable">{canRewind && typeof event.payload.turn_id === 'string' && <button title="Edit this message and branch from here" onClick={() => onRewind(event.payload.turn_id as string, conversationText(text).text)}><Pencil size={12} />Edit from here</button>}</ConversationMessage>
   if (event.kind === 'turn.started') return null
   if (event.kind === 'turn.completed') return <div className="turn-boundary"><span />{durationMs !== undefined ? `Worked for ${durationLabel(durationMs)}` : 'Turn completed'}<span /></div>
   if (!text && !event.kind.startsWith('run.') && !event.kind.startsWith('control.') && !event.kind.startsWith('turn.') && !event.kind.startsWith('input.')) return null
   if (event.kind === 'assistant.message') return <ConversationMessage role="assistant" text={text} />
-  if (event.kind === 'output' || event.kind.includes('message') || event.kind === 'tool.output') return <OperationalEvent event={event} />
+  if (event.kind === 'output' || event.kind.includes('message') || event.kind === 'tool.output') return <OperationalEvent event={event} run={run} />
   return <div className="thread-status"><span>{event.kind.replaceAll('.', ' ')}</span>{event.payload.exit_code !== undefined && <code>{String(event.payload.exit_code)}</code>}</div>
 }
 
@@ -502,8 +1052,8 @@ function ProjectDialog({ hosts, onClose, onCreated }: { hosts: Host[]; onClose: 
     <div className="folder-search-status"><span>{input.trim() && !isPathInput ? `${filteredEntries.length} matching folder${filteredEntries.length === 1 ? '' : 's'}` : `${entries.length} folder${entries.length === 1 ? '' : 's'}`}</span><small><kbd>↑</kbd><kbd>↓</kbd> choose <kbd>Enter</kbd> open <kbd>Tab</kbd> complete <kbd>Esc</kbd> clear</small></div>
     <div className="folder-list">{busy === 'browse' && !entries.length ? <div className="folder-state"><RefreshCw className="spin" size={16} />Loading folders</div> : filteredEntries.length ? filteredEntries.map((entry, index) => <div className={`folder-entry ${selectedPath === entry.path && currentPath !== entry.path ? 'selected' : ''} ${!isPathInput && index === highlighted ? 'highlighted' : ''}`} key={entry.path}><button type="button" className="folder-entry-main" onMouseEnter={() => setHighlighted(index)} onDoubleClick={() => void browse(entry.path)} onClick={() => setSelectedPath(entry.path)}><span className="folder-icon">{entry.is_git ? <FolderGit2 size={17} /> : <Folder size={17} />}</span><span><strong>{entry.name}</strong><small>{entry.path}</small></span>{entry.is_git && <em>Git repository</em>}</button><button type="button" className="folder-open" title={`Open ${entry.name}`} onClick={() => void browse(entry.path)}><ChevronRight size={15} /></button></div>) : <div className="folder-state">{input.trim() && !isPathInput ? <><Search size={18} /><strong>No matching folders</strong><span>Try another name or type a full path.</span></> : <><Folder size={18} /><strong>This folder is empty</strong><span>You can still add it as a project.</span></>}</div>}</div>
     <div className="folder-selection"><FolderGit2 size={16} /><span><small>Folder to add</small><strong>{selectedPath || currentPath || 'Choose a folder'}</strong></span>{selectedPath && currentPath && selectedPath !== currentPath && <button type="button" onClick={() => void browse(selectedPath)}>Open</button>}</div>
-    {error && <p className="dialog-error">{error}</p>}<p className="folder-note">Codesk registers the selected folder and Git repositories up to two levels below it. Existing agent processes are only observed and never modified.</p>
-    <footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="dialog-primary" disabled={!selectedPath || !!busy} onClick={async () => { setBusy('add'); setError(''); try { await api.discoverProjects(hostId, selectedPath, true, 2); onCreated() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setBusy('') } }}>{busy === 'add' ? <><RefreshCw className="spin" size={14} />Adding…</> : 'Add folder'}</button></footer>
+    {error && <p className="dialog-error">{error}</p>}<p className="folder-note">Codesk registers only the selected folder. Sessions from nested folders stay separate and are not included in this project.</p>
+    <footer><button type="button" onClick={onClose}>Cancel</button><button type="button" className="dialog-primary" disabled={!selectedPath || !!busy} onClick={async () => { setBusy('add'); setError(''); try { const name = selectedPath.split('/').filter(Boolean).at(-1) || selectedPath; await api.createProject({ hostId, name, path: selectedPath }); onCreated() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setBusy('') } }}>{busy === 'add' ? <><RefreshCw className="spin" size={14} />Adding…</> : 'Add folder'}</button></footer>
   </div></Dialog>
 }
 function ConnectionsDialog({ hosts, onClose, onChanged }: { hosts: Host[]; onClose: () => void; onChanged: () => void }) {

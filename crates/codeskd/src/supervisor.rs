@@ -97,7 +97,7 @@ impl Supervisor {
             value => anyhow::bail!("unsupported workspace mode: {value}"),
         };
         let id = Uuid::new_v4().to_string();
-        let spec = adapters::build(&request, &id)?;
+        let spec = adapters::build(&request, &id, &cwd)?;
         let created = Utc::now().to_rfc3339();
         let title = request
             .title
@@ -374,8 +374,8 @@ impl Supervisor {
     pub async fn start_queued(&self, run_id: &str) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
         anyhow::ensure!(
-            run.provider == "codex",
-            "queued turns are only supported for Codex"
+            matches!(run.provider.as_str(), "codex" | "kiro" | "dsh"),
+            "queued turns are not supported for this provider"
         );
         let request_id = Uuid::new_v4().to_string();
         self.write_input(
@@ -386,7 +386,7 @@ impl Supervisor {
         self.emit(
             run_id,
             "queue.start.submitted",
-            Some("codex"),
+            Some(run.provider.as_str()),
             None,
             json!({"request_id":request_id}),
             None,
@@ -397,8 +397,8 @@ impl Supervisor {
     pub async fn remove_queued(&self, run_id: &str, queue_id: &str) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
         anyhow::ensure!(
-            run.provider == "codex",
-            "queued turns are only supported for Codex"
+            matches!(run.provider.as_str(), "codex" | "kiro" | "dsh"),
+            "queued turns are not supported for this provider"
         );
         let request_id = Uuid::new_v4().to_string();
         self.write_input(
@@ -409,7 +409,7 @@ impl Supervisor {
         self.emit(
             run_id,
             "queue.remove.submitted",
-            Some("codex"),
+            Some(run.provider.as_str()),
             None,
             json!({"request_id":request_id,"queue_id":queue_id}),
             None,
@@ -425,8 +425,8 @@ impl Supervisor {
     ) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
         anyhow::ensure!(
-            run.provider == "codex",
-            "provider responses are only supported for Codex"
+            matches!(run.provider.as_str(), "codex" | "kiro"),
+            "provider responses are not supported for this provider"
         );
         self.write_input(
             run_id,
@@ -436,7 +436,7 @@ impl Supervisor {
         self.emit(
             run_id,
             "provider.response.submitted",
-            Some("codex"),
+            Some(run.provider.as_str()),
             None,
             json!({"rpc_id":rpc_id}),
             None,
@@ -446,7 +446,7 @@ impl Supervisor {
 
     pub async fn interrupt(&self, run_id: &str) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
-        if run.provider != "codex" {
+        if !matches!(run.provider.as_str(), "codex" | "kiro" | "dsh") {
             return self
                 .signal(run_id, libc::SIGINT, "interrupt", "interrupting")
                 .await;
@@ -461,7 +461,11 @@ impl Supervisor {
         self.emit(
             run_id,
             "control.submitted",
-            Some("codex.turn/interrupt"),
+            Some(match run.provider.as_str() {
+                "kiro" => "kiro.session/cancel",
+                "dsh" => "dsh.session.cancel",
+                _ => "codex.turn/interrupt",
+            }),
             None,
             json!({"action":"interrupt","request_id":request_id}),
             None,

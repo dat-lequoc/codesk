@@ -73,10 +73,16 @@ pub async fn create(
     project: &Project,
     request: &CreateWorktreeRequest,
 ) -> Result<Worktree> {
-    let repo_root = project
-        .repo_root
-        .as_deref()
+    // Projects can outlive their original discovery metadata (for example, a
+    // folder may become a Git repository after it was registered). Resolve the
+    // repository at the point where a worktree is requested and repair stale
+    // metadata so historical projects can still fork safely.
+    let repo_root = detect_repo(Path::new(&project.path))
+        .await
         .context("project is not a Git repository")?;
+    if project.repo_root.as_deref() != Some(repo_root.as_str()) {
+        db.update_project_repo_root(&project.id, Some(&repo_root))?;
+    }
     let id = Uuid::new_v4().to_string();
     let short = &id[..8];
     let branch = request
@@ -98,7 +104,7 @@ pub async fn create(
     };
     db.create_worktree(&item)?;
     let output = Command::new("git")
-        .current_dir(repo_root)
+        .current_dir(&repo_root)
         .args(["worktree", "add", "-b", &branch, item.path.as_str(), &base])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -129,6 +129,26 @@ fn default_input_delivery() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ExternalInputRequest {
+    pub message: String,
+    #[serde(default = "default_input_delivery")]
+    pub delivery: String,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalQueuedInput {
+    pub id: String,
+    pub pid: u32,
+    pub session_id: Option<String>,
+    pub message: String,
+    pub created_at: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ProviderResponseRequest {
     pub rpc_id: Value,
     pub result: Value,
@@ -180,6 +200,17 @@ pub struct FileListing {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct FileContent {
+    pub path: String,
+    pub name: String,
+    pub content: String,
+    pub mime_type: Option<String>,
+    pub data_url: Option<String>,
+    pub size: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredProject {
     pub name: String,
     pub path: String,
@@ -198,6 +229,7 @@ pub struct DiscoveredAgent {
     pub managed_run_id: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
+    pub tmux_pane: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +244,8 @@ pub struct ProviderSession {
     pub updated_at: String,
     pub status: String,
     pub pid: Option<u32>,
+    pub input_available: bool,
+    pub input_transport: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,6 +254,11 @@ pub struct SessionMessage {
     pub timestamp: String,
     pub role: String,
     pub text: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

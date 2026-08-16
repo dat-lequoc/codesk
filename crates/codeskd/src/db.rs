@@ -23,6 +23,17 @@ impl Db {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute_batch(SCHEMA)?;
+        let has_registered: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='registered'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_registered == 0 {
+            connection.execute(
+                "ALTER TABLE projects ADD COLUMN registered INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
         Ok(Self(Arc::new(Mutex::new(connection))))
     }
 
@@ -38,6 +49,29 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn update_project_repo_root(&self, id: &str, repo_root: Option<&str>) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE projects SET repo_root=?2 WHERE id=?1",
+            params![id, repo_root],
+        )?;
+        Ok(())
+    }
+
+    pub fn register_project(&self, id: &str) -> Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .execute("UPDATE projects SET registered=1 WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn unregister_project(&self, id: &str) -> Result<bool> {
+        Ok(self.0.lock().unwrap().execute(
+            "UPDATE projects SET registered=0 WHERE id=?1 AND registered=1",
+            [id],
+        )? > 0)
     }
 
     pub fn project_by_path(&self, path: &str) -> Result<Option<Project>> {
@@ -64,7 +98,7 @@ impl Db {
     pub fn projects(&self) -> Result<Vec<Project>> {
         let connection = self.0.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT id,name,path,repo_root,created_at FROM projects ORDER BY created_at",
+            "SELECT id,name,path,repo_root,created_at FROM projects WHERE registered=1 ORDER BY created_at",
         )?;
         Ok(statement
             .query_map([], |row| {
@@ -85,7 +119,7 @@ impl Db {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT id,name,path,repo_root,created_at FROM projects WHERE id=?1",
+                "SELECT id,name,path,repo_root,created_at FROM projects WHERE id=?1 AND registered=1",
                 [id],
                 |row| {
                     Ok(Project {
@@ -331,7 +365,7 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
 const RUN_SELECT: &str = "SELECT id,project_id,worktree_id,parent_run_id,provider,provider_session_id,title,prompt,model,cwd,command,args_json,status,pid,pgid,created_at,started_at,finished_at,exit_code,terminating_signal FROM runs";
 
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL UNIQUE,repo_root TEXT,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL UNIQUE,repo_root TEXT,created_at TEXT NOT NULL,registered INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS worktrees (id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),path TEXT NOT NULL UNIQUE,branch TEXT,base_ref TEXT,ownership TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),worktree_id TEXT REFERENCES worktrees(id),parent_run_id TEXT REFERENCES runs(id),provider TEXT NOT NULL,provider_session_id TEXT,title TEXT NOT NULL,prompt TEXT NOT NULL,model TEXT,cwd TEXT NOT NULL,command TEXT NOT NULL,args_json TEXT NOT NULL,status TEXT NOT NULL,pid INTEGER,pgid INTEGER,created_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,exit_code INTEGER,terminating_signal TEXT);
 CREATE TABLE IF NOT EXISTS events (global_sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,run_id TEXT NOT NULL REFERENCES runs(id),run_sequence INTEGER NOT NULL,timestamp TEXT NOT NULL,kind TEXT NOT NULL,provider_event_type TEXT,channel TEXT,payload_json TEXT NOT NULL,raw_json TEXT,UNIQUE(run_id,run_sequence));
