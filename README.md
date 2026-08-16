@@ -4,7 +4,16 @@
 
 Codesk is a desktop app for running, monitoring, inspecting, and steering coding-agent harnesses from one place. The agent stays on the machine where the project lives—your laptop, workstation, or VPS—and Codesk connects locally or over SSH.
 
-Build and run the macOS app from source:
+<p align="center">
+  <img src="./docs/for_readme.png" alt="Codesk showing a live agent trajectory and tool inspector" width="1200">
+</p>
+
+## Platform support
+
+<details open>
+<summary><strong>macOS — desktop app</strong></summary>
+
+Build and run the desktop app from source:
 
 ```bash
 git clone https://github.com/dat-lequoc/codesk.git
@@ -14,9 +23,30 @@ npm run desktop:build -- --debug --bundles app
 open target/debug/bundle/macos/Codesk.app
 ```
 
-<p align="center">
-  <img src="./docs/for_readme.png" alt="Codesk showing a live agent trajectory and tool inspector" width="1200">
-</p>
+</details>
+
+<details>
+<summary><strong>Linux — execution host</strong></summary>
+
+Linux is supported as a local or remote execution host. Build and install the daemon as a user service:
+
+```bash
+git clone https://github.com/dat-lequoc/codesk.git
+cd codesk
+cargo build --release -p codeskd
+./target/release/codeskd install 4243
+```
+
+The desktop client connects to the daemon over SSH. A Linux desktop bundle is not published yet.
+
+</details>
+
+<details>
+<summary><strong>Windows</strong></summary>
+
+Windows desktop and execution-host packaging are not supported yet. Codesk currently relies on macOS/Linux service and process-management primitives.
+
+</details>
 
 ## Supported harnesses
 
@@ -50,12 +80,6 @@ Run the test suite:
 
 ```bash
 npm test
-```
-
-Build the macOS app:
-
-```bash
-npm run desktop:build -- --debug --bundles app
 ```
 
 To rebuild, safely replace, and relaunch the locally installed app:
