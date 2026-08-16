@@ -2,7 +2,11 @@
 
 Codesk is one desktop app for monitoring and controlling coding-agent harnesses across local and remote machines.
 
-![Codesk showing a live agent trajectory and tool inspector](./docs/for_readme.png)
+<p align="center">
+  <a href="https://github.com/dat-lequoc/codesk/blob/main/docs/for_readme.png?raw=1" title="Open the full-size Codesk screenshot">
+    <img src="./docs/for_readme.png" alt="Codesk showing a live agent trajectory and tool inspector" width="1200">
+  </a>
+</p>
 
 ## Supported harnesses
 
