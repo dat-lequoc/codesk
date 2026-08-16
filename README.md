@@ -4,9 +4,6 @@
 
 Codesk is a desktop app for running, monitoring, inspecting, and steering coding-agent harnesses from one place. The agent stays on the machine where the project lives—your laptop, workstation, or VPS—and Codesk connects locally or over SSH.
 
-> [!WARNING]
-> Codesk is early-stage software. Provider adapters and UI surfaces may change while the project settles.
-
 <p align="center">
   <img src="./docs/for_readme.png" alt="Codesk showing a live agent trajectory and tool inspector" width="1200">
 </p>
