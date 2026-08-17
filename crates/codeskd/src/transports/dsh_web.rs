@@ -97,6 +97,7 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
     let mut command = Command::new(&spec.command);
     command
         .args(&spec.args)
+        .envs(&spec.env)
         .current_dir(&spec.cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

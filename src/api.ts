@@ -1,4 +1,4 @@
-import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, ExternalQueuedInput, FileContent, FileListing, GitContext, Host, Project, ProviderSession, Run, RunEvent, SessionMessage } from './types'
+import type { AppState, DiscoveredAgent, DiscoveredProject, DraftSession, ExternalQueuedInput, FileContent, FileListing, GitContext, Host, MergeWorktreeResult, Project, ProviderSession, Run, RunEvent, SessionMessage, WorktreeStatus } from './types'
 
 export const gatewayOrigin = location.protocol === 'http:' || location.protocol === 'https:' ? '' : 'http://127.0.0.1:4242'
 
@@ -41,7 +41,8 @@ export const api = {
   disableExternalTmux: (session: ProviderSession) => request(`/api/external-sessions/${session.hostId}/${session.pid}/tmux/disable`, { method: 'POST', body: '{}' }),
   adoptExternalAgentTmux: (hostId: string, projectId: string, pid: number, sessionId?: string | null) => request(`/api/external-sessions/${hostId}/${pid}/tmux/adopt`, { method: 'POST', body: JSON.stringify({ project_id: projectId, session_id: sessionId }) }),
   moveExternalAgentToTmux: (hostId: string, projectId: string, pid: number, sessionId?: string | null) => request(`/api/external-sessions/${hostId}/${pid}/tmux/move`, { method: 'POST', body: JSON.stringify({ project_id: projectId, session_id: sessionId }) }),
-  worktreeStatus: (hostId: string, id: string) => request<{ worktree: { path: string; branch?: string | null }; dirty: boolean; summary: string; diff_stat: string }>(`/api/worktrees/${hostId}/${id}/status`),
+  worktreeStatus: (hostId: string, id: string) => request<WorktreeStatus>(`/api/worktrees/${hostId}/${id}/status`),
+  mergeWorktree: (hostId: string, id: string, targetRef?: string) => request<MergeWorktreeResult>(`/api/worktrees/${hostId}/${id}/merge`, { method: 'POST', body: JSON.stringify({ target_ref: targetRef }) }),
   removeWorktree: (hostId: string, id: string, force = false) => request(`/api/worktrees/${hostId}/${id}?force=${force}`, { method: 'DELETE' }),
   openPath: (hostId: string, path: string) => request('/api/open-path', { method: 'POST', body: JSON.stringify({ hostId, path }) }),
   createProject: (input: { hostId: string; name: string; path: string }) => request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),

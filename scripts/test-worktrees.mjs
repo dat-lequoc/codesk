@@ -21,6 +21,19 @@ try {
   const trees=await request(`/v1/projects/${project.id}/worktrees`);if(trees.length!==1||trees[0].status!=='ready')throw new Error('managed worktree not registered')
   await request(`/v1/worktrees/${trees[0].id}?force=true`,{method:'DELETE'});if(await fs.stat(finished.cwd).then(()=>true).catch(()=>false))throw new Error('managed worktree was not removed');const retained=await request(`/v1/projects/${project.id}/worktrees`);if(retained[0].status!=='removed')throw new Error('worktree history was not retained')
 
+  const mergeRun=await request('/v1/runs',{method:'POST',body:JSON.stringify({project_id:project.id,provider:'shell',prompt:'commit an isolated change',workspace_mode:'managed_worktree',command:'sh',args:['-c','set -eu; printf "%s\n%s\n%s\n" "$CODESK_PROJECT_PATH" "$CODESK_WORKTREE_BRANCH" "$CODESK_MERGE_TARGET" > workspace-context.txt; printf merged > merged.txt; git add workspace-context.txt merged.txt; git commit -m "managed worktree change"']})})
+  for(let i=0;i<40;i++){const state=await request(`/v1/runs/${mergeRun.id}`);if(state.status==='completed')break;await wait(100)}
+  const mergeFinished=await request(`/v1/runs/${mergeRun.id}`);if(mergeFinished.status!=='completed'||!mergeFinished.worktree_id){const stderr=await fs.readFile(path.join(data,'runs',mergeRun.id,'stderr.log'),'utf8').catch(()=>'(no stderr)');throw new Error(`merge fixture run failed: ${JSON.stringify(mergeFinished)}\n${stderr}`)}
+  const mergeTree=(await request(`/v1/projects/${project.id}/worktrees`)).find((item)=>item.id===mergeFinished.worktree_id);if(!mergeTree||mergeTree.base_ref!=='main')throw new Error(`worktree did not retain normalized merge target: ${JSON.stringify(mergeTree)}`)
+  const runnerSpec=JSON.parse(await fs.readFile(path.join(data,'runs',mergeRun.id,'runner.json'),'utf8'));if(!runnerSpec.prompt.includes('<environment_context>')||!runnerSpec.prompt.includes('CODESK_WORKTREE_BRANCH')||runnerSpec.env.CODESK_PROJECT_PATH!==project.path||runnerSpec.env.CODESK_WORKTREE_ID!==mergeTree.id)throw new Error('managed run did not receive workspace merge context')
+  const workspaceContext=(await fs.readFile(path.join(mergeFinished.cwd,'workspace-context.txt'),'utf8')).trim().split('\n');if(workspaceContext[0]!==project.path||workspaceContext[1]!==mergeTree.branch||workspaceContext[2]!=='main')throw new Error(`unexpected workspace environment ${JSON.stringify(workspaceContext)}`)
+  if(await fs.readFile(path.join(repo,'merged.txt'),'utf8').catch(()=>null))throw new Error('committed worktree change reached main before merge')
+  await fs.writeFile(path.join(repo,'local-only.txt'),'dirty checkout guard');let dirtyRejected=false;try{await request(`/v1/worktrees/${mergeTree.id}/merge`,{method:'POST',body:'{}'})}catch(error){dirtyRejected=/project checkout has uncommitted changes/.test(error.message)}await fs.rm(path.join(repo,'local-only.txt'));if(!dirtyRejected)throw new Error('merge did not reject a dirty project checkout')
+  const merged=await request(`/v1/worktrees/${mergeTree.id}/merge`,{method:'POST',body:'{}'});if(!merged.changed||merged.source_branch!==mergeTree.branch||merged.target_branch!=='main')throw new Error(`unexpected merge result ${JSON.stringify(merged)}`)
+  if((await fs.readFile(path.join(repo,'merged.txt'),'utf8')).trim()!=='merged')throw new Error('managed worktree commit was not merged into the project checkout')
+  const alreadyMerged=await request(`/v1/worktrees/${mergeTree.id}/merge`,{method:'POST',body:'{}'});if(alreadyMerged.changed)throw new Error('repeated merge should be idempotent')
+  await request(`/v1/worktrees/${mergeTree.id}`,{method:'DELETE'})
+
   const lateRepo=path.join(temp,'late-repo');await fs.mkdir(lateRepo)
   const lateProject=await request('/v1/projects',{method:'POST',body:JSON.stringify({name:'late-repo',path:lateRepo})});if(lateProject.repo_root!==null)throw new Error('late repo should be registered without Git metadata')
   await exec('git',['init','-b','main'],{cwd:lateRepo});await exec('git',['config','user.email','codesk@example.test'],{cwd:lateRepo});await exec('git',['config','user.name','Codesk Test'],{cwd:lateRepo});await fs.writeFile(path.join(lateRepo,'README.md'),'# late repo\n');await exec('git',['add','.'],{cwd:lateRepo});await exec('git',['commit','-m','initial'],{cwd:lateRepo})
@@ -29,5 +42,5 @@ try {
   const repairedProject=(await request('/v1/projects')).find((item)=>item.id===lateProject.id);if(repairedProject?.repo_root!==lateProject.path)throw new Error(`stale repo metadata was not repaired: ${JSON.stringify(repairedProject)}`)
   const lateFinished=await request(`/v1/runs/${lateRun.id}`);if(lateFinished.status!=='completed'||!lateFinished.worktree_id)throw new Error(`late repo run failed: ${JSON.stringify(lateFinished)}`)
   const lateTrees=await request(`/v1/projects/${lateProject.id}/worktrees`);await request(`/v1/worktrees/${lateTrees[0].id}?force=true`,{method:'DELETE'})
-  console.log(`ok - managed worktree ${trees[0].id} isolated the run and was removed safely`)
+  console.log(`ok - managed worktrees isolate runs, expose merge context, guard dirty checkouts, merge, and clean up safely`)
 } finally { if(daemon.exitCode===null)daemon.kill('SIGINT'); await fs.rm(temp,{recursive:true,force:true}) }

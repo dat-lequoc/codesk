@@ -1,4 +1,4 @@
-use std::{io::SeekFrom, path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, io::SeekFrom, path::PathBuf, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -14,7 +14,8 @@ use uuid::Uuid;
 use crate::{
     db::Db,
     model::{
-        Event, ExternalQueuedInput, Run, RunnerExit, RunnerSpec, StartRunRequest, TmuxControl,
+        Event, ExternalQueuedInput, Project, Run, RunnerExit, RunnerSpec, StartRunRequest,
+        TmuxControl, Worktree,
     },
     providers,
     tmux::{TmuxManager, TmuxPane},
@@ -78,7 +79,7 @@ impl Supervisor {
             .db
             .project(&request.project_id)?
             .context("project not found")?;
-        let (cwd, worktree_id) = match request.workspace_mode.as_str() {
+        let (cwd, worktree) = match request.workspace_mode.as_str() {
             "current_checkout" => (project.path.clone(), None),
             "existing_worktree" => {
                 let id = request
@@ -90,7 +91,8 @@ impl Supervisor {
                     item.project_id == project.id,
                     "worktree belongs to another project"
                 );
-                (item.path, Some(item.id))
+                anyhow::ensure!(item.status != "removed", "worktree has been removed");
+                (item.path.clone(), Some(item))
             }
             "managed_worktree" => {
                 let item = worktrees::create(
@@ -103,16 +105,24 @@ impl Supervisor {
                     },
                 )
                 .await?;
-                (item.path, Some(item.id))
+                (item.path.clone(), Some(item))
             }
             value => anyhow::bail!("unsupported workspace mode: {value}"),
         };
+        let worktree_id = worktree.as_ref().map(|item| item.id.clone());
+        let execution_prompt = worktree
+            .as_ref()
+            .map(|item| workspace_prompt(&request.prompt, &project, item))
+            .unwrap_or_else(|| request.prompt.clone());
+        let environment = workspace_environment(&project, worktree.as_ref());
         let id = Uuid::new_v4().to_string();
+        let mut execution_request = request.clone();
+        execution_request.prompt = execution_prompt.clone();
         let terminal_spec =
             if std::env::var("CODESK_RUN_TRANSPORT").is_ok_and(|value| value == "structured") {
                 None
             } else {
-                providers::build_terminal(&request, &id, &cwd)?
+                providers::build_terminal(&execution_request, &id, &cwd)?
             };
         let spec = match terminal_spec.as_ref() {
             Some(spec) => providers::support::CommandSpec {
@@ -120,7 +130,7 @@ impl Supervisor {
                 args: spec.args.clone(),
                 session_id: spec.session_id.clone(),
             },
-            None => providers::build(&request, &id, &cwd)?,
+            None => providers::build(&execution_request, &id, &cwd)?,
         };
         let created = Utc::now().to_rfc3339();
         let title = request
@@ -159,7 +169,7 @@ impl Supervisor {
             "run.created",
             None,
             None,
-            json!({"title":run.title,"cwd":run.cwd}),
+            json!({"title":run.title,"cwd":run.cwd,"workspace_mode":request.workspace_mode,"worktree_id":run.worktree_id}),
             None,
         )?;
         if terminal_spec.is_some() {
@@ -172,6 +182,7 @@ impl Supervisor {
                     &run.command,
                     &run.args,
                     &control_id,
+                    Some(&environment),
                 )
                 .await
             {
@@ -240,7 +251,7 @@ impl Supervisor {
             if !run.prompt.trim().is_empty() {
                 let tmux = self.tmux.clone();
                 let pane = launch.pane;
-                let prompt = run.prompt.clone();
+                let prompt = execution_prompt.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(1200)).await;
                     let _ = tmux.send_prompt(&pane, &prompt).await;
@@ -258,11 +269,12 @@ impl Supervisor {
             args: run.args.clone(),
             run_dir: run_dir.to_string_lossy().into_owned(),
             input_socket: input_socket(&id).to_string_lossy().into_owned(),
-            prompt: request.prompt.clone(),
+            prompt: execution_prompt.clone(),
             model: request.model.clone(),
             operation: request.operation.clone(),
             resume_session_id: request.resume_session_id.clone(),
             last_turn_id: request.last_turn_id.clone(),
+            env: environment,
         };
         let spec_path = run_dir.join("runner.json");
         tokio::fs::write(&spec_path, serde_json::to_vec_pretty(&runner_spec)?).await?;
@@ -276,6 +288,7 @@ impl Supervisor {
         command
             .arg("__runner")
             .arg(&spec_path)
+            .envs(&runner_spec.env)
             .current_dir(&run.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::from(bootstrap_log))
@@ -320,7 +333,7 @@ impl Supervisor {
             json!({"pid":pid,"process_group_id":pgid,"durable_runner":true}),
             None,
         )?;
-        if let Some(message) = providers::encode_initial_prompt(&run.provider, &run.prompt) {
+        if let Some(message) = providers::encode_initial_prompt(&run.provider, &execution_prompt) {
             self.write_input(&id, &message).await?;
             self.emit(
                 &id,
@@ -771,6 +784,63 @@ impl Supervisor {
             .filter(|run| !is_terminal(Some(run)))
             .count()
     }
+}
+
+fn workspace_environment(
+    project: &Project,
+    worktree: Option<&Worktree>,
+) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::from([
+        ("CODESK_PROJECT_PATH".into(), project.path.clone()),
+        (
+            "CODESK_WORKSPACE_MODE".into(),
+            if worktree.is_some() {
+                "managed_worktree".into()
+            } else {
+                "current_checkout".into()
+            },
+        ),
+    ]);
+    if let Some(item) = worktree {
+        environment.insert("CODESK_WORKTREE_ID".into(), item.id.clone());
+        environment.insert("CODESK_WORKTREE_PATH".into(), item.path.clone());
+        if let Some(branch) = item.branch.clone() {
+            environment.insert("CODESK_WORKTREE_BRANCH".into(), branch);
+        }
+        if let Some(base_ref) = item.base_ref.clone() {
+            environment.insert("CODESK_MERGE_TARGET".into(), base_ref);
+        }
+    }
+    environment
+}
+
+fn workspace_prompt(prompt: &str, project: &Project, worktree: &Worktree) -> String {
+    let context = json!({
+        "mode": "managed_worktree",
+        "project_checkout": project.path,
+        "worktree_path": worktree.path,
+        "worktree_branch": worktree.branch,
+        "merge_target": worktree.base_ref,
+        "environment_variables": [
+            "CODESK_PROJECT_PATH",
+            "CODESK_WORKTREE_ID",
+            "CODESK_WORKTREE_PATH",
+            "CODESK_WORKTREE_BRANCH",
+            "CODESK_MERGE_TARGET"
+        ],
+        "merge_instructions": [
+            "Work only in the managed worktree unless the user explicitly asks to merge.",
+            "When asked to merge, first commit all intended worktree changes.",
+            "Refuse to merge if the project checkout has uncommitted changes; never clean, reset, stash, or overwrite them automatically.",
+            "Merge with: git -C \"$CODESK_PROJECT_PATH\" merge --no-edit \"$CODESK_WORKTREE_BRANCH\"",
+            "If Git reports conflicts, run git -C \"$CODESK_PROJECT_PATH\" merge --abort and report the conflict instead of resolving it without permission."
+        ]
+    });
+    format!(
+        "<environment_context>\n{}\n</environment_context>\n\n{}",
+        serde_json::to_string_pretty(&context).unwrap_or_else(|_| context.to_string()),
+        prompt
+    )
 }
 
 fn process_alive(pgid: i32) -> bool {

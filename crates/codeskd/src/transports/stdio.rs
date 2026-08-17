@@ -22,6 +22,7 @@ pub(crate) async fn run(spec: &RunnerSpec) -> Result<std::process::ExitStatus> {
     let mut command = Command::new(&spec.command);
     command
         .args(&spec.args)
+        .envs(&spec.env)
         .current_dir(&spec.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))

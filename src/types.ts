@@ -27,6 +27,33 @@ export type GitContext = {
   dirty: boolean
 }
 
+export type Worktree = {
+  id: string
+  project_id: string
+  path: string
+  branch?: string | null
+  base_ref?: string | null
+  ownership: 'managed' | 'discovered' | string
+  status: string
+  created_at: string
+}
+
+export type WorktreeStatus = {
+  worktree: Worktree
+  dirty: boolean
+  summary: string
+  diff_stat: string
+}
+
+export type MergeWorktreeResult = {
+  worktree_id: string
+  source_branch: string
+  target_branch: string
+  commit: string
+  changed: boolean
+  summary: string
+}
+
 export type Provider = {
   id: string
   name: string

@@ -40,9 +40,9 @@ use crate::{
     db::Db,
     model::{
         CreateProjectRequest, CreateWorktreeRequest, DiscoverProjectsRequest, EventsQuery,
-        ExternalInputRequest, ExternalQueuedInput, FilesQuery, Health, InputRequest, MessagesQuery,
-        ProviderResponseRequest, ProviderSession, Run, SessionsQuery, StartRunRequest, TmuxControl,
-        TmuxControlRequest,
+        ExternalInputRequest, ExternalQueuedInput, FilesQuery, Health, InputRequest,
+        MergeWorktreeRequest, MessagesQuery, ProviderResponseRequest, ProviderSession, Run,
+        SessionsQuery, StartRunRequest, TmuxControl, TmuxControlRequest,
     },
     supervisor::Supervisor,
     tmux::TmuxManager,
@@ -165,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/worktrees/{id}", delete(delete_worktree))
         .route("/v1/worktrees/{id}/status", get(worktree_status))
+        .route("/v1/worktrees/{id}/merge", post(merge_worktree))
         .route("/v1/runs", get(runs).post(start_run))
         .route("/v1/runs/{id}", get(run))
         .route("/v1/runs/{id}/events", get(run_events))
@@ -835,6 +836,7 @@ async fn process_tmux_move(state: &AppState, control: &TmuxControl) -> anyhow::R
             &command,
             &args,
             &control.id,
+            None,
         )
         .await?;
     state.db.update_tmux_control_location(
@@ -1215,6 +1217,27 @@ async fn worktree_status(
         .map_err(api_error)?
         .ok_or_else(|| api_error("worktree not found"))?;
     Ok(Json(worktrees::status(&item).await.map_err(api_error)?))
+}
+async fn merge_worktree(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<MergeWorktreeRequest>,
+) -> ApiResult<Json<model::MergeWorktreeResult>> {
+    let item = state
+        .db
+        .worktree(&id)
+        .map_err(api_error)?
+        .ok_or_else(|| api_error("worktree not found"))?;
+    let project = state
+        .db
+        .project(&item.project_id)
+        .map_err(api_error)?
+        .ok_or_else(|| api_error("project not found"))?;
+    Ok(Json(
+        worktrees::merge(&state.db, &item, &project, &request)
+            .await
+            .map_err(api_error)?,
+    ))
 }
 async fn runs(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<model::Run>>> {
     Ok(Json(state.db.runs().map_err(api_error)?))

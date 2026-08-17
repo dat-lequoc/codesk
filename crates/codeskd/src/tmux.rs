@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -74,6 +75,7 @@ impl TmuxManager {
         command: &str,
         args: &[String],
         control_id: &str,
+        environment: Option<&BTreeMap<String, String>>,
     ) -> Result<TmuxLaunch> {
         anyhow::ensure!(self.available().await, "tmux is not installed on this host");
         let socket = self.owned_socket();
@@ -81,7 +83,7 @@ impl TmuxManager {
             tokio::fs::create_dir_all(parent).await?;
         }
         let name = unique_session_name(provider);
-        let shell_command = shell_command(command, args);
+        let shell_command = shell_command_with_environment(command, args, environment);
         let output = Command::new("tmux")
             .args([
                 "-S",
@@ -348,6 +350,22 @@ fn shell_command(command: &str, args: &[String]) -> String {
         .map(shell_quote)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn shell_command_with_environment(
+    command: &str,
+    args: &[String],
+    environment: Option<&BTreeMap<String, String>>,
+) -> String {
+    let Some(environment) = environment.filter(|values| !values.is_empty()) else {
+        return shell_command(command, args);
+    };
+    let assignments = environment
+        .iter()
+        .map(|(key, value)| format!("{key}={}", shell_quote(value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("env {assignments} {}", shell_command(command, args))
 }
 
 fn shell_quote(value: &str) -> String {

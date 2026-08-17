@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -28,6 +30,21 @@ pub struct WorktreeStatus {
     pub dirty: bool,
     pub summary: String,
     pub diff_stat: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MergeWorktreeRequest {
+    pub target_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeWorktreeResult {
+    pub worktree_id: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub commit: String,
+    pub changed: bool,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,7 +111,7 @@ pub struct CreateWorktreeRequest {
     pub branch: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StartRunRequest {
     pub project_id: String,
     pub title: Option<String>,
@@ -362,6 +379,8 @@ pub struct RunnerSpec {
     pub operation: Option<String>,
     pub resume_session_id: Option<String>,
     pub last_turn_id: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
