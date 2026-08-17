@@ -1,298 +1,14 @@
-use std::{env, fs, path::PathBuf};
-
 use serde_json::{Value, json};
 
-use crate::model::{AdapterCapability, StartRunRequest};
-
-pub struct CommandSpec {
-    pub command: String,
-    pub args: Vec<String>,
-    pub session_id: Option<String>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EventCodec {
+    Default,
+    Acp,
+    Dsh,
+    Antigravity,
 }
-
-pub fn capabilities() -> Vec<AdapterCapability> {
-    vec![
-        capability("codex", "Codex", "codex", true, true, true, true, true, vec!["Esc-Esc style rewind creates a source-preserving thread fork; it does not revert files already changed in the workspace".into()]),
-        capability("kiro", "Kiro CLI", "kiro-cli", true, true, true, false, true, vec!["Kiro ACP does not expose mid-turn steering; messages sent during an active turn are queued by Codesk".into()]),
-        capability("dsh", "DeepSeek Harness", "dsh", true, true, true, true, true, vec!["Codesk starts a private loopback DSH web host for durable resume, fork, steer, and queue support".into()]),
-        capability("agy", "Antigravity", "agy", true, false, true, false, false, vec!["Antigravity print-mode turns cannot be steered; follow-ups resume the same conversation in a new managed process".into(), "Antigravity CLI does not expose a safe conversation fork operation".into()]),
-        capability("pi", "Pi", "pi", true, true, true, true, false, vec![]),
-        capability("claude", "Claude Code", "claude", true, false, true, true, false, vec!["Active print-mode sessions cannot accept live steering; use resume or fork after completion".into()]),
-        AdapterCapability {
-            id: "shell".into(),
-            name: "Custom command".into(),
-            available: true,
-            executable: None,
-            structured_output: false,
-            live_input: true,
-            resume: false,
-            fork: false,
-            native_interrupt: false,
-            limitations: vec!["Resume and fork require provider-specific configuration".into()],
-        },
-    ]
-}
-
-fn capability(
-    id: &str,
-    name: &str,
-    binary: &str,
-    structured: bool,
-    live: bool,
-    resume: bool,
-    fork: bool,
-    native_interrupt: bool,
-    limitations: Vec<String>,
-) -> AdapterCapability {
-    let executable = find_executable(binary);
-    AdapterCapability {
-        id: id.into(),
-        name: name.into(),
-        available: executable.is_some(),
-        executable,
-        structured_output: structured,
-        live_input: live,
-        resume,
-        fork,
-        native_interrupt,
-        limitations,
-    }
-}
-
-pub fn build(
-    request: &StartRunRequest,
-    session_key: &str,
-    cwd: &str,
-) -> anyhow::Result<CommandSpec> {
-    let model = request
-        .model
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    Ok(match request.provider.as_str() {
-        "codex" => {
-            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
-                anyhow::ensure!(
-                    request.resume_session_id.as_deref().is_some(),
-                    "resume_session_id is required"
-                );
-            }
-            CommandSpec {
-                command: provider_command("codex")?,
-                args: vec!["app-server".into()],
-                session_id: request.resume_session_id.clone(),
-            }
-        }
-        "pi" => {
-            let mut args = vec!["--mode".into(), "rpc".into()];
-            let selected_session = request.resume_session_id.as_deref().unwrap_or(session_key);
-            match request.operation.as_deref() {
-                Some("resume") => args.extend(["--session".into(), selected_session.into()]),
-                Some("fork") => args.extend([
-                    "--fork".into(),
-                    selected_session.into(),
-                    "--session-id".into(),
-                    session_key.into(),
-                ]),
-                _ => args.extend(["--session-id".into(), session_key.into()]),
-            }
-            if let Some(value) = model {
-                args.extend(["--model".into(), value.into()]);
-            }
-            CommandSpec {
-                command: provider_command("pi")?,
-                args,
-                session_id: Some(if request.operation.as_deref() == Some("resume") {
-                    selected_session.into()
-                } else {
-                    session_key.into()
-                }),
-            }
-        }
-        "kiro" => {
-            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
-                anyhow::ensure!(
-                    request.resume_session_id.as_deref().is_some(),
-                    "resume_session_id is required"
-                );
-            }
-            anyhow::ensure!(
-                request.operation.as_deref() != Some("fork"),
-                "Kiro ACP does not expose a safe fork operation"
-            );
-            let mut args = vec!["acp".into()];
-            if let Some(value) = model {
-                args.extend(["--model".into(), value.into()]);
-            }
-            CommandSpec {
-                command: provider_command("kiro-cli")?,
-                args,
-                session_id: request.resume_session_id.clone(),
-            }
-        }
-        "dsh" => {
-            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
-                anyhow::ensure!(
-                    request.resume_session_id.as_deref().is_some(),
-                    "resume_session_id is required"
-                );
-            }
-            CommandSpec {
-                command: provider_command("dsh")?,
-                args: vec![
-                    "web".into(),
-                    "--host".into(),
-                    "127.0.0.1".into(),
-                    "--port".into(),
-                    "0".into(),
-                ],
-                session_id: request.resume_session_id.clone(),
-            }
-        }
-        "agy" => {
-            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
-                anyhow::ensure!(
-                    request.resume_session_id.as_deref().is_some(),
-                    "resume_session_id is required"
-                );
-            }
-            anyhow::ensure!(
-                request.operation.as_deref() != Some("fork"),
-                "Antigravity CLI does not expose a safe fork operation"
-            );
-            let mut args = Vec::new();
-            if let Some(session) = request.resume_session_id.as_deref() {
-                args.extend(["--conversation".into(), session.into()]);
-            }
-            args.extend([
-                "--add-dir".into(),
-                cwd.into(),
-                "--print".into(),
-                request.prompt.clone(),
-                "--output-format".into(),
-                "stream-json".into(),
-                "--dangerously-skip-permissions".into(),
-            ]);
-            if let Some(value) = model {
-                args.extend(["--model".into(), value.into()]);
-            }
-            CommandSpec {
-                command: provider_command("agy")?,
-                args,
-                session_id: request.resume_session_id.clone(),
-            }
-        }
-        "claude" => {
-            let mut args = vec![
-                "--print".into(),
-                "--verbose".into(),
-                "--output-format".into(),
-                "stream-json".into(),
-            ];
-            if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
-                let session = request
-                    .resume_session_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("resume_session_id is required"))?;
-                args.extend(["--resume".into(), session.into()]);
-                if request.operation.as_deref() == Some("fork") {
-                    args.push("--fork-session".into());
-                }
-            }
-            if let Some(value) = model {
-                args.extend(["--model".into(), value.into()]);
-            }
-            args.push(request.prompt.clone());
-            CommandSpec {
-                command: provider_command("claude")?,
-                args,
-                session_id: request.resume_session_id.clone(),
-            }
-        }
-        "shell" => CommandSpec {
-            command: request
-                .command
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("command is required for shell provider"))?,
-            args: request.args.clone(),
-            session_id: None,
-        },
-        value => anyhow::bail!("unsupported provider: {value}"),
-    })
-}
-
-pub fn encode_initial_prompt(provider: &str, prompt: &str) -> Option<String> {
-    match provider {
-        "pi" => Some(
-            json!({"id":uuid::Uuid::new_v4().to_string(),"type":"prompt","message":prompt})
-                .to_string(),
-        ),
-        _ => None,
-    }
-}
-
-pub fn encode_input(
-    provider: &str,
-    message: &str,
-    request_id: &str,
-    delivery: &str,
-    last_turn_id: Option<&str>,
-) -> Result<String, anyhow::Error> {
-    match provider {
-        "codex" => match delivery {
-            "auto" | "steer" | "queue" => Ok(json!({
-                "type":"submit",
-                "message":message,
-                "requestId":request_id,
-                "delivery":delivery,
-            })
-            .to_string()),
-            "fork" => Ok(json!({
-                "type":"rewind",
-                "message":message,
-                "requestId":request_id,
-                "lastTurnId":last_turn_id,
-            })
-            .to_string()),
-            value => anyhow::bail!("unsupported Codex input delivery: {value}"),
-        },
-        "pi" => Ok(
-            json!({"id":uuid::Uuid::new_v4().to_string(),"type":"steer","message":message})
-                .to_string(),
-        ),
-        "kiro" => match delivery {
-            "auto" | "steer" | "queue" => Ok(json!({
-                "type":"submit",
-                "message":message,
-                "requestId":request_id,
-                "delivery":delivery,
-            })
-            .to_string()),
-            value => anyhow::bail!("unsupported Kiro input delivery: {value}"),
-        },
-        "dsh" => match delivery {
-            "auto" | "steer" | "queue" => Ok(json!({
-                "type":"submit",
-                "message":message,
-                "requestId":request_id,
-                "delivery":delivery,
-            })
-            .to_string()),
-            "fork" => Ok(json!({
-                "type":"submit",
-                "message":message,
-                "requestId":request_id,
-                "delivery":"fork",
-                "lastTurnId":last_turn_id,
-            })
-            .to_string()),
-            value => anyhow::bail!("unsupported DSH input delivery: {value}"),
-        },
-        "shell" => Ok(message.to_string()),
-        _ => anyhow::bail!("{provider} adapter does not support live steering yet"),
-    }
-}
-
-pub fn normalize_line(
+pub(crate) fn normalize_with_codec(
+    codec: EventCodec,
     provider: &str,
     channel: &str,
     line: &str,
@@ -311,13 +27,13 @@ pub fn normalize_line(
             None,
         );
     };
-    if provider == "kiro" {
-        return normalize_kiro(raw);
+    if codec == EventCodec::Acp {
+        return normalize_acp(provider, raw);
     }
-    if provider == "dsh" {
+    if codec == EventCodec::Dsh {
         return normalize_dsh(raw);
     }
-    if provider == "agy" {
+    if codec == EventCodec::Antigravity {
         return normalize_agy(raw);
     }
     let event_type = raw
@@ -813,7 +529,15 @@ fn dsh_tool_result_text(data: &Value) -> String {
         .join("\n")
 }
 
-fn normalize_kiro(raw: Value) -> (String, Option<String>, Value, Option<Value>, Option<String>) {
+fn normalize_acp(
+    provider: &str,
+    raw: Value,
+) -> (String, Option<String>, Value, Option<Value>, Option<String>) {
+    let provider_name = if provider == "opencode" {
+        "OpenCode"
+    } else {
+        "Kiro"
+    };
     let method = raw.get("method").and_then(Value::as_str);
     let base_event_type = method
         .or_else(|| raw.get("type").and_then(Value::as_str))
@@ -906,8 +630,8 @@ fn normalize_kiro(raw: Value) -> (String, Option<String>, Value, Option<Value>, 
     } else if base_event_type == "session/request_permission" {
         raw.pointer("/params/toolCall/title")
             .and_then(Value::as_str)
-            .map(|title| format!("Kiro wants to {title}"))
-            .unwrap_or_else(|| "Kiro requests permission to use a tool".to_string())
+            .map(|title| format!("{provider_name} wants to {title}"))
+            .unwrap_or_else(|| format!("{provider_name} requests permission to use a tool"))
     } else if let Some(update) = update {
         kiro_update_text(update)
     } else {
@@ -953,7 +677,7 @@ fn normalize_kiro(raw: Value) -> (String, Option<String>, Value, Option<Value>, 
     });
     (
         kind.to_string(),
-        Some(format!("kiro.{event_type}")),
+        Some(format!("{provider}.{event_type}")),
         payload,
         Some(raw),
         session_id,
@@ -1037,37 +761,6 @@ fn kiro_changes(update: &Value) -> Vec<Value> {
     changes
 }
 
-pub fn status_from_event(provider: &str, raw: Option<&Value>) -> Option<&'static str> {
-    let raw = raw?;
-    if provider == "dsh" && raw.get("type").and_then(Value::as_str) == Some("dsh.event") {
-        return match raw.pointer("/event/type").and_then(Value::as_str) {
-            Some("turn/start") => Some("running"),
-            Some("turn/end") => Some("waiting_for_input"),
-            _ => None,
-        };
-    }
-    if provider == "kiro" && raw.get("type").and_then(Value::as_str) == Some("codesk.turn") {
-        return match raw.get("action").and_then(Value::as_str) {
-            Some("started") => Some("running"),
-            Some("completed") => Some("waiting_for_input"),
-            _ => None,
-        };
-    }
-    if provider != "codex" {
-        return None;
-    }
-    match raw.get("method").and_then(Value::as_str) {
-        Some("turn/started") => Some("running"),
-        Some("turn/completed") => Some("waiting_for_input"),
-        _ if raw.get("type").and_then(Value::as_str) == Some("codesk.control.ack")
-            && raw.get("accepted").and_then(Value::as_bool) == Some(false) =>
-        {
-            Some("waiting_for_input")
-        }
-        _ => None,
-    }
-}
-
 fn extract_text(value: &Value) -> Option<String> {
     for pointer in [
         "/text",
@@ -1108,45 +801,14 @@ fn extract_text(value: &Value) -> Option<String> {
     None
 }
 
-pub(crate) fn find_executable(binary: &str) -> Option<String> {
-    let mut directories = env::var_os("PATH")
-        .map(|path| env::split_paths(&path).collect::<Vec<_>>())
-        .unwrap_or_default();
-    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
-        directories.extend([
-            home.join(".local/bin"),
-            home.join(".cargo/bin"),
-            home.join(".bun/bin"),
-            home.join(".local/share/pnpm"),
-        ]);
-        let node_versions = home.join(".nvm/versions/node");
-        if let Ok(entries) = fs::read_dir(node_versions) {
-            let mut bins = entries
-                .flatten()
-                .map(|entry| entry.path().join("bin"))
-                .collect::<Vec<_>>();
-            bins.sort_by(|left, right| right.cmp(left));
-            directories.extend(bins);
-        }
-    }
-    directories
-        .into_iter()
-        .map(|dir| dir.join(binary))
-        .find(|candidate| candidate.is_file())
-        .map(|path| path.to_string_lossy().into_owned())
-}
-
-fn provider_command(binary: &str) -> anyhow::Result<String> {
-    find_executable(binary).ok_or_else(|| anyhow::anyhow!("{binary} executable was not found"))
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use crate::model::StartRunRequest;
-
-    use super::{build, find_executable, normalize_line, status_from_event};
+    use crate::{
+        model::StartRunRequest,
+        providers::{build, normalize_line, status_from_event, support::find_executable},
+    };
 
     #[test]
     fn normalizes_current_codex_request_and_message_shapes() {
@@ -1250,6 +912,60 @@ mod tests {
         assert_eq!(
             status_from_event(
                 "kiro",
+                Some(&json!({"type":"codesk.turn","action":"completed"}))
+            ),
+            Some("waiting_for_input")
+        );
+    }
+
+    #[test]
+    fn builds_and_normalizes_opencode_acp_sessions() {
+        if find_executable("opencode").is_some() {
+            let request = StartRunRequest {
+                project_id: "project-1".into(),
+                title: None,
+                prompt: "hello from Codesk".into(),
+                provider: "opencode".into(),
+                model: Some("opencode/big-pickle".into()),
+                workspace_mode: "current_checkout".into(),
+                worktree_id: None,
+                base_ref: None,
+                branch: None,
+                parent_run_id: None,
+                command: None,
+                args: Vec::new(),
+                operation: Some("fork".into()),
+                resume_session_id: Some("ses_source".into()),
+                last_turn_id: None,
+            };
+            let spec = build(&request, "codesk-session", "/tmp/codesk-project").unwrap();
+            assert_eq!(spec.args, ["acp", "--cwd", "/tmp/codesk-project"]);
+            assert_eq!(spec.session_id.as_deref(), Some("ses_source"));
+        }
+
+        let (kind, provider_type, payload, _, session) = normalize_line(
+            "opencode",
+            "stdout",
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_1","update":{"sessionUpdate":"agent_message_chunk","messageId":"msg_1","content":{"type":"text","text":"Hello from OpenCode"}}}}"#,
+        );
+        assert_eq!(kind, "assistant.message");
+        assert_eq!(
+            provider_type.as_deref(),
+            Some("opencode.session/update/agent_message_chunk")
+        );
+        assert_eq!(payload["text"], "Hello from OpenCode");
+        assert_eq!(session.as_deref(), Some("ses_1"));
+
+        let (kind, _, payload, _, _) = normalize_line(
+            "opencode",
+            "stdout",
+            r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"ses_1","toolCall":{"title":"Edit src/App.tsx"},"options":[{"optionId":"allow_once","name":"Allow once"}]}}"#,
+        );
+        assert_eq!(kind, "approval.required");
+        assert_eq!(payload["text"], "OpenCode wants to Edit src/App.tsx");
+        assert_eq!(
+            status_from_event(
+                "opencode",
                 Some(&json!({"type":"codesk.turn","action":"completed"}))
             ),
             Some("waiting_for_input")

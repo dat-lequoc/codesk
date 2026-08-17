@@ -1,12 +1,11 @@
-use std::{fs::OpenOptions as StdOpenOptions, path::Path, process::Stdio};
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
-use tokio::{io::copy, net::UnixListener, process::Command};
 
 use crate::{
-    codex_app_server, dsh_web, kiro_acp,
     model::{RunnerExit, RunnerSpec},
+    providers, transports,
 };
 
 pub async fn run(spec_path: &Path) -> Result<()> {
@@ -18,60 +17,8 @@ pub async fn run(spec_path: &Path) -> Result<()> {
         libc::signal(libc::SIGTERM, libc::SIG_IGN);
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
-    if spec.provider == "codex" {
-        let status = codex_app_server::run(&spec).await?;
-        return write_exit(run_dir, status).await;
-    }
-    if spec.provider == "kiro" {
-        let status = kiro_acp::run(&spec).await?;
-        return write_exit(run_dir, status).await;
-    }
-    if spec.provider == "dsh" {
-        let status = dsh_web::run(&spec).await?;
-        return write_exit(run_dir, status).await;
-    }
-    let stdout = StdOpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(run_dir.join("stdout.log"))?;
-    let stderr = StdOpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(run_dir.join("stderr.log"))?;
-    let socket_path = std::path::PathBuf::from(&spec.input_socket);
-    let _ = tokio::fs::remove_file(&socket_path).await;
-    let listener = UnixListener::bind(&socket_path)?;
-    tokio::fs::write(run_dir.join("ready"), format!("{}\n", std::process::id())).await?;
-    let mut command = Command::new(&spec.command);
-    command
-        .args(&spec.args)
-        .current_dir(&spec.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    unsafe {
-        command.pre_exec(|| {
-            libc::signal(libc::SIGINT, libc::SIG_DFL);
-            libc::signal(libc::SIGTERM, libc::SIG_DFL);
-            libc::signal(libc::SIGHUP, libc::SIG_DFL);
-            Ok(())
-        });
-    }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawn {}", spec.command))?;
-    let stdin = child.stdin.take().context("child stdin unavailable")?;
-    let input_task = tokio::spawn(async move {
-        let mut stdin = stdin;
-        while let Ok((mut socket, _)) = listener.accept().await {
-            if copy(&mut socket, &mut stdin).await.is_err() {
-                break;
-            }
-        }
-    });
-    let status = child.wait().await?;
-    input_task.abort();
-    let _ = tokio::fs::remove_file(&socket_path).await;
+    let kind = providers::require(&spec.provider)?.descriptor().runner;
+    let status = transports::run(kind, &spec).await?;
     write_exit(run_dir, status).await
 }
 

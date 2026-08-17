@@ -10,7 +10,7 @@ use tokio::{
     process::{ChildStdout, Command},
 };
 
-use crate::model::RunnerSpec;
+use crate::{model::RunnerSpec, providers};
 
 #[derive(Debug, Clone)]
 struct Submission {
@@ -27,6 +27,8 @@ struct ActivePrompt {
 }
 
 pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
+    let adapter = providers::require(&spec.provider)?;
+    let agent_name = adapter.acp_agent_name();
     let run_dir = Path::new(&spec.run_dir);
     let socket_path = Path::new(&spec.input_socket);
     let _ = tokio::fs::remove_file(socket_path).await;
@@ -58,8 +60,11 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn {} ACP agent", spec.command))?;
-    let mut stdin = child.stdin.take().context("Kiro ACP stdin unavailable")?;
-    let stdout = child.stdout.take().context("Kiro ACP stdout unavailable")?;
+    let mut stdin = child.stdin.take().context("ACP agent stdin unavailable")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("ACP agent stdout unavailable")?;
     let mut lines = BufReader::new(stdout).lines();
     let mut next_id = 1_u64;
 
@@ -85,7 +90,7 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
     let initialize_result = response_result(&initialize_response)?;
     anyhow::ensure!(
         initialize_result["protocolVersion"].as_u64() == Some(1),
-        "Kiro ACP protocol v1 is required"
+        "{agent_name} ACP protocol v1 is required"
     );
 
     let session_id = if spec.operation.as_deref() == Some("resume") {
@@ -94,7 +99,7 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
                 .pointer("/agentCapabilities/loadSession")
                 .and_then(Value::as_bool)
                 == Some(true),
-            "this Kiro CLI does not support loading sessions"
+            "this {agent_name} CLI does not support loading sessions"
         );
         let session_id = spec
             .resume_session_id
@@ -110,11 +115,30 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
         .await?;
         wait_for_response(&mut lines, &mut log, request).await?;
         session_id
-    } else {
+    } else if spec.operation.as_deref() == Some("fork") {
         anyhow::ensure!(
-            spec.operation.as_deref() != Some("fork"),
-            "Kiro ACP does not expose a safe fork operation"
+            !initialize_result
+                .pointer("/agentCapabilities/sessionCapabilities/fork")
+                .is_none(),
+            "this {agent_name} CLI does not support forking sessions"
         );
+        let source_session_id = spec
+            .resume_session_id
+            .as_deref()
+            .context("fork source session is required")?;
+        let request = rpc_request(
+            &mut stdin,
+            &mut next_id,
+            "session/fork",
+            json!({"sessionId":source_session_id,"cwd":spec.cwd,"mcpServers":[]}),
+        )
+        .await?;
+        let response = wait_for_response(&mut lines, &mut log, request).await?;
+        response_result(&response)?["sessionId"]
+            .as_str()
+            .context("ACP session fork did not return a session id")?
+            .to_string()
+    } else {
         let request = rpc_request(
             &mut stdin,
             &mut next_id,
@@ -125,9 +149,24 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
         let response = wait_for_response(&mut lines, &mut log, request).await?;
         response_result(&response)?["sessionId"]
             .as_str()
-            .context("Kiro ACP did not return a session id")?
+            .context("ACP session creation did not return a session id")?
             .to_string()
     };
+    if let Some(config_id) = adapter.acp_model_config_id()
+        && let Some(model) = spec
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    {
+        let request = rpc_request(
+            &mut stdin,
+            &mut next_id,
+            "session/set_config_option",
+            json!({"sessionId":session_id,"configId":config_id,"value":model}),
+        )
+        .await?;
+        wait_for_response(&mut lines, &mut log, request).await?;
+    }
     write_synthetic(
         &mut log,
         json!({"type":"codesk.session","sessionId":session_id}),
@@ -217,6 +256,7 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
                         Some("interrupt" | "queueStart" | "queueRemove")
                     );
                     if let Err(error) = handle_command(
+                        agent_name,
                         command,
                         &mut stdin,
                         &mut next_id,
@@ -242,11 +282,12 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
         }
     }
     let _ = tokio::fs::remove_file(socket_path).await;
-    child.wait().await.context("wait for Kiro ACP agent")
+    child.wait().await.context("wait for ACP agent")
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
+    agent_name: &str,
     command: Value,
     stdin: &mut tokio::process::ChildStdin,
     next_id: &mut u64,
@@ -278,7 +319,7 @@ async fn handle_command(
             };
             match delivery {
                 "start" => {
-                    anyhow::ensure!(active.is_none(), "a Kiro turn is already active");
+                    anyhow::ensure!(active.is_none(), "an {agent_name} turn is already active");
                     *active = Some(
                         start_submission(
                             stdin,
@@ -298,7 +339,7 @@ async fn handle_command(
                 "steer" => {
                     anyhow::ensure!(
                         active.is_none(),
-                        "Kiro ACP does not support mid-turn steering; use Queue"
+                        "{agent_name} ACP does not support mid-turn steering; use Queue"
                     );
                     *active = Some(
                         start_submission(
@@ -330,13 +371,13 @@ async fn handle_command(
                             start_next_queued(stdin, next_id, session_id, queued, log).await?;
                     }
                 }
-                value => anyhow::bail!("unsupported Kiro input delivery: {value}"),
+                value => anyhow::bail!("unsupported {agent_name} input delivery: {value}"),
             }
         }
         Some("interrupt") => {
             anyhow::ensure!(
                 active.is_some(),
-                "there is no active Kiro turn to interrupt"
+                "there is no active {agent_name} turn to interrupt"
             );
             for rpc_id in pending_permissions.drain(..) {
                 write_rpc(
@@ -361,8 +402,8 @@ async fn handle_command(
             write_control_ack(log, &request_id, "interrupt", None).await?;
         }
         Some("queueStart") => {
-            anyhow::ensure!(active.is_none(), "there is an active Kiro turn");
-            anyhow::ensure!(!queued.is_empty(), "the Kiro queue is empty");
+            anyhow::ensure!(active.is_none(), "there is an active {agent_name} turn");
+            anyhow::ensure!(!queued.is_empty(), "the {agent_name} queue is empty");
             *active = start_next_queued(stdin, next_id, session_id, queued, log).await?;
             write_control_ack(log, &request_id, "queueStart", None).await?;
         }
@@ -390,8 +431,8 @@ async fn handle_command(
             )
             .await?;
         }
-        Some(value) => anyhow::bail!("unsupported Kiro bridge command: {value}"),
-        None => anyhow::bail!("Kiro bridge command type is required"),
+        Some(value) => anyhow::bail!("unsupported {agent_name} bridge command: {value}"),
+        None => anyhow::bail!("{agent_name} bridge command type is required"),
     }
     Ok(())
 }
@@ -584,16 +625,16 @@ async fn wait_for_response(
             return Ok(value);
         }
     }
-    anyhow::bail!("Kiro ACP exited before responding to request {expected_id}")
+    anyhow::bail!("ACP agent exited before responding to request {expected_id}")
 }
 
 fn response_result(response: &Value) -> Result<&Value> {
     if let Some(error) = response.get("error") {
-        anyhow::bail!("Kiro ACP request failed: {error}")
+        anyhow::bail!("ACP request failed: {error}")
     }
     response
         .get("result")
-        .context("Kiro ACP response did not include a result")
+        .context("ACP response did not include a result")
 }
 
 async fn append_line(log: &mut tokio::fs::File, line: &str) -> Result<()> {

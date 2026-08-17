@@ -1,4 +1,8 @@
-use std::{collections::HashMap, collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashMap,
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -7,7 +11,12 @@ use uuid::Uuid;
 
 use crate::{
     db::Db,
-    model::{DiscoveredAgent, DiscoveredProject, FileContent, FileEntry, FileListing, Project},
+    model::{
+        DiscoveredAgent, DiscoveredProject, FileContent, FileEntry, FileListing, Project,
+        TmuxControl,
+    },
+    providers,
+    tmux::{self, TmuxManager},
     worktrees,
 };
 
@@ -252,9 +261,20 @@ pub async fn discover_projects(
     Ok(result)
 }
 
-pub async fn discover_agents(db: &Db) -> Result<Vec<DiscoveredAgent>> {
+#[derive(Clone, Debug)]
+struct ProcessCandidate {
+    pid: u32,
+    ppid: u32,
+    pgid: i32,
+    tty: Option<String>,
+    command: String,
+    provider: &'static str,
+    managed_run_id: Option<String>,
+}
+
+pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<DiscoveredAgent>> {
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,pgid=,command="])
+        .args(["-axo", "pid=,ppid=,pgid=,tty=,command="])
         .output()
         .await?;
     anyhow::ensure!(output.status.success(), "ps failed");
@@ -269,114 +289,292 @@ pub async fn discover_agents(db: &Db) -> Result<Vec<DiscoveredAgent>> {
     let mut parents = HashMap::new();
     let mut candidates = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut fields = line
-            .trim()
-            .splitn(4, char::is_whitespace)
-            .filter(|part| !part.is_empty());
-        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 5 {
+            continue;
+        }
+        let Some(pid) = fields[0].parse::<u32>().ok() else {
             continue;
         };
-        let Some(ppid) = fields
-            .next()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-        else {
+        let Some(ppid) = fields[1].parse::<u32>().ok() else {
             continue;
         };
         parents.insert(pid, ppid);
-        let Some(pgid) = fields
-            .next()
-            .and_then(|value| value.trim().parse::<i32>().ok())
-        else {
+        let Some(pgid) = fields[2].parse::<i32>().ok() else {
             continue;
         };
-        let command = fields.next().unwrap_or("").trim().to_string();
+        let tty = match tmux::normalize_tty(fields[3]).as_str() {
+            "" | "?" | "??" => None,
+            value => Some(value.to_string()),
+        };
+        let command = fields[4..].join(" ");
         let provider = classify_agent(&command);
         let Some(provider) = provider else { continue };
         let managed_run_id = managed
             .iter()
             .find(|(managed_pid, managed_pgid, _)| *managed_pid == pid || *managed_pgid == pgid)
             .map(|(_, _, id)| id.clone());
-        candidates.push((pid, pgid, command, provider, managed_run_id));
+        if managed_run_id.is_none()
+            && (tty.is_none() || !is_interactive_agent_command(provider, &command))
+        {
+            continue;
+        }
+        candidates.push(ProcessCandidate {
+            pid,
+            ppid,
+            pgid,
+            tty,
+            command,
+            provider,
+            managed_run_id,
+        });
     }
-    let panes = tmux_panes().await;
     let details = process_details(
         &candidates
             .iter()
-            .map(|(pid, _, _, provider, _)| (*pid, *provider))
+            .map(|candidate| (candidate.pid, candidate.provider))
             .collect::<Vec<_>>(),
     )
     .await;
+    let direct_session_ids = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let (_, transcript_path) = details.get(&candidate.pid).cloned().unwrap_or_default();
+            transcript_path
+                .as_deref()
+                .and_then(|path| transcript_session_id(path, candidate.provider))
+                .or_else(|| command_session_id(&candidate.command, candidate.provider))
+                .map(|session_id| (candidate.pid, (candidate.provider.to_string(), session_id)))
+        })
+        .collect::<HashMap<_, _>>();
+    let panes = TmuxManager::new(data_root.to_path_buf())
+        .panes()
+        .await
+        .unwrap_or_default();
     let mut agents = Vec::new();
-    for (pid, pgid, command, provider, managed_run_id) in candidates {
-        let (cwd, transcript_path) = details.get(&pid).cloned().unwrap_or_default();
-        let native_session_id = transcript_path
+    for (root, members) in provider_process_roots(&candidates, &parents) {
+        let pid = root.pid;
+        let provider = root.provider;
+        let (root_cwd, root_transcript) = details.get(&pid).cloned().unwrap_or_default();
+        let cwd = root_cwd.or_else(|| {
+            members
+                .iter()
+                .find_map(|member| details.get(&member.pid).and_then(|value| value.0.clone()))
+        });
+        let transcript_path = root_transcript.or_else(|| {
+            members
+                .iter()
+                .find_map(|member| details.get(&member.pid).and_then(|value| value.1.clone()))
+        });
+        let native_session_id = direct_session_ids
+            .get(&pid)
+            .map(|(_, session_id)| session_id.clone())
+            .or_else(|| {
+                members.iter().find_map(|member| {
+                    direct_session_ids
+                        .get(&member.pid)
+                        .map(|(_, session_id)| session_id.clone())
+                })
+            })
+            .or_else(|| inherited_session_id(pid, provider, &parents, &direct_session_ids));
+        let managed_run_id = root.managed_run_id.clone().or_else(|| {
+            members
+                .iter()
+                .find_map(|member| member.managed_run_id.clone())
+        });
+        let pane = root
+            .tty
             .as_deref()
-            .and_then(|path| transcript_session_id(path, provider))
-            .or_else(|| command_session_id(&command, provider));
+            .and_then(|tty| panes.iter().find(|pane| pane.tty == tty));
+        let mut tmux_controlled = false;
+        if let Some(pane) = pane {
+            let existing = pane
+                .control_id
+                .as_deref()
+                .and_then(|id| db.tmux_control(id).ok().flatten())
+                .or_else(|| {
+                    db.tmux_control_for_pane(pane.socket_path.as_deref(), &pane.pane_id)
+                        .ok()
+                        .flatten()
+                });
+            if pane.controlled || pane.owned || existing.is_some() {
+                let now = chrono::Utc::now().to_rfc3339();
+                let mut control = existing.unwrap_or_else(|| TmuxControl {
+                    id: pane
+                        .control_id
+                        .clone()
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    project_id: None,
+                    run_id: managed_run_id.clone(),
+                    provider: provider.to_string(),
+                    native_session_id: native_session_id.clone(),
+                    transcript_path: transcript_path.clone(),
+                    source_pid: pid,
+                    source_pgid: root.pgid,
+                    cwd: cwd.clone().unwrap_or_else(|| pane.current_path.clone()),
+                    original_command: root.command.clone(),
+                    socket_path: pane.socket_path.clone(),
+                    pane_id: Some(pane.pane_id.clone()),
+                    session_name: Some(pane.session_name.clone()),
+                    access_command: Some(tmux::access_command(
+                        pane.socket_path.as_deref().map(Path::new),
+                        &pane.session_name,
+                    )),
+                    owned: pane.owned,
+                    enabled: true,
+                    status: "active".to_string(),
+                    error: None,
+                    queue_state: "ready".to_string(),
+                    queue_state_at: now.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                });
+                control.run_id = control.run_id.or(managed_run_id.clone());
+                control.provider = provider.to_string();
+                control.native_session_id = native_session_id.clone().or(control.native_session_id);
+                control.transcript_path = transcript_path.clone().or(control.transcript_path);
+                control.source_pid = pid;
+                control.source_pgid = root.pgid;
+                control.cwd = cwd.clone().unwrap_or_else(|| pane.current_path.clone());
+                control.socket_path = pane.socket_path.clone();
+                control.pane_id = Some(pane.pane_id.clone());
+                control.session_name = Some(pane.session_name.clone());
+                control.access_command = Some(tmux::access_command(
+                    pane.socket_path.as_deref().map(Path::new),
+                    &pane.session_name,
+                ));
+                control.owned = pane.owned;
+                control.enabled = true;
+                control.status = "active".to_string();
+                control.error = None;
+                control.updated_at = chrono::Utc::now().to_rfc3339();
+                db.upsert_tmux_control(&control)?;
+                if let (Some(run_id), Some(session_id)) = (
+                    control.run_id.as_deref(),
+                    control.native_session_id.as_deref(),
+                ) {
+                    let _ = db.set_provider_session(run_id, session_id);
+                }
+                tmux_controlled = true;
+            }
+        }
         agents.push(DiscoveredAgent {
             id: format!("external-{pid}"),
             provider: provider.to_string(),
             pid,
-            process_group_id: pgid,
+            process_group_id: root.pgid,
             cwd,
-            command,
+            command: root.command.clone(),
             managed_run_id,
             native_session_id,
             transcript_path,
-            tmux_pane: tmux_pane_for(pid, &parents, &panes),
+            tty: root.tty.clone(),
+            tmux_pane_id: pane.map(|pane| pane.pane_id.clone()),
+            tmux_session_name: pane.map(|pane| pane.session_name.clone()),
+            tmux_access_command: pane.map(|pane| {
+                tmux::access_command(
+                    pane.socket_path.as_deref().map(Path::new),
+                    &pane.session_name,
+                )
+            }),
+            tmux_controlled,
+            tmux_owned: pane.is_some_and(|pane| pane.owned),
         });
     }
     agents.sort_by_key(|item| item.pid);
     Ok(agents)
 }
 
-async fn tmux_panes() -> Vec<(String, u32)> {
-    let Ok(output) = Command::new(tmux_executable())
-        .args(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"])
-        .output()
-        .await
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
+fn provider_process_roots<'a>(
+    candidates: &'a [ProcessCandidate],
+    parents: &HashMap<u32, u32>,
+) -> Vec<(&'a ProcessCandidate, Vec<&'a ProcessCandidate>)> {
+    let mut groups: HashMap<(String, String), Vec<&ProcessCandidate>> = HashMap::new();
+    for candidate in candidates {
+        let terminal = candidate
+            .tty
+            .clone()
+            .unwrap_or_else(|| format!("pgid:{}", candidate.pgid));
+        groups
+            .entry((candidate.provider.to_string(), terminal))
+            .or_default()
+            .push(candidate);
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (pane, pid) = line.split_once('\t')?;
-            Some((pane.to_string(), pid.parse().ok()?))
-        })
-        .collect()
-}
-
-fn tmux_executable() -> PathBuf {
-    if let Some(configured) = std::env::var_os("CODESK_TMUX_BINARY") {
-        return PathBuf::from(configured);
-    }
-    [
-        "/opt/homebrew/bin/tmux",
-        "/usr/local/bin/tmux",
-        "/usr/bin/tmux",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|path| path.is_file())
-    .unwrap_or_else(|| PathBuf::from("tmux"))
-}
-
-fn tmux_pane_for(pid: u32, parents: &HashMap<u32, u32>, panes: &[(String, u32)]) -> Option<String> {
-    let pane_by_pid = panes
-        .iter()
-        .map(|(pane, pane_pid)| (*pane_pid, pane))
-        .collect::<HashMap<_, _>>();
-    let mut current = pid;
-    let mut seen = HashSet::new();
-    while current > 1 && seen.insert(current) {
-        if let Some(pane) = pane_by_pid.get(&current) {
-            return Some((*pane).clone());
+    let mut result = Vec::new();
+    for members in groups.into_values() {
+        let member_pids = members
+            .iter()
+            .map(|member| member.pid)
+            .collect::<HashSet<_>>();
+        let roots = members
+            .iter()
+            .copied()
+            .filter(|member| {
+                let mut current = member.ppid;
+                for _ in 0..64 {
+                    if member_pids.contains(&current) {
+                        return false;
+                    }
+                    if current <= 1 {
+                        break;
+                    }
+                    let Some(parent) = parents.get(&current) else {
+                        break;
+                    };
+                    current = *parent;
+                }
+                true
+            })
+            .collect::<Vec<_>>();
+        for root in roots {
+            let descendants = members
+                .iter()
+                .copied()
+                .filter(|member| {
+                    member.pid == root.pid || is_descendant_of(member.pid, root.pid, parents)
+                })
+                .collect();
+            result.push((root, descendants));
         }
+    }
+    result.sort_by_key(|(root, _)| root.pid);
+    result
+}
+
+fn is_descendant_of(pid: u32, ancestor: u32, parents: &HashMap<u32, u32>) -> bool {
+    let mut current = pid;
+    for _ in 0..64 {
+        let Some(parent) = parents.get(&current) else {
+            return false;
+        };
+        if *parent == ancestor {
+            return true;
+        }
+        if *parent <= 1 || *parent == current {
+            return false;
+        }
+        current = *parent;
+    }
+    false
+}
+
+fn inherited_session_id(
+    pid: u32,
+    provider: &str,
+    parents: &HashMap<u32, u32>,
+    direct: &HashMap<u32, (String, String)>,
+) -> Option<String> {
+    let mut current = pid;
+    for _ in 0..64 {
         current = *parents.get(&current)?;
+        if current <= 1 {
+            return None;
+        }
+        if let Some((ancestor_provider, session_id)) = direct.get(&current) {
+            if ancestor_provider == provider {
+                return Some(session_id.clone());
+            }
+        }
     }
     None
 }
@@ -464,104 +662,35 @@ async fn process_details(processes: &[(u32, &str)]) -> HashMap<u32, ProcessDetai
 }
 
 fn transcript_matches(path: &str, provider: &str) -> bool {
-    match provider {
-        "dsh" => path.ends_with("/session.jsonl.zstd") && path.contains("/.dsh/sessions/"),
-        "agy" => {
-            path.ends_with("/.system_generated/logs/transcript.jsonl")
-                && path.contains("/.gemini/antigravity-cli/brain/")
-        }
-        _ => {
-            path.ends_with(".jsonl")
-                && match provider {
-                    "codex" => path.contains("/.codex/sessions/"),
-                    "pi" => path.contains("/.pi/agent/sessions/"),
-                    "claude" => path.contains("/.claude/projects/"),
-                    "kiro" => path.contains("/.kiro/sessions/cli/"),
-                    _ => false,
-                }
-        }
-    }
+    providers::get(provider).is_some_and(|adapter| adapter.transcript_matches(path))
 }
 
 fn transcript_session_id(path: &str, provider: &str) -> Option<String> {
-    if provider == "dsh" {
-        return PathBuf::from(path)
-            .parent()?
-            .file_name()?
-            .to_str()
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-    }
-    if provider == "agy" {
-        let id = PathBuf::from(path)
-            .parent()?
-            .parent()?
-            .parent()?
-            .file_name()?
-            .to_str()?
-            .to_string();
-        return Uuid::parse_str(&id).ok().map(|_| id);
-    }
-    let stem = PathBuf::from(path).file_stem()?.to_str()?.to_string();
-    match provider {
-        "codex" => stem
-            .get(stem.len().checked_sub(36)?..)
-            .filter(|value| Uuid::parse_str(value).is_ok())
-            .map(str::to_string),
-        "pi" => stem
-            .rsplit_once('_')
-            .map(|(_, id)| id)
-            .filter(|value| Uuid::parse_str(value).is_ok())
-            .map(str::to_string),
-        "claude" => Uuid::parse_str(&stem).ok().map(|_| stem),
-        "kiro" => Uuid::parse_str(&stem).ok().map(|_| stem),
-        _ => None,
-    }
+    providers::get(provider).and_then(|adapter| adapter.transcript_session_id(path))
 }
 
 fn command_session_id(command: &str, provider: &str) -> Option<String> {
-    if provider != "agy" {
-        return None;
-    }
-    let tokens = command
-        .split_whitespace()
-        .map(|token| token.trim_matches(['\'', '"']))
-        .collect::<Vec<_>>();
-    for (index, token) in tokens.iter().enumerate() {
-        let candidate = if *token == "--conversation" {
-            tokens.get(index + 1).copied()
-        } else {
-            token.strip_prefix("--conversation=")
-        };
-        if let Some(candidate) = candidate {
-            let candidate = candidate.trim_matches(['\'', '"']);
-            if Uuid::parse_str(candidate).is_ok() {
-                return Some(candidate.to_string());
-            }
-        }
-    }
-    None
+    providers::get(provider).and_then(|adapter| adapter.command_session_id(command))
 }
 
 fn classify_agent(command: &str) -> Option<&'static str> {
+    providers::all()
+        .into_iter()
+        .find(|adapter| adapter.matches_command(command))
+        .map(|adapter| adapter.descriptor().id)
+}
+
+fn is_interactive_agent_command(provider: &str, command: &str) -> bool {
     let lower = command.to_lowercase();
-    let tokens = lower
-        .split(|character: char| character.is_whitespace() || character == '/')
-        .collect::<Vec<_>>();
-    if tokens.iter().any(|token| *token == "codex") {
-        Some("codex")
-    } else if tokens.iter().any(|token| *token == "claude") {
-        Some("claude")
-    } else if tokens.iter().any(|token| *token == "pi") && !lower.contains("pip") {
-        Some("pi")
-    } else if tokens.iter().any(|token| *token == "kiro-cli") || lower.contains("kiro-cli") {
-        Some("kiro")
-    } else if tokens.iter().any(|token| *token == "dsh") || lower.contains("@deepseek-ai/dsh") {
-        Some("dsh")
-    } else if tokens.iter().any(|token| *token == "agy") || lower.contains("antigravity-cli") {
-        Some("agy")
-    } else {
-        None
+    match provider {
+        "codex" => !lower.contains(" app-server") && !lower.contains(" codex exec"),
+        "kiro" => !lower.contains(" acp"),
+        "opencode" => !lower.contains(" acp") && !lower.contains(" opencode run"),
+        "dsh" => !lower.contains(" web"),
+        "claude" => !lower.contains("--print") && !lower.contains(" -p "),
+        "agy" => !lower.contains("--print"),
+        "pi" => !lower.contains("--mode rpc"),
+        _ => true,
     }
 }
 
@@ -574,34 +703,12 @@ pub fn signal_external(pid: u32, pgid: i32, signal: i32) -> Result<()> {
     Ok(())
 }
 
-pub fn external_process_alive(pid: u32) -> bool {
-    pid > 1 && unsafe { libc::kill(pid as i32, 0) } == 0
-}
-
-pub async fn send_external_input(agent: &DiscoveredAgent, message: &str) -> Result<()> {
-    anyhow::ensure!(
-        external_process_alive(agent.pid),
-        "agent process is no longer running"
-    );
-    let pane = agent
-        .tmux_pane
-        .as_deref()
-        .context("this live session is not attached to a tmux pane")?;
-    anyhow::ensure!(!message.trim().is_empty(), "message is required");
-    let typed = Command::new(tmux_executable())
-        .args(["send-keys", "-t", pane, "-l", "--", message])
-        .status()
-        .await?;
-    anyhow::ensure!(typed.success(), "tmux could not write to the live session");
-    let submitted = Command::new(tmux_executable())
-        .args(["send-keys", "-t", pane, "Enter"])
-        .status()
-        .await?;
-    anyhow::ensure!(
-        submitted.success(),
-        "tmux could not submit the live message"
-    );
-    Ok(())
+pub fn process_group_alive(pgid: i32) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    let result = unsafe { libc::kill(-pgid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(test)]
@@ -673,6 +780,53 @@ mod tests {
     }
 
     #[test]
+    fn excludes_headless_provider_transports_from_interactive_discovery() {
+        assert!(!is_interactive_agent_command("codex", "codex app-server"));
+        assert!(!is_interactive_agent_command("kiro", "kiro-cli acp"));
+        assert!(!is_interactive_agent_command("pi", "pi --mode rpc"));
+        assert!(is_interactive_agent_command("codex", "codex --yolo"));
+        assert!(is_interactive_agent_command("kiro", "kiro-cli chat"));
+    }
+
+    #[test]
+    fn collapses_provider_descendants_on_the_same_terminal() {
+        let parents = HashMap::from([(20, 10), (30, 20)]);
+        let candidates = vec![
+            ProcessCandidate {
+                pid: 10,
+                ppid: 1,
+                pgid: 10,
+                tty: Some("ttys001".into()),
+                command: "kiro-cli chat".into(),
+                provider: "kiro",
+                managed_run_id: None,
+            },
+            ProcessCandidate {
+                pid: 20,
+                ppid: 10,
+                pgid: 10,
+                tty: Some("ttys001".into()),
+                command: "kiro-cli-chat".into(),
+                provider: "kiro",
+                managed_run_id: None,
+            },
+            ProcessCandidate {
+                pid: 30,
+                ppid: 20,
+                pgid: 10,
+                tty: Some("ttys001".into()),
+                command: "kiro-cli-chat".into(),
+                provider: "kiro",
+                managed_run_id: None,
+            },
+        ];
+        let roots = provider_process_roots(&candidates, &parents);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0.pid, 10);
+        assert_eq!(roots[0].1.len(), 3);
+    }
+
+    #[test]
     fn classifies_and_correlates_antigravity_processes() {
         let session = "1cbe7f1c-229a-4271-bc20-dc9d46433d96";
         assert_eq!(
@@ -704,12 +858,56 @@ mod tests {
     }
 
     #[test]
-    fn resolves_the_nearest_tmux_pane_from_process_ancestry() {
-        let parents = HashMap::from([(450, 420), (420, 300), (300, 1), (900, 800)]);
-        let panes = vec![("%1".to_string(), 300), ("%2".to_string(), 800)];
-        assert_eq!(tmux_pane_for(450, &parents, &panes).as_deref(), Some("%1"));
-        assert_eq!(tmux_pane_for(900, &parents, &panes).as_deref(), Some("%2"));
-        assert_eq!(tmux_pane_for(999, &parents, &panes), None);
+    fn classifies_and_correlates_opencode_processes() {
+        let session = "ses_1234567890abcdef";
+        assert_eq!(
+            classify_agent("/Users/me/.local/bin/opencode acp --cwd /repo"),
+            Some("opencode")
+        );
+        assert_eq!(
+            classify_agent("bun /opt/opencode/bin/opencode run hello"),
+            Some("opencode")
+        );
+        assert_eq!(
+            command_session_id(
+                &format!("opencode run --session {session} continue"),
+                "opencode"
+            )
+            .as_deref(),
+            Some(session)
+        );
+        assert_eq!(
+            command_session_id(&format!("opencode -s={session}"), "opencode").as_deref(),
+            Some(session)
+        );
+        assert_eq!(
+            command_session_id(&format!("opencode --session={session}"), "opencode").as_deref(),
+            Some(session)
+        );
+    }
+
+    #[test]
+    fn correlates_kiro_resume_processes() {
+        let session = "5feafb8f-cffe-4c25-a6c7-18b4084d5b5d";
+        assert_eq!(
+            command_session_id(&format!("kiro-cli --resume-id {session}"), "kiro").as_deref(),
+            Some(session)
+        );
+        assert_eq!(
+            command_session_id(
+                &format!("/usr/local/bin/kiro-cli-chat chat --resume-id={session}"),
+                "kiro"
+            )
+            .as_deref(),
+            Some(session)
+        );
+
+        let parents = HashMap::from([(44056, 44050), (44050, 44030), (44030, 44002)]);
+        let direct = HashMap::from([(44002, ("kiro".to_string(), session.to_string()))]);
+        assert_eq!(
+            inherited_session_id(44056, "kiro", &parents, &direct).as_deref(),
+            Some(session)
+        );
     }
 
     #[tokio::test]

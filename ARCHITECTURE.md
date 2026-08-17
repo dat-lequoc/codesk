@@ -25,7 +25,7 @@ This document turns the product requirements into a concrete implementation desi
 │  ├─ project registry                                                    │
 │  ├─ Git/worktree manager                                                │
 │  ├─ run supervisor                                                      │
-│  ├─ provider adapters: Codex / Pi / Claude / generic                    │
+│  ├─ static provider registry and one adapter module per harness          │
 │  ├─ process-group and signal controller                                 │
 │  ├─ SQLite metadata database                                            │
 │  └─ durable event and raw-output journals                               │
@@ -71,7 +71,7 @@ Responsibilities:
 
 - own project and run state on its host;
 - create, register, inspect, retain, and safely remove managed Git worktrees;
-- spawn every run in a new process group/session;
+- spawn interactive harness runs in a Codesk-owned tmux pane on the execution host, while retaining the durable structured runner for protocol regression and non-interactive shell jobs;
 - retain enough process identity to signal the correct group;
 - normalize provider events and retain raw events;
 - persist run metadata transactionally;
@@ -112,6 +112,20 @@ Capabilities are explicit booleans or enums, including:
 - session ID availability.
 
 This prevents the UI from offering controls that only appear to work.
+
+The implemented adapter boundary is static and deliberately smaller than a runtime plugin ABI. `crates/codeskd/src/providers/mod.rs` owns the registry and contract; `codex.rs`, `kiro.rs`, `opencode.rs`, `dsh.rs`, `agy.rs`, `pi.rs`, `claude.rs`, and `shell.rs` own provider descriptors plus execution, input, discovery, and session routing. Protocol transports are separate under `crates/codeskd/src/transports/`: stdio, shared ACP, Codex app-server, and DSH Web. Provider event codecs are shared only when the wire protocol is shared.
+
+The desktop mirrors this with `src/providerRegistry.tsx`, which owns provider names, ordering, icon/fallback rendering, colors, and interaction quirks. Execution capability fields returned by `codeskd` remain authoritative; UI registry values are compatibility fallbacks for older remote daemons that do not yet return newer additive fields.
+
+Adding a provider therefore follows one bounded path:
+
+1. add one backend provider module and register its static adapter;
+2. choose an existing transport or add a protocol transport independent of provider branding;
+3. implement command/input/event/discovery/session methods and fixtures in that module;
+4. add one frontend registry entry, using the generic icon fallback until a branded icon is available;
+5. run registry conformance, provider fixture, daemon, frontend, redeploy, and native screenshot checks.
+
+Provider IDs and stored session/run records remain stable. New capability fields are additive so a newer desktop can continue to connect to an older remote daemon with conservative registry fallbacks.
 
 ## 3. Transport
 
@@ -339,7 +353,7 @@ During all disconnected states, the UI retains the daemon's last known run state
 
 ### Codex
 
-- Codesk-managed Codex runs use the default stdio transport of `codex app-server` inside the execution-host durable runner.
+- Codesk-managed Codex chats use an isolated execution-host tmux socket for single-writer terminal input and the native Codex transcript for display. The `codex app-server` durable runner remains available under `CODESK_RUN_TRANSPORT=structured` for protocol regression tests.
 - The runner performs the JSON-RPC initialization handshake, creates/resumes/forks the thread, and keeps the app-server alive while the thread is idle so later turns do not require a new process.
 - `turn/steer`, `turn/interrupt`, approval responses, and request-user-input responses stay on the execution host and travel through the run's Unix control socket.
 - Codesk keeps queued prompts in the durable execution-host runner because the installed stable app-server schema does not expose `thread/queue/*`. A normally completed turn starts the next prompt automatically; interruption pauses the queue until the user starts or removes it.

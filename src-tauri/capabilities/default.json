@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default Codesk desktop capability",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-set-badge-count", "notification:default"]
 }

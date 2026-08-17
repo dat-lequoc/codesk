@@ -13,7 +13,10 @@ use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::model::{DiscoveredAgent, Project, ProviderSession, SessionMessage};
+use crate::{
+    model::{DiscoveredAgent, Project, ProviderSession, SessionMessage},
+    providers,
+};
 
 const MAX_SESSIONS_PER_PROVIDER: usize = 50;
 const MAX_CODEX_CANDIDATES: usize = 1500;
@@ -22,7 +25,8 @@ const MAX_INDEX_TAIL_BYTES: u64 = 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_STREAM_BYTES: u64 = 256 * 1024;
 const MAX_MESSAGES: usize = 4000;
-const MAX_STATUS_BYTES: u64 = 256 * 1024;
+const STATUS_SCAN_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_STATUS_RECORD_BYTES: usize = 512 * 1024;
 
 pub async fn list(
     project: &Project,
@@ -45,11 +49,11 @@ pub async fn messages(
     let native_session_id = native_session_id.to_string();
     let after = after.map(str::to_string);
     tokio::task::spawn_blocking(move || {
-        if provider == "codex" {
-            return codex_messages_for_project(&project, &native_session_id, after.as_deref());
-        }
-        let path = source_path(&project, &provider, &native_session_id)?;
-        parse_messages(&path, &provider, after.as_deref())
+        providers::require(&provider)?.session_messages(
+            &project,
+            &native_session_id,
+            after.as_deref(),
+        )
     })
     .await?
 }
@@ -61,19 +65,16 @@ fn list_sync(
 ) -> Result<Vec<ProviderSession>> {
     let session_limit = limit.unwrap_or(MAX_SESSIONS_PER_PROVIDER).clamp(1, 150);
     let mut result = Vec::new();
-    result.extend(index_pi(project, session_limit)?);
-    result.extend(index_codex(project, session_limit)?);
-    result.extend(index_claude(project, session_limit)?);
-    result.extend(index_kiro(project, session_limit)?);
-    result.extend(index_dsh(project, session_limit)?);
-    result.extend(index_agy(project, session_limit)?);
+    for adapter in providers::all() {
+        result.extend(adapter.index_sessions(project, session_limit)?);
+    }
     let mut seen = HashSet::new();
     result.retain(|session| {
         seen.insert((session.provider.clone(), session.native_session_id.clone()))
     });
 
     for agent in agents.iter().filter(|agent| {
-        agent.managed_run_id.is_none()
+        (agent.managed_run_id.is_none() || agent.tmux_controlled)
             && agent
                 .cwd
                 .as_deref()
@@ -93,14 +94,24 @@ fn list_sync(
         else {
             continue;
         };
-        session.pid = Some(agent.pid);
-        session.input_available = agent.tmux_pane.is_some();
-        session.input_transport = agent.tmux_pane.as_ref().map(|_| "tmux".to_string());
-        if agent
+        if session.pid.is_none() {
+            session.pid = Some(agent.pid);
+        }
+        session.tmux_name = agent.tmux_session_name.clone();
+        session.tmux_access_command = agent.tmux_access_command.clone();
+        session.tmux_controlled = agent.tmux_controlled;
+        session.tmux_owned = agent.tmux_owned;
+        session.input_available = agent.tmux_controlled;
+        session.input_transport = agent.tmux_controlled.then(|| "tmux".to_string());
+        let transcript_path = agent
             .transcript_path
             .as_deref()
-            .is_some_and(|path| transcript_turn_active(Path::new(path), &agent.provider))
-        {
+            .map(PathBuf::from)
+            .or_else(|| source_path(project, &agent.provider, native_id).ok());
+        if transcript_path.as_deref().is_some_and(|path| {
+            providers::get(&agent.provider)
+                .is_some_and(|adapter| adapter.transcript_turn_active(path))
+        }) {
             session.status = "running".to_string();
         }
     }
@@ -122,20 +133,22 @@ fn unique_active_session_id(
             )),
             false,
         )?,
-        "claude" => jsonl_files(
-            &home_dir().join(".claude/projects").join(format!(
-                "-{}",
-                project.path.trim_start_matches('/').replace('/', "-")
-            )),
-            false,
-        )?,
+        "claude" => {
+            let mut files = Vec::new();
+            for directory in claude_project_directories(&home_dir(), &project.path) {
+                files.extend(jsonl_files(&directory, false)?);
+            }
+            files
+        }
         _ => return Ok(None),
     };
     sort_recent(&mut candidates);
     candidates.truncate(12);
     let active = candidates
         .into_iter()
-        .filter(|path| transcript_turn_active(path, provider))
+        .filter(|path| {
+            providers::get(provider).is_some_and(|adapter| adapter.transcript_turn_active(path))
+        })
         .filter_map(|path| index_file(project, provider, &path).ok().flatten())
         .filter(|session| {
             indexed.iter().any(|item| {
@@ -161,96 +174,137 @@ pub(crate) fn transcript_turn_active(path: &Path, provider: &str) -> bool {
             })
             .unwrap_or(false);
     }
-    let Ok(mut file) = File::open(path) else {
-        return false;
+    latest_jsonl_status(path, |value| match provider {
+        "codex" => {
+            let event = string(&value["payload"]["type"]);
+            if value["type"] == "event_msg"
+                && matches!(event.as_deref(), Some("task_complete" | "turn_aborted"))
+            {
+                Some(false)
+            } else if value["type"] == "event_msg" && event.as_deref() == Some("task_started")
+                || value["type"] == "response_item"
+                    && value["payload"]["type"] == "message"
+                    && value["payload"]["role"] == "user"
+            {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        "pi" => {
+            if value["type"] != "message" {
+                return None;
+            }
+            let role = string(&value["message"]["role"]).unwrap_or_default();
+            if role == "user" || role == "toolResult" {
+                Some(true)
+            } else if role == "assistant" {
+                let reason = string(&value["message"]["stopReason"])
+                    .or_else(|| string(&value["message"]["rawStopReason"]));
+                Some(!matches!(
+                    reason.as_deref(),
+                    Some("stop" | "end_turn" | "completed")
+                ))
+            } else {
+                None
+            }
+        }
+        "claude" => {
+            if value["type"] == "user" {
+                Some(true)
+            } else if value["type"] == "assistant" {
+                let reason = string(&value["message"]["stop_reason"]);
+                Some(!matches!(
+                    reason.as_deref(),
+                    Some("end_turn" | "stop_sequence")
+                ))
+            } else if value["type"] == "system" && value["subtype"] == "turn_duration" {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        "kiro" => match value["kind"].as_str() {
+            Some("Prompt") | Some("ToolResults") => Some(true),
+            Some("AssistantMessage") => Some(false),
+            _ => None,
+        },
+        "agy" => {
+            let source = value["source"].as_str().unwrap_or_default();
+            let kind = value["type"].as_str().unwrap_or_default();
+            let status = value["status"].as_str().unwrap_or_default();
+            if source == "USER_EXPLICIT" && kind == "USER_INPUT" {
+                Some(true)
+            } else if source == "MODEL"
+                && kind == "PLANNER_RESPONSE"
+                && status == "DONE"
+                && value["content"]
+                    .as_str()
+                    .is_some_and(|content| !content.trim().is_empty())
+            {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    })
+    .unwrap_or(false)
+}
+
+fn latest_jsonl_status(
+    path: &Path,
+    mut classify: impl FnMut(&Value) -> Option<bool>,
+) -> Option<bool> {
+    let mut file = File::open(path).ok()?;
+    let mut position = file.seek(SeekFrom::End(0)).ok()?;
+    let mut chunk = vec![0; STATUS_SCAN_CHUNK_BYTES];
+    let mut reversed_record = Vec::new();
+    let mut oversized = false;
+
+    let mut finish_record = |reversed_record: &mut Vec<u8>, oversized: &mut bool| {
+        if *oversized || reversed_record.is_empty() {
+            reversed_record.clear();
+            *oversized = false;
+            return None;
+        }
+        reversed_record.reverse();
+        let result = serde_json::from_slice::<Value>(reversed_record)
+            .ok()
+            .and_then(|value| classify(&value));
+        reversed_record.clear();
+        *oversized = false;
+        result
     };
-    let Ok(metadata) = file.metadata() else {
-        return false;
-    };
-    let start = metadata.len().saturating_sub(MAX_STATUS_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return false;
-    }
-    let mut reader = BufReader::new(file.take(MAX_STATUS_BYTES));
-    if start > 0 {
-        let mut partial = String::new();
-        let _ = reader.read_line(&mut partial);
-    }
-    let mut active = false;
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        match provider {
-            "codex" => {
-                let event = string(&value["payload"]["type"]);
-                if value["type"] == "event_msg"
-                    && matches!(event.as_deref(), Some("task_complete" | "turn_aborted"))
-                {
-                    active = false;
-                } else if value["type"] == "event_msg" && event.as_deref() == Some("task_started")
-                    || value["type"] == "response_item"
-                        && value["payload"]["type"] == "message"
-                        && value["payload"]["role"] == "user"
-                {
-                    active = true;
+
+    while position > 0 {
+        let size = position.min(STATUS_SCAN_CHUNK_BYTES as u64) as usize;
+        position -= size as u64;
+        file.seek(SeekFrom::Start(position)).ok()?;
+        file.read_exact(&mut chunk[..size]).ok()?;
+        for &byte in chunk[..size].iter().rev() {
+            if byte == b'\n' {
+                if let Some(status) = finish_record(&mut reversed_record, &mut oversized) {
+                    return Some(status);
+                }
+            } else if !oversized {
+                if reversed_record.len() < MAX_STATUS_RECORD_BYTES {
+                    reversed_record.push(byte);
+                } else {
+                    reversed_record.clear();
+                    oversized = true;
                 }
             }
-            "pi" => {
-                if value["type"] != "message" {
-                    continue;
-                }
-                let role = string(&value["message"]["role"]).unwrap_or_default();
-                if role == "user" || role == "toolResult" {
-                    active = true;
-                } else if role == "assistant" {
-                    let reason = string(&value["message"]["stopReason"])
-                        .or_else(|| string(&value["message"]["rawStopReason"]));
-                    active = !matches!(reason.as_deref(), Some("stop" | "end_turn" | "completed"));
-                }
-            }
-            "claude" => {
-                if value["type"] == "user" {
-                    active = true;
-                } else if value["type"] == "assistant" {
-                    let reason = string(&value["message"]["stop_reason"]);
-                    active = !matches!(reason.as_deref(), Some("end_turn" | "stop_sequence"));
-                } else if value["type"] == "system" && value["subtype"] == "turn_duration" {
-                    active = false;
-                }
-            }
-            "kiro" => match value["kind"].as_str() {
-                Some("Prompt") | Some("ToolResults") => active = true,
-                Some("AssistantMessage") => active = false,
-                _ => {}
-            },
-            "agy" => {
-                let source = value["source"].as_str().unwrap_or_default();
-                let kind = value["type"].as_str().unwrap_or_default();
-                let status = value["status"].as_str().unwrap_or_default();
-                if source == "USER_EXPLICIT" && kind == "USER_INPUT" {
-                    active = true;
-                } else if source == "MODEL"
-                    && kind == "PLANNER_RESPONSE"
-                    && status == "DONE"
-                    && value["content"]
-                        .as_str()
-                        .is_some_and(|content| !content.trim().is_empty())
-                {
-                    active = false;
-                }
-            }
-            _ => {}
         }
     }
-    active
+    finish_record(&mut reversed_record, &mut oversized)
 }
 
 fn cwd_matches(cwd: &str, project_path: &str) -> bool {
     Path::new(cwd) == Path::new(project_path)
 }
 
-fn index_pi(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
+pub(crate) fn index_pi(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let directory = home_dir().join(".pi/agent/sessions").join(format!(
         "--{}--",
         project.path.trim_matches('/').replace('/', "-")
@@ -258,15 +312,260 @@ fn index_pi(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     index_directory(project, "pi", &directory, limit)
 }
 
-fn index_claude(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
-    let directory = home_dir().join(".claude/projects").join(format!(
-        "-{}",
-        project.path.trim_start_matches('/').replace('/', "-")
-    ));
-    index_directory(project, "claude", &directory, limit)
+pub(crate) fn index_claude(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
+    index_claude_from_home(&home_dir(), project, limit)
 }
 
-fn index_kiro(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
+fn claude_project_directories(home: &Path, project_path: &str) -> Vec<PathBuf> {
+    let root = home.join(".claude/projects");
+    let trimmed = project_path.trim_start_matches('/');
+    let legacy = trimmed.replace('/', "-");
+    let slug = trimmed
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let mut directories = vec![root.join(format!("-{slug}"))];
+    if slug != legacy {
+        directories.push(root.join(format!("-{legacy}")));
+    }
+    directories
+}
+
+fn index_claude_from_home(
+    home: &Path,
+    project: &Project,
+    limit: usize,
+) -> Result<Vec<ProviderSession>> {
+    let mut sessions = Vec::new();
+    for directory in claude_project_directories(home, &project.path) {
+        sessions.extend(index_directory(project, "claude", &directory, limit)?);
+    }
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let mut seen = HashSet::new();
+    sessions.retain(|session| seen.insert(session.native_session_id.clone()));
+    sessions.truncate(limit);
+    Ok(sessions)
+}
+
+fn opencode_database() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".local/share"))
+        .join("opencode/opencode.db")
+}
+
+pub(crate) fn index_opencode(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
+    index_opencode_database(project, &opencode_database(), limit)
+}
+
+fn index_opencode_database(
+    project: &Project,
+    database: &Path,
+    limit: usize,
+) -> Result<Vec<ProviderSession>> {
+    if !database.is_file() {
+        return Ok(Vec::new());
+    }
+    let connection = readonly_database(database)?;
+    let mut statement = connection.prepare(
+        "SELECT id, directory, title, time_created, time_updated
+         FROM session
+         WHERE directory = ?1 AND time_archived IS NULL
+         ORDER BY time_updated DESC
+         LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![project.path, limit as i64], |row| {
+        let native_id: String = row.get(0)?;
+        let cwd: String = row.get(1)?;
+        let title: String = row.get(2)?;
+        let created_at: i64 = row.get(3)?;
+        let updated_at: i64 = row.get(4)?;
+        Ok(ProviderSession {
+            id: format!("opencode:{native_id}"),
+            provider: "opencode".to_string(),
+            native_session_id: native_id,
+            project_id: project.id.clone(),
+            cwd,
+            title: truncate_title(&meaningful_user_text(title)),
+            created_at: unix_millis_rfc3339(created_at),
+            updated_at: unix_millis_rfc3339(updated_at),
+            status: "idle".to_string(),
+            pid: None,
+            input_available: false,
+            input_transport: None,
+            tmux_name: None,
+            tmux_access_command: None,
+            tmux_controlled: false,
+            tmux_owned: false,
+        })
+    })?;
+    Ok(rows
+        .filter_map(|row| row.ok())
+        .filter(|session| !session.title.is_empty())
+        .collect())
+}
+
+pub(crate) fn opencode_messages_for_project(
+    project: &Project,
+    native_session_id: &str,
+    after: Option<&str>,
+) -> Result<Vec<SessionMessage>> {
+    let database = opencode_database();
+    anyhow::ensure!(database.is_file(), "OpenCode database was not found");
+    let connection = readonly_database(&database)?;
+    let directory = connection.query_row(
+        "SELECT directory FROM session WHERE id = ?1",
+        [native_session_id],
+        |row| row.get::<_, String>(0),
+    );
+    match directory {
+        Ok(directory) => anyhow::ensure!(
+            cwd_matches(&directory, &project.path),
+            "OpenCode session was not found in this project"
+        ),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            anyhow::bail!("OpenCode session was not found")
+        }
+        Err(error) => return Err(error.into()),
+    }
+    opencode_history_messages(&connection, native_session_id, after)
+}
+
+fn opencode_history_messages(
+    connection: &Connection,
+    native_session_id: &str,
+    after: Option<&str>,
+) -> Result<Vec<SessionMessage>> {
+    let mut statement = connection.prepare(
+        "SELECT m.id, m.time_created, m.data, p.id, p.time_created, p.data
+         FROM message m
+         JOIN part p ON p.message_id = m.id
+         WHERE m.session_id = ?1
+         ORDER BY m.time_created, p.time_created, p.id
+         LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![native_session_id, MAX_MESSAGES as i64 * 4], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    let mut messages = Vec::new();
+    for row in rows.flatten() {
+        let (message_id, message_time, message_json, part_id, part_time, part_json) = row;
+        let Ok(message_data) = serde_json::from_str::<Value>(&message_json) else {
+            continue;
+        };
+        let Ok(part) = serde_json::from_str::<Value>(&part_json) else {
+            continue;
+        };
+        let role = string(&message_data["role"]).unwrap_or_else(|| "assistant".to_string());
+        let timestamp = unix_millis_rfc3339(if part_time > 0 {
+            part_time
+        } else {
+            message_time
+        });
+        if after.is_some_and(|cursor| timestamp.as_str() < cursor) {
+            continue;
+        }
+        match part["type"].as_str() {
+            Some("text") => {
+                let text = string(&part["text"]).unwrap_or_default();
+                if !text.trim().is_empty() {
+                    messages.push(SessionMessage {
+                        id: part_id,
+                        timestamp,
+                        role,
+                        text,
+                        kind: "message".to_string(),
+                        meta: None,
+                        duration_ms: None,
+                    });
+                }
+            }
+            Some("reasoning") => {
+                let text = string(&part["text"]).unwrap_or_default();
+                if !text.trim().is_empty() {
+                    messages.push(SessionMessage {
+                        id: part_id,
+                        timestamp,
+                        role: "assistant".to_string(),
+                        text,
+                        kind: "reasoning".to_string(),
+                        meta: None,
+                        duration_ms: None,
+                    });
+                }
+            }
+            Some("tool") => {
+                let state = &part["state"];
+                let tool = string(&part["tool"]).unwrap_or_else(|| "OpenCode tool".to_string());
+                let display = string(&state["title"]).unwrap_or_else(|| tool.clone());
+                let status = string(&state["status"]).unwrap_or_else(|| "completed".to_string());
+                let call_id = string(&part["callID"]).unwrap_or_else(|| part_id.clone());
+                let output = string(&state["output"])
+                    .or_else(|| string(&state["error"]))
+                    .unwrap_or_default();
+                messages.push(SessionMessage {
+                    id: part_id,
+                    timestamp,
+                    role: "assistant".to_string(),
+                    text: output.clone(),
+                    kind: "tool".to_string(),
+                    meta: Some(json!({
+                        "call_id":call_id,
+                        "tool":tool,
+                        "display":display,
+                        "status":status,
+                        "input":state.get("input"),
+                        "output":output,
+                        "raw":part,
+                    })),
+                    duration_ms: None,
+                });
+            }
+            Some("patch") => {
+                let changes = part["files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|path| json!({"path":path,"kind":"edit"}))
+                    .collect::<Vec<_>>();
+                if !changes.is_empty() {
+                    messages.push(SessionMessage {
+                        id: part_id,
+                        timestamp,
+                        role: "assistant".to_string(),
+                        text: String::new(),
+                        kind: "file_change".to_string(),
+                        meta: Some(json!({"changes":changes,"raw":part})),
+                        duration_ms: None,
+                    });
+                }
+            }
+            _ => {
+                let _ = message_id;
+            }
+        }
+        if messages.len() >= MAX_MESSAGES {
+            break;
+        }
+    }
+    Ok(messages)
+}
+
+pub(crate) fn index_kiro(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let directory = home_dir().join(".kiro/sessions/cli");
     if !directory.is_dir() {
         return Ok(Vec::new());
@@ -319,10 +618,14 @@ fn index_kiro_file(project: &Project, path: &Path) -> Result<Option<ProviderSess
         pid: None,
         input_available: false,
         input_transport: None,
+        tmux_name: None,
+        tmux_access_command: None,
+        tmux_controlled: false,
+        tmux_owned: false,
     }))
 }
 
-fn index_dsh(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
+pub(crate) fn index_dsh(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let mut files = dsh_project_session_files(&home_dir(), &project.path)?;
     sort_recent(&mut files);
     files.truncate(limit);
@@ -442,10 +745,14 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
         pid: None,
         input_available: false,
         input_transport: None,
+        tmux_name: None,
+        tmux_access_command: None,
+        tmux_controlled: false,
+        tmux_owned: false,
     }))
 }
 
-fn index_agy(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
+pub(crate) fn index_agy(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     index_agy_from_home(&home_dir(), project, limit)
 }
 
@@ -537,6 +844,10 @@ fn index_agy_from_home(
                             pid: None,
                             input_available: false,
                             input_transport: None,
+                            tmux_name: None,
+                            tmux_access_command: None,
+                            tmux_controlled: false,
+                            tmux_owned: false,
                         });
                         seen.insert(native_id);
                         if sessions.len() >= limit {
@@ -589,6 +900,10 @@ fn index_agy_from_home(
                     pid: None,
                     input_available: false,
                     input_transport: None,
+                    tmux_name: None,
+                    tmux_access_command: None,
+                    tmux_controlled: false,
+                    tmux_owned: false,
                 });
                 seen.insert(native_id.to_string());
             }
@@ -691,7 +1006,7 @@ fn index_directory(
         .collect::<Result<Vec<_>>>()?)
 }
 
-fn index_codex(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
+pub(crate) fn index_codex(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let codex_root = home_dir().join(".codex");
     let database_available = newest_numbered_database(&codex_root, "state_").is_some();
     let mut sessions = index_codex_database(project, &codex_root, limit).unwrap_or_default();
@@ -768,6 +1083,10 @@ fn index_codex_database(
             pid: None,
             input_available: false,
             input_transport: None,
+            tmux_name: None,
+            tmux_access_command: None,
+            tmux_controlled: false,
+            tmux_owned: false,
         })
     })?;
     let mut sessions = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
@@ -833,7 +1152,7 @@ fn enrich_codex_titles(codex_root: &Path, sessions: &mut [ProviderSession]) {
     }
 }
 
-fn codex_messages_for_project(
+pub(crate) fn codex_messages_for_project(
     project: &Project,
     native_session_id: &str,
     after: Option<&str>,
@@ -1042,6 +1361,10 @@ fn index_file(project: &Project, provider: &str, path: &Path) -> Result<Option<P
         pid: None,
         input_available: false,
         input_transport: None,
+        tmux_name: None,
+        tmux_access_command: None,
+        tmux_controlled: false,
+        tmux_owned: false,
     }))
 }
 
@@ -1110,8 +1433,18 @@ fn scan_index_reader<R: BufRead>(
     }
 }
 
-fn source_path(project: &Project, provider: &str, native_id: &str) -> Result<PathBuf> {
+pub(crate) fn source_path(project: &Project, provider: &str, native_id: &str) -> Result<PathBuf> {
     source_path_from_home(&home_dir(), project, provider, native_id)
+}
+
+pub(crate) fn file_messages_for_project(
+    project: &Project,
+    provider: &str,
+    native_id: &str,
+    after: Option<&str>,
+) -> Result<Vec<SessionMessage>> {
+    let path = source_path(project, provider, native_id)?;
+    parse_messages(&path, provider, after)
 }
 
 fn source_path_from_home(
@@ -1120,6 +1453,16 @@ fn source_path_from_home(
     provider: &str,
     native_id: &str,
 ) -> Result<PathBuf> {
+    if provider == "codex" {
+        let codex_root = home.join(".codex");
+        let path = codex_rollout_path(&codex_root, native_id)?
+            .context("Codex rollout path was not found")?;
+        anyhow::ensure!(
+            path.is_file() && codex_rollout_matches_project(&path, project)?,
+            "Codex transcript was not found in this project"
+        );
+        return Ok(path);
+    }
     if provider == "agy" {
         let path = agy_transcript_path(home, native_id);
         anyhow::ensure!(path.is_file(), "provider session file not found");
@@ -1156,27 +1499,26 @@ fn source_path_from_home(
         );
         return Ok(path);
     }
-    let directory = match provider {
-        "pi" => home.join(".pi/agent/sessions").join(format!(
+    let directories = match provider {
+        "pi" => vec![home.join(".pi/agent/sessions").join(format!(
             "--{}--",
             project.path.trim_matches('/').replace('/', "-")
-        )),
-        "claude" => home.join(".claude/projects").join(format!(
-            "-{}",
-            project.path.trim_start_matches('/').replace('/', "-")
-        )),
-        "kiro" => home.join(".kiro/sessions/cli"),
-        "dsh" => home.join(".dsh/sessions"),
+        ))],
+        "claude" => claude_project_directories(home, &project.path),
+        "kiro" => vec![home.join(".kiro/sessions/cli")],
+        "dsh" => vec![home.join(".dsh/sessions")],
         _ => anyhow::bail!("unsupported provider"),
     };
     if provider == "claude" {
-        let path = directory.join(format!("{native_id}.jsonl"));
-        if path.is_file() {
-            return Ok(path);
+        for directory in &directories {
+            let path = directory.join(format!("{native_id}.jsonl"));
+            if path.is_file() {
+                return Ok(path);
+            }
         }
     }
     if provider == "kiro" {
-        let path = directory.join(format!("{native_id}.jsonl"));
+        let path = directories[0].join(format!("{native_id}.jsonl"));
         if path.is_file() {
             return Ok(path);
         }
@@ -1208,15 +1550,22 @@ fn source_path_from_home(
         }
         anyhow::bail!("provider session file not found")
     }
-    for entry in fs::read_dir(directory)?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
-            && path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .is_some_and(|stem| stem == native_id || stem.ends_with(&format!("_{native_id}")))
-        {
-            return Ok(path);
+    for directory in directories {
+        if !directory.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(directory)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                && path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|stem| {
+                        stem == native_id || stem.ends_with(&format!("_{native_id}"))
+                    })
+            {
+                return Ok(path);
+            }
         }
     }
     anyhow::bail!("provider session file not found")
@@ -1228,6 +1577,15 @@ fn parse_messages(path: &Path, provider: &str, after: Option<&str>) -> Result<Ve
     }
     if provider == "agy" {
         return parse_agy_messages(path, after);
+    }
+    if provider == "kiro" {
+        return crate::providers::kiro::messages(
+            path,
+            after,
+            MAX_TRANSCRIPT_BYTES,
+            MAX_STREAM_BYTES,
+            MAX_MESSAGES,
+        );
     }
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let length = file.metadata()?.len();
@@ -1249,17 +1607,6 @@ fn parse_messages(path: &Path, provider: &str, after: Option<&str>) -> Result<Ve
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if provider == "kiro" {
-            for item in parse_kiro_history_line(&value, line_number) {
-                if after.is_none_or(|cursor| item.timestamp.as_str() >= cursor) {
-                    messages.push(item);
-                }
-            }
-            if messages.len() >= MAX_MESSAGES {
-                break;
-            }
-            continue;
-        }
         let parsed = match provider {
             "pi" if value["type"] == "message" => {
                 let role = string(&value["message"]["role"]).unwrap_or_default();
@@ -1320,99 +1667,6 @@ fn parse_messages(path: &Path, provider: &str, after: Option<&str>) -> Result<Ve
         }
     }
     Ok(messages)
-}
-
-fn parse_kiro_history_line(value: &Value, line_number: usize) -> Vec<SessionMessage> {
-    let kind = value["kind"].as_str().unwrap_or_default();
-    let data = &value["data"];
-    let timestamp = data["meta"]["timestamp"]
-        .as_i64()
-        .map(unix_seconds_rfc3339)
-        .unwrap_or_default();
-    let mut result = Vec::new();
-    match kind {
-        "Prompt" => {
-            let text = data["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|item| item["data"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !text.trim().is_empty() {
-                result.push(SessionMessage {
-                    id: string(&data["message_id"]).unwrap_or_else(|| line_number.to_string()),
-                    timestamp,
-                    role: "user".to_string(),
-                    text,
-                    kind: "message".to_string(),
-                    meta: None,
-                    duration_ms: None,
-                });
-            }
-        }
-        "AssistantMessage" => {
-            let message_id = string(&data["message_id"]).unwrap_or_else(|| line_number.to_string());
-            for (index, item) in data["content"].as_array().into_iter().flatten().enumerate() {
-                match item["kind"].as_str() {
-                    Some("text") => {
-                        if let Some(text) =
-                            item["data"].as_str().filter(|text| !text.trim().is_empty())
-                        {
-                            result.push(SessionMessage {
-                                id: format!("{message_id}:text:{index}"),
-                                timestamp: timestamp.clone(),
-                                role: "assistant".to_string(),
-                                text: text.to_string(),
-                                kind: "message".to_string(),
-                                meta: None,
-                                duration_ms: None,
-                            });
-                        }
-                    }
-                    Some("toolUse") => {
-                        let tool = string(&item["name"]).unwrap_or_else(|| "Kiro tool".to_string());
-                        result.push(SessionMessage {
-                            id: format!("{message_id}:tool:{index}"),
-                            timestamp: timestamp.clone(),
-                            role: "assistant".to_string(),
-                            text: String::new(),
-                            kind: "tool".to_string(),
-                            meta: Some(json!({
-                                "tool":tool,
-                                "display":item["input"]["__tool_use_purpose"],
-                                "command":item["input"],
-                                "status":"completed",
-                            })),
-                            duration_ms: None,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        "ToolResults" => {
-            let text = data["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|item| item["content"].as_array().into_iter().flatten())
-                .filter_map(|item| item["data"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            result.push(SessionMessage {
-                id: string(&data["message_id"]).unwrap_or_else(|| line_number.to_string()),
-                timestamp,
-                role: "assistant".to_string(),
-                text,
-                kind: "tool_output".to_string(),
-                meta: Some(json!({"tool":"Kiro tool result","status":"completed"})),
-                duration_ms: None,
-            });
-        }
-        _ => {}
-    }
-    result
 }
 
 fn parse_agy_messages(path: &Path, after: Option<&str>) -> Result<Vec<SessionMessage>> {
@@ -2225,56 +2479,146 @@ mod tests {
     }
 
     #[test]
-    fn parses_kiro_prompt_assistant_and_tool_history() {
-        let prompt = parse_kiro_history_line(
-            &json!({
-                "kind":"Prompt",
-                "data":{
-                    "message_id":"prompt-1",
-                    "content":[{"kind":"text","data":"Read package.json"}],
-                    "meta":{"timestamp":1786837344_i64}
-                }
-            }),
-            0,
-        );
-        assert_eq!(prompt.len(), 1);
-        assert_eq!(prompt[0].role, "user");
-        assert_eq!(prompt[0].text, "Read package.json");
-
-        let assistant = parse_kiro_history_line(
-            &json!({
-                "kind":"AssistantMessage",
-                "data":{
-                    "message_id":"assistant-1",
-                    "content":[
-                        {"kind":"text","data":"codesk"},
-                        {"kind":"toolUse","name":"read","input":{"__tool_use_purpose":"Read package.json"}}
+    fn indexes_and_reads_opencode_database_sessions() {
+        let root = std::env::temp_dir().join(format!("codesk-opencode-{}", Uuid::new_v4()));
+        let project_path = root.join("repo");
+        fs::create_dir_all(&project_path).unwrap();
+        let database = root.join("opencode.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    directory TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    time_archived INTEGER
+                );
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        let cwd = project_path.to_string_lossy().into_owned();
+        connection
+            .execute(
+                "INSERT INTO session VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                params![
+                    "ses_opencode",
+                    cwd,
+                    "Inspect OpenCode support",
+                    1_786_840_000_000_i64,
+                    1_786_840_003_000_i64
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    "msg_user",
+                    "ses_opencode",
+                    1_786_840_000_000_i64,
+                    json!({"role":"user"}).to_string()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    "msg_assistant",
+                    "ses_opencode",
+                    1_786_840_001_000_i64,
+                    json!({"role":"assistant"}).to_string()
+                ],
+            )
+            .unwrap();
+        let parts = [
+            (
+                "part_user",
+                "msg_user",
+                1_786_840_000_100_i64,
+                json!({"type":"text","text":"Please inspect OpenCode"}),
+            ),
+            (
+                "part_reasoning",
+                "msg_assistant",
+                1_786_840_001_100_i64,
+                json!({"type":"reasoning","text":"Checking the adapter"}),
+            ),
+            (
+                "part_tool",
+                "msg_assistant",
+                1_786_840_002_000_i64,
+                json!({"type":"tool","tool":"read","callID":"call_1","state":{"status":"completed","title":"Read package.json","input":{"filePath":"package.json"},"output":"{\"name\":\"codesk\"}"}}),
+            ),
+            (
+                "part_patch",
+                "msg_assistant",
+                1_786_840_002_500_i64,
+                json!({"type":"patch","files":["src/App.tsx"]}),
+            ),
+            (
+                "part_text",
+                "msg_assistant",
+                1_786_840_003_000_i64,
+                json!({"type":"text","text":"OpenCode is supported."}),
+            ),
+        ];
+        for (id, message_id, time_created, data) in parts {
+            connection
+                .execute(
+                    "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        id,
+                        message_id,
+                        "ses_opencode",
+                        time_created,
+                        data.to_string()
                     ],
-                    "meta":{"timestamp":1786837348_i64}
-                }
-            }),
-            1,
-        );
-        assert_eq!(assistant.len(), 2);
-        assert_eq!(assistant[0].role, "assistant");
-        assert_eq!(assistant[0].text, "codesk");
-        assert_eq!(assistant[1].kind, "tool");
-        assert_eq!(assistant[1].meta.as_ref().unwrap()["tool"], "read");
+                )
+                .unwrap();
+        }
+        drop(connection);
 
-        let result = parse_kiro_history_line(
-            &json!({
-                "kind":"ToolResults",
-                "data":{
-                    "message_id":"tool-result-1",
-                    "content":[{"content":[{"kind":"text","data":"{\"name\":\"codesk\"}"}]}],
-                    "meta":{"timestamp":1786837348_i64}
-                }
-            }),
-            2,
+        let project = test_project(&project_path);
+        let indexed = index_opencode_database(&project, &database, 10).unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].provider, "opencode");
+        assert_eq!(indexed[0].native_session_id, "ses_opencode");
+        assert_eq!(indexed[0].title, "Inspect OpenCode support");
+
+        let connection = readonly_database(&database).unwrap();
+        let messages = opencode_history_messages(&connection, "ses_opencode", None).unwrap();
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].text, "Please inspect OpenCode");
+        assert!(messages.iter().any(|message| message.kind == "reasoning"));
+        assert!(messages.iter().any(|message| {
+            message.kind == "tool"
+                && message
+                    .meta
+                    .as_ref()
+                    .is_some_and(|meta| meta["display"] == "Read package.json")
+        }));
+        assert!(messages.iter().any(|message| message.kind == "file_change"));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.text == "OpenCode is supported.")
         );
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].kind, "tool_output");
-        assert!(result[0].text.contains("codesk"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2529,6 +2873,43 @@ mod tests {
     }
 
     #[test]
+    fn discovers_claude_sessions_in_slugged_project_directory() {
+        let home =
+            std::env::temp_dir().join(format!("codesk-claude-slug-{}", uuid::Uuid::new_v4()));
+        let project_path = PathBuf::from("/home/me/instant_context");
+        let project = test_project(&project_path);
+        let directory = home
+            .join(".claude/projects")
+            .join("-home-me-instant-context");
+        fs::create_dir_all(&directory).unwrap();
+        let transcript = directory.join("claude-refresh.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "sessionId":"claude-refresh",
+                    "cwd":project_path,
+                    "timestamp":"2026-08-16T15:00:00Z",
+                    "type":"user",
+                    "message":{"content":"new Claude session"}
+                })
+            ),
+        )
+        .unwrap();
+
+        let sessions = index_claude_from_home(&home, &project, 10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].native_session_id, "claude-refresh");
+        assert_eq!(sessions[0].title, "new Claude session");
+        assert_eq!(
+            source_path_from_home(&home, &project, "claude", "claude-refresh").unwrap(),
+            transcript
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn verifies_codex_rollout_project_ownership() {
         let root =
             std::env::temp_dir().join(format!("codesk-rollout-project-{}", uuid::Uuid::new_v4()));
@@ -2592,6 +2973,10 @@ mod tests {
             pid: None,
             input_available: false,
             input_transport: None,
+            tmux_name: None,
+            tmux_access_command: None,
+            tmux_controlled: false,
+            tmux_owned: false,
         }];
 
         enrich_codex_titles(&root, &mut sessions);
@@ -2736,6 +3121,34 @@ mod tests {
         )
         .unwrap();
         assert!(transcript_turn_active(&path, "codex"));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
+            .unwrap();
+        assert!(!transcript_turn_active(&path, "codex"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn detects_codex_active_turn_before_an_oversized_record() {
+        let root =
+            std::env::temp_dir().join(format!("codesk-large-status-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let started = json!({"type":"event_msg","payload":{"type":"task_started"}});
+        let oversized = json!({
+            "type":"response_item",
+            "payload":{
+                "type":"custom_tool_call_output",
+                "output":"x".repeat(MAX_STATUS_RECORD_BYTES + STATUS_SCAN_CHUNK_BYTES)
+            }
+        });
+        fs::write(&path, format!("{started}\n{oversized}\n")).unwrap();
+
+        assert!(transcript_turn_active(&path, "codex"));
+
         fs::OpenOptions::new()
             .append(true)
             .open(&path)

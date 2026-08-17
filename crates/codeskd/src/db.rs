@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
-use crate::model::{Event, Project, Run, Worktree};
+use crate::model::{Event, ExternalQueuedInput, Project, Run, TmuxControl, Worktree};
 
 #[derive(Clone)]
 pub struct Db(pub Arc<Mutex<Connection>>);
@@ -34,6 +34,9 @@ impl Db {
                 [],
             )?;
         }
+        ensure_column(&connection, "runs", "input_transport", "TEXT")?;
+        ensure_column(&connection, "runs", "tmux_name", "TEXT")?;
+        ensure_column(&connection, "runs", "tmux_access_command", "TEXT")?;
         Ok(Self(Arc::new(Mutex::new(connection))))
     }
 
@@ -176,7 +179,7 @@ impl Db {
     }
 
     pub fn create_run(&self, run: &Run) -> Result<()> {
-        self.0.lock().unwrap().execute("INSERT INTO runs (id,project_id,worktree_id,parent_run_id,provider,provider_session_id,title,prompt,model,cwd,command,args_json,status,pid,pgid,created_at,started_at,finished_at,exit_code,terminating_signal) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)", params![run.id,run.project_id,run.worktree_id,run.parent_run_id,run.provider,run.provider_session_id,run.title,run.prompt,run.model,run.cwd,run.command,serde_json::to_string(&run.args)?,run.status,run.pid,run.process_group_id,run.created_at,run.started_at,run.finished_at,run.exit_code,run.terminating_signal])?;
+        self.0.lock().unwrap().execute("INSERT INTO runs (id,project_id,worktree_id,parent_run_id,provider,provider_session_id,title,prompt,model,cwd,command,args_json,status,pid,pgid,created_at,started_at,finished_at,exit_code,terminating_signal,input_transport,tmux_name,tmux_access_command) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)", params![run.id,run.project_id,run.worktree_id,run.parent_run_id,run.provider,run.provider_session_id,run.title,run.prompt,run.model,run.cwd,run.command,serde_json::to_string(&run.args)?,run.status,run.pid,run.process_group_id,run.created_at,run.started_at,run.finished_at,run.exit_code,run.terminating_signal,run.input_transport,run.tmux_name,run.tmux_access_command])?;
         Ok(())
     }
 
@@ -218,6 +221,21 @@ impl Db {
         self.0.lock().unwrap().execute(
             "UPDATE runs SET provider_session_id=?2 WHERE id=?1",
             params![id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_run_tmux(
+        &self,
+        id: &str,
+        pid: u32,
+        tmux_name: &str,
+        access_command: &str,
+        started_at: &str,
+    ) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE runs SET status='running',pid=?2,pgid=?2,started_at=?3,input_transport='tmux',tmux_name=?4,tmux_access_command=?5 WHERE id=?1",
+            params![id, pid, started_at, tmux_name, access_command],
         )?;
         Ok(())
     }
@@ -317,6 +335,232 @@ impl Db {
         self.0.lock().unwrap().execute("INSERT INTO stream_offsets(run_id,channel,offset) VALUES(?1,?2,?3) ON CONFLICT(run_id,channel) DO UPDATE SET offset=excluded.offset",params![run_id,channel,offset as i64])?;
         Ok(())
     }
+
+    pub fn upsert_tmux_control(&self, control: &TmuxControl) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "INSERT INTO tmux_controls(id,project_id,run_id,provider,native_session_id,transcript_path,source_pid,source_pgid,cwd,original_command,socket_path,pane_id,session_name,access_command,owned,enabled,status,error,queue_state,queue_state_at,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,run_id=COALESCE(excluded.run_id,tmux_controls.run_id),provider=excluded.provider,native_session_id=COALESCE(excluded.native_session_id,tmux_controls.native_session_id),transcript_path=COALESCE(excluded.transcript_path,tmux_controls.transcript_path),source_pid=excluded.source_pid,source_pgid=excluded.source_pgid,cwd=excluded.cwd,original_command=excluded.original_command,socket_path=excluded.socket_path,pane_id=excluded.pane_id,session_name=excluded.session_name,access_command=excluded.access_command,owned=excluded.owned,enabled=excluded.enabled,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at",
+            params![control.id,control.project_id,control.run_id,control.provider,control.native_session_id,control.transcript_path,control.source_pid,control.source_pgid,control.cwd,control.original_command,control.socket_path,control.pane_id,control.session_name,control.access_command,control.owned,control.enabled,control.status,control.error,control.queue_state,control.queue_state_at,control.created_at,control.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn tmux_controls(&self) -> Result<Vec<TmuxControl>> {
+        let connection = self.0.lock().unwrap();
+        let mut statement = connection.prepare(TMUX_CONTROL_SELECT)?;
+        Ok(statement
+            .query_map([], row_to_tmux_control)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn tmux_control(&self, id: &str) -> Result<Option<TmuxControl>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{TMUX_CONTROL_SELECT} WHERE id=?1"),
+                [id],
+                row_to_tmux_control,
+            )
+            .optional()?)
+    }
+
+    pub fn tmux_control_for_run(&self, run_id: &str) -> Result<Option<TmuxControl>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{TMUX_CONTROL_SELECT} WHERE run_id=?1 AND enabled=1"),
+                [run_id],
+                row_to_tmux_control,
+            )
+            .optional()?)
+    }
+
+    pub fn tmux_control_for_pid(&self, pid: u32) -> Result<Option<TmuxControl>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{TMUX_CONTROL_SELECT} WHERE source_pid=?1 AND enabled=1 ORDER BY updated_at DESC LIMIT 1"),
+                [pid],
+                row_to_tmux_control,
+            )
+            .optional()?)
+    }
+
+    pub fn tmux_control_for_pane(
+        &self,
+        socket_path: Option<&str>,
+        pane_id: &str,
+    ) -> Result<Option<TmuxControl>> {
+        let socket_key = socket_path.unwrap_or("");
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("{TMUX_CONTROL_SELECT} WHERE COALESCE(socket_path,'')=?1 AND pane_id=?2 AND enabled=1 ORDER BY updated_at DESC LIMIT 1"),
+                params![socket_key, pane_id],
+                row_to_tmux_control,
+            )
+            .optional()?)
+    }
+
+    pub fn update_tmux_control_status(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE tmux_controls SET status=?2,error=?3,updated_at=?4 WHERE id=?1",
+            params![id, status, error, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_tmux_control_location(
+        &self,
+        id: &str,
+        source_pid: u32,
+        source_pgid: i32,
+        socket_path: Option<&str>,
+        pane_id: &str,
+        session_name: &str,
+        access_command: &str,
+        transcript_path: Option<&str>,
+        native_session_id: Option<&str>,
+    ) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE tmux_controls SET source_pid=?2,source_pgid=?3,socket_path=?4,pane_id=?5,session_name=?6,access_command=?7,transcript_path=COALESCE(?8,transcript_path),native_session_id=COALESCE(?9,native_session_id),owned=1,enabled=1,status='active',error=NULL,updated_at=?10 WHERE id=?1",
+            params![id,source_pid,source_pgid,socket_path,pane_id,session_name,access_command,transcript_path,native_session_id,chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_tmux_queue_state(&self, id: &str, state: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE tmux_controls SET queue_state=?2,queue_state_at=?3,updated_at=?3 WHERE id=?1",
+            params![id, state, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn disable_tmux_control(&self, id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE tmux_controls SET enabled=0,status='disabled',updated_at=?2 WHERE id=?1",
+            params![id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn enqueue_tmux_input(&self, control_id: &str, item: &ExternalQueuedInput) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "INSERT INTO tmux_queue(id,control_id,pid,project_id,session_id,message,title,created_at,status,error) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![item.id,control_id,item.pid,item.project_id,item.session_id,item.message,item.title,item.created_at,item.status,item.error],
+        )?;
+        Ok(())
+    }
+
+    pub fn tmux_queue(&self, control_id: &str) -> Result<Vec<ExternalQueuedInput>> {
+        let connection = self.0.lock().unwrap();
+        let mut statement = connection.prepare("SELECT id,pid,project_id,session_id,message,title,created_at,status,error FROM tmux_queue WHERE control_id=?1 ORDER BY created_at,id")?;
+        Ok(statement
+            .query_map([control_id], |row| {
+                Ok(ExternalQueuedInput {
+                    id: row.get(0)?,
+                    pid: row.get(1)?,
+                    project_id: row.get(2)?,
+                    session_id: row.get(3)?,
+                    message: row.get(4)?,
+                    title: row.get(5)?,
+                    created_at: row.get(6)?,
+                    status: row.get(7)?,
+                    error: row.get(8)?,
+                    run: None,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn next_tmux_queue(&self, control_id: &str) -> Result<Option<ExternalQueuedInput>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id,pid,project_id,session_id,message,title,created_at,status,error FROM tmux_queue WHERE control_id=?1 AND status='queued' ORDER BY created_at,id LIMIT 1",
+                [control_id],
+                |row| {
+                    Ok(ExternalQueuedInput {
+                        id: row.get(0)?,
+                        pid: row.get(1)?,
+                        project_id: row.get(2)?,
+                        session_id: row.get(3)?,
+                        message: row.get(4)?,
+                        title: row.get(5)?,
+                        created_at: row.get(6)?,
+                        status: row.get(7)?,
+                        error: row.get(8)?,
+                        run: None,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn delete_tmux_queue(&self, control_id: &str, queue_id: &str) -> Result<bool> {
+        Ok(self.0.lock().unwrap().execute(
+            "DELETE FROM tmux_queue WHERE control_id=?1 AND id=?2 AND status='queued'",
+            params![control_id, queue_id],
+        )? > 0)
+    }
+
+    pub fn mark_tmux_queue_sending(&self, control_id: &str, queue_id: &str) -> Result<bool> {
+        Ok(self.0.lock().unwrap().execute(
+            "UPDATE tmux_queue SET status='sending' WHERE control_id=?1 AND id=?2 AND status='queued'",
+            params![control_id, queue_id],
+        )? > 0)
+    }
+
+    pub fn finish_tmux_queue(&self, control_id: &str, queue_id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "DELETE FROM tmux_queue WHERE control_id=?1 AND id=?2",
+            params![control_id, queue_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn fail_tmux_queue(&self, control_id: &str, queue_id: &str, error: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE tmux_queue SET status='failed',error=?3 WHERE control_id=?1 AND id=?2",
+            params![control_id, queue_id, error],
+        )?;
+        Ok(())
+    }
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let count: i64 = connection.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?1"),
+        [column],
+        |row| row.get(0),
+    )?;
+    if count == 0 {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
@@ -342,6 +586,36 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
         finished_at: row.get(17)?,
         exit_code: row.get(18)?,
         terminating_signal: row.get(19)?,
+        input_transport: row.get(20)?,
+        tmux_name: row.get(21)?,
+        tmux_access_command: row.get(22)?,
+    })
+}
+
+fn row_to_tmux_control(row: &rusqlite::Row<'_>) -> rusqlite::Result<TmuxControl> {
+    Ok(TmuxControl {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        run_id: row.get(2)?,
+        provider: row.get(3)?,
+        native_session_id: row.get(4)?,
+        transcript_path: row.get(5)?,
+        source_pid: row.get(6)?,
+        source_pgid: row.get(7)?,
+        cwd: row.get(8)?,
+        original_command: row.get(9)?,
+        socket_path: row.get(10)?,
+        pane_id: row.get(11)?,
+        session_name: row.get(12)?,
+        access_command: row.get(13)?,
+        owned: row.get(14)?,
+        enabled: row.get(15)?,
+        status: row.get(16)?,
+        error: row.get(17)?,
+        queue_state: row.get(18)?,
+        queue_state_at: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
     })
 }
 
@@ -362,7 +636,8 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     })
 }
 
-const RUN_SELECT: &str = "SELECT id,project_id,worktree_id,parent_run_id,provider,provider_session_id,title,prompt,model,cwd,command,args_json,status,pid,pgid,created_at,started_at,finished_at,exit_code,terminating_signal FROM runs";
+const RUN_SELECT: &str = "SELECT id,project_id,worktree_id,parent_run_id,provider,provider_session_id,title,prompt,model,cwd,command,args_json,status,pid,pgid,created_at,started_at,finished_at,exit_code,terminating_signal,input_transport,tmux_name,tmux_access_command FROM runs";
+const TMUX_CONTROL_SELECT: &str = "SELECT id,project_id,run_id,provider,native_session_id,transcript_path,source_pid,source_pgid,cwd,original_command,socket_path,pane_id,session_name,access_command,owned,enabled,status,error,queue_state,queue_state_at,created_at,updated_at FROM tmux_controls";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL UNIQUE,repo_root TEXT,created_at TEXT NOT NULL,registered INTEGER NOT NULL DEFAULT 1);
@@ -371,4 +646,85 @@ CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,project_id TEXT NOT NULL RE
 CREATE TABLE IF NOT EXISTS events (global_sequence INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,run_id TEXT NOT NULL REFERENCES runs(id),run_sequence INTEGER NOT NULL,timestamp TEXT NOT NULL,kind TEXT NOT NULL,provider_event_type TEXT,channel TEXT,payload_json TEXT NOT NULL,raw_json TEXT,UNIQUE(run_id,run_sequence));
 CREATE INDEX IF NOT EXISTS events_run_sequence ON events(run_id,run_sequence);
 CREATE TABLE IF NOT EXISTS stream_offsets (run_id TEXT NOT NULL REFERENCES runs(id),channel TEXT NOT NULL,offset INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(run_id,channel));
+CREATE TABLE IF NOT EXISTS tmux_controls (id TEXT PRIMARY KEY,project_id TEXT,run_id TEXT UNIQUE,provider TEXT NOT NULL,native_session_id TEXT,transcript_path TEXT,source_pid INTEGER NOT NULL,source_pgid INTEGER NOT NULL,cwd TEXT NOT NULL,original_command TEXT NOT NULL,socket_path TEXT,pane_id TEXT,session_name TEXT,access_command TEXT,owned INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL,error TEXT,queue_state TEXT NOT NULL DEFAULT 'ready',queue_state_at TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS tmux_controls_pane ON tmux_controls(socket_path,pane_id);
+CREATE INDEX IF NOT EXISTS tmux_controls_pid ON tmux_controls(source_pid);
+CREATE TABLE IF NOT EXISTS tmux_queue (id TEXT PRIMARY KEY,control_id TEXT NOT NULL REFERENCES tmux_controls(id) ON DELETE CASCADE,pid INTEGER NOT NULL,project_id TEXT NOT NULL,session_id TEXT,message TEXT NOT NULL,title TEXT,created_at TEXT NOT NULL,status TEXT NOT NULL,error TEXT);
+CREATE INDEX IF NOT EXISTS tmux_queue_control ON tmux_queue(control_id,created_at);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn tmux_queue_is_ordered_and_survives_database_reopen() {
+        let path = std::env::temp_dir().join(format!("codeskd-tmux-{}.db", Uuid::new_v4()));
+        let control_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let db = Db::open(&path).unwrap();
+            db.upsert_tmux_control(&TmuxControl {
+                id: control_id.clone(),
+                project_id: None,
+                run_id: None,
+                provider: "codex".into(),
+                native_session_id: Some("session-1".into()),
+                transcript_path: Some("/tmp/session.jsonl".into()),
+                source_pid: 42,
+                source_pgid: 42,
+                cwd: "/tmp".into(),
+                original_command: "codex --yolo".into(),
+                socket_path: Some("/tmp/codesk.sock".into()),
+                pane_id: Some("%1".into()),
+                session_name: Some("codesk-codex-test".into()),
+                access_command: Some("tmux attach".into()),
+                owned: true,
+                enabled: true,
+                status: "active".into(),
+                error: None,
+                queue_state: "active".into(),
+                queue_state_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            })
+            .unwrap();
+            for (id, message, created_at) in [
+                ("a", "first", "2026-08-17T00:00:00Z"),
+                ("b", "second", "2026-08-17T00:00:01Z"),
+            ] {
+                db.enqueue_tmux_input(
+                    &control_id,
+                    &ExternalQueuedInput {
+                        id: id.into(),
+                        pid: 42,
+                        project_id: "project".into(),
+                        session_id: Some("session-1".into()),
+                        message: message.into(),
+                        title: None,
+                        created_at: created_at.into(),
+                        status: "queued".into(),
+                        error: None,
+                        run: None,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let db = Db::open(&path).unwrap();
+        let items = db.tmux_queue(&control_id).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.message.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(db.next_tmux_queue(&control_id).unwrap().unwrap().id, "a");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    }
+}

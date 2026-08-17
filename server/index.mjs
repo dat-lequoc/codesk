@@ -10,8 +10,16 @@ import { startDraft } from './drafts.mjs'
 const app = express(); const server = http.createServer(app); const wss = new WebSocketServer({ server, path: '/ws' }); const store = new Store()
 function broadcast(type, payload) { const body = JSON.stringify({ type, payload }); for (const client of wss.clients) if (client.readyState === 1) client.send(body) }
 const gateway = new Gateway(store, broadcast)
-const mapRun = (item, hostId) => ({ id:item.id, projectId:item.project_id, worktreeId:item.worktree_id, parentRunId:item.parent_run_id, provider:item.provider, sessionId:item.provider_session_id, title:item.title, prompt:item.prompt, model:item.model || '', cwd:item.cwd, command:item.command, args:item.args, status:item.status, pid:item.pid, processGroupId:item.process_group_id, createdAt:item.created_at, startedAt:item.started_at, finishedAt:item.finished_at, exitCode:item.exit_code, terminatingSignal:item.terminating_signal, displayCommand:[item.command,...(item.args || [])].join(' '), hostId })
-const mapSession = (item, hostId) => ({ id:item.id, provider:item.provider, nativeSessionId:item.native_session_id, projectId:item.project_id, hostId, cwd:item.cwd, title:item.title, createdAt:item.created_at, updatedAt:item.updated_at, sortAt:item.updated_at, status:item.status, pid:item.pid, inputAvailable:item.input_available, inputTransport:item.input_transport })
+const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`
+const accessCommandForHost = (hostId, command) => {
+  if (!command) return null
+  const host = store.state.hosts.find((item) => item.id === hostId)
+  return host?.type === 'ssh' ? `ssh -t ${shellQuote(host.sshAlias)} ${shellQuote(command)}` : command
+}
+const mapRun = (item, hostId) => ({ id:item.id, projectId:item.project_id, worktreeId:item.worktree_id, parentRunId:item.parent_run_id, provider:item.provider, sessionId:item.provider_session_id, title:item.title, prompt:item.prompt, model:item.model || '', cwd:item.cwd, command:item.command, args:item.args, status:item.status, pid:item.pid, processGroupId:item.process_group_id, createdAt:item.created_at, startedAt:item.started_at, finishedAt:item.finished_at, exitCode:item.exit_code, terminatingSignal:item.terminating_signal, displayCommand:[item.command,...(item.args || [])].join(' '), inputTransport:item.input_transport, tmuxName:item.tmux_name, tmuxAccessCommand:accessCommandForHost(hostId,item.tmux_access_command), hostId })
+const mapSession = (item, hostId) => ({ id:item.id, provider:item.provider, nativeSessionId:item.native_session_id, projectId:item.project_id, hostId, cwd:item.cwd, title:item.title, createdAt:item.created_at, updatedAt:item.updated_at, sortAt:item.updated_at, status:item.status, pid:item.pid, inputAvailable:item.input_available, inputTransport:item.input_transport, tmuxName:item.tmux_name, tmuxAccessCommand:accessCommandForHost(hostId,item.tmux_access_command), tmuxControlled:item.tmux_controlled, tmuxOwned:item.tmux_owned })
+const mapAgent = (item, hostId) => ({ ...item, tmux_access_command:accessCommandForHost(hostId,item.tmux_access_command) })
+const mapExternalQueued = (item, hostId) => item?.run ? { ...item, run:mapRun(item.run, hostId) } : item
 const SESSION_PAGE_SIZE = 8
 const previousSessionStatus = new Map()
 const stoppedUntil = new Map()
@@ -40,7 +48,7 @@ async function loadHostState(host) {
     runs: hostRuns.filter((item) => projectIds.has(item.project_id)).map((item) => mapRun(item, host.id)),
     sessions: hostSessions.flat().map((item) => mapSession(item, host.id)),
     providers: capabilities,
-    discoveredAgents: discoveredAgents.filter((item) => !item.managed_run_id),
+    discoveredAgents: discoveredAgents.filter((item) => !item.managed_run_id).map((item) => mapAgent(item,host.id)),
     updatedAt: new Date().toISOString(),
   }
   cachedHostState.set(host.id, result)
@@ -97,6 +105,27 @@ function cacheCreatedProject(hostId, project) {
   cachedHostState.set(hostId, prior)
   store.updateNavigationHost(hostId, { hostId, projects: prior.projects, runs: prior.runs, sessions: prior.sessions, providers: prior.providers, updatedAt: prior.updatedAt })
   broadcast('state.updated', { hostId, updatedAt: prior.updatedAt })
+}
+
+function cacheCreatedRun(hostId, run) {
+  const prior = cloneSnapshot(cachedSnapshot(hostId)) || { hostId, projects: [], runs: [], sessions: [], providers: [], discoveredAgents: [] }
+  const mapped = mapRun(run, hostId)
+  prior.runs = [mapped, ...prior.runs.filter((item) => item.id !== mapped.id)].sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+  prior.updatedAt = new Date().toISOString()
+  cachedHostState.set(hostId, prior)
+  store.updateNavigationHost(hostId, { hostId, projects: prior.projects, runs: prior.runs, sessions: prior.sessions, providers: prior.providers, updatedAt: prior.updatedAt })
+  broadcast('state.updated', { hostId, updatedAt: prior.updatedAt })
+  return mapped
+}
+
+function cacheProjectSessions(hostId, projectId, sessions) {
+  const prior = cloneSnapshot(cachedSnapshot(hostId)) || { hostId, projects: [], runs: [], sessions: [], providers: [], discoveredAgents: [] }
+  prior.sessions = [...prior.sessions.filter((item) => item.projectId !== projectId), ...sessions].sort((left, right) => right.sortAt.localeCompare(left.sortAt))
+  prior.updatedAt = new Date().toISOString()
+  cachedHostState.set(hostId, prior)
+  store.updateNavigationHost(hostId, { hostId, projects: prior.projects, runs: prior.runs, sessions: prior.sessions, providers: prior.providers, updatedAt: prior.updatedAt })
+  broadcast('state.updated', { hostId, projectId, updatedAt: prior.updatedAt })
+  return sessions
 }
 
 function cacheRemovedProject(hostId, projectId) {
@@ -192,25 +221,30 @@ app.patch('/api/drafts/:id', (req, res) => {
 app.post('/api/drafts/:id/start', async (req, res) => {
   try {
     const { draft, run } = await startDraft(store, gateway, req.params.id, req.body)
-    broadcast('draft.removed', { id: draft.id }); res.status(201).json(mapRun(run, draft.hostId))
+    const mapped = cacheCreatedRun(draft.hostId, run)
+    scheduleHostRefresh(draft.hostId, 0)
+    broadcast('draft.removed', { id: draft.id }); res.status(201).json(mapped)
   } catch (error) { res.status(error.statusCode || 400).json({ error: error.message }) }
 })
 app.get('/api/hosts/:hostId/files', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/files?path=${encodeURIComponent(req.query.path||'')}`))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/hosts/:hostId/file', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/file?path=${encodeURIComponent(req.query.path||'')}`,{timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
 app.post('/api/hosts/:hostId/projects/discover', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/projects/discover',{method:'POST',body:JSON.stringify(req.body),timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
-app.get('/api/hosts/:hostId/agents', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,'/v1/agents/discover'))}catch(error){res.status(400).json({error:error.message})}})
+app.get('/api/hosts/:hostId/agents', async (req,res)=>{try{res.json((await gateway.request(req.params.hostId,'/v1/agents/discover')).map((item)=>mapAgent(item,req.params.hostId)))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/projects/:hostId/:projectId/sessions/:provider/:sessionId/messages', async (req,res)=>{try{const after=typeof req.query.after==='string'&&req.query.after?`?after=${encodeURIComponent(req.query.after)}`:'';res.json(await gateway.request(req.params.hostId,`/v1/projects/${req.params.projectId}/sessions/${encodeURIComponent(req.params.provider)}/${encodeURIComponent(req.params.sessionId)}/messages${after}`,{timeout:30000}))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/projects/:hostId/:projectId/sessions', async (req,res)=>{try{const limit=Math.min(150,Math.max(1,Number(req.query.limit)||SESSION_PAGE_SIZE));const items=await gateway.request(req.params.hostId,`/v1/projects/${req.params.projectId}/sessions?limit=${limit}`,{timeout:20000});res.json(items.map((item)=>mapSession(item,req.params.hostId)))}catch(error){res.status(400).json({error:error.message})}})
+app.post('/api/projects/:hostId/:projectId/sessions/refresh', async (req,res)=>{try{const limit=Math.min(150,Math.max(1,Number(req.query.limit)||50));const items=await gateway.request(req.params.hostId,`/v1/projects/${encodeURIComponent(req.params.projectId)}/sessions?limit=${limit}&refresh=true`,{timeout:30000});res.json(cacheProjectSessions(req.params.hostId,req.params.projectId,items.map((item)=>mapSession(item,req.params.hostId))))}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/projects/:hostId/:projectId/git-context', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/projects/${req.params.projectId}/git-context`))}catch(error){res.status(400).json({error:error.message})}})
 for (const action of ['interrupt','terminate','kill']) app.post(`/api/agents/:hostId/:pid/${action}`,async(req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/agents/${req.params.pid}/${action}`,{method:'POST',body:'{}'}))}catch(error){res.status(400).json({error:error.message})}})
-app.post('/api/external-sessions/:hostId/:pid/input',async(req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/external-sessions/${req.params.pid}/input`,{method:'POST',body:JSON.stringify(req.body)}))}catch(error){res.status(400).json({error:error.message})}})
-app.get('/api/external-sessions/:hostId/:pid/queue',async(req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/external-sessions/${req.params.pid}/queue`))}catch(error){res.status(400).json({error:error.message})}})
+app.post('/api/external-sessions/:hostId/:pid/input',async(req,res)=>{try{const result=await gateway.request(req.params.hostId,`/v1/external-sessions/${req.params.pid}/input`,{method:'POST',body:JSON.stringify(req.body)});if(result.run)result.run=cacheCreatedRun(req.params.hostId,result.run);if(result.queued)result.queued=mapExternalQueued(result.queued,req.params.hostId);res.json(result)}catch(error){res.status(400).json({error:error.message})}})
+app.get('/api/external-sessions/:hostId/:pid/queue',async(req,res)=>{try{const items=await gateway.request(req.params.hostId,`/v1/external-sessions/${req.params.pid}/queue`);for(const item of items)if(item.run)cacheCreatedRun(req.params.hostId,item.run);res.json(items.map((item)=>mapExternalQueued(item,req.params.hostId)))}catch(error){res.status(400).json({error:error.message})}})
 app.delete('/api/external-sessions/:hostId/:pid/queue/:queueId',async(req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/external-sessions/${req.params.pid}/queue/${encodeURIComponent(req.params.queueId)}`,{method:'DELETE'}))}catch(error){res.status(400).json({error:error.message})}})
+for (const action of ['adopt','move']) app.post(`/api/external-sessions/:hostId/:pid/tmux/${action}`,async(req,res)=>{try{const result=await gateway.request(req.params.hostId,`/v1/external-sessions/${req.params.pid}/tmux/${action}`,{method:'POST',body:JSON.stringify(req.body)});scheduleHostRefresh(req.params.hostId,0);res.json(result)}catch(error){res.status(400).json({error:error.message})}})
+app.post('/api/external-sessions/:hostId/:pid/tmux/disable',async(req,res)=>{try{const result=await gateway.request(req.params.hostId,`/v1/external-sessions/${req.params.pid}/tmux/disable`,{method:'POST',body:'{}'});scheduleHostRefresh(req.params.hostId,0);res.json(result)}catch(error){res.status(400).json({error:error.message})}})
 app.get('/api/projects/:hostId/:projectId/worktrees', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/projects/${req.params.projectId}/worktrees`)) } catch (error) { res.status(400).json({ error: error.message }) } })
 app.get('/api/worktrees/:hostId/:id/status', async (req,res)=>{try{res.json(await gateway.request(req.params.hostId,`/v1/worktrees/${req.params.id}/status`))}catch(error){res.status(400).json({error:error.message})}})
 app.delete('/api/worktrees/:hostId/:id', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/worktrees/${req.params.id}?force=${req.query.force === 'true'}`, { method: 'DELETE' })) } catch (error) { res.status(400).json({ error: error.message }) } })
 
-app.post('/api/runs', async (req, res) => { try { const run = await gateway.request(req.body.hostId, '/v1/runs', { method: 'POST', body: JSON.stringify(req.body) , timeout: 30000}); res.status(201).json(mapRun(run, req.body.hostId)) } catch (error) { res.status(400).json({ error: error.message }) } })
+app.post('/api/runs', async (req, res) => { try { const run = await gateway.request(req.body.hostId, '/v1/runs', { method: 'POST', body: JSON.stringify(req.body) , timeout: 30000}); const mapped = cacheCreatedRun(req.body.hostId, run); scheduleHostRefresh(req.body.hostId, 0); res.status(201).json(mapped) } catch (error) { res.status(400).json({ error: error.message }) } })
 for (const action of ['interrupt','terminate','kill']) app.post(`/api/runs/:hostId/:id/${action}`, async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/${action}`, { method: 'POST', body: '{}' })) } catch (error) { res.status(400).json({ error: error.message }) } })
 app.post('/api/runs/:hostId/:id/input', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/input`, { method: 'POST', body: JSON.stringify(req.body) })) } catch (error) { res.status(400).json({ error: error.message }) } })
 app.post('/api/runs/:hostId/:id/response', async (req, res) => { try { res.json(await gateway.request(req.params.hostId, `/v1/runs/${req.params.id}/response`, { method: 'POST', body: JSON.stringify(req.body) })) } catch (error) { res.status(400).json({ error: error.message }) } })

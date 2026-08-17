@@ -25,7 +25,7 @@ The development machine currently has Kiro CLI 2.10.0. Its public command surfac
 - agent, model, effort, and tool-trust options;
 - interactive commands such as `/usage` that must work from Codesk.
 
-ACP is the preferred integration transport because it can preserve typed events and requests. A Codesk-owned pseudo-terminal may be used as a compatibility fallback when a required Kiro feature is not exposed through ACP. Codesk must not create or depend on tmux for managed Kiro sessions.
+ACP remains the typed protocol regression path. Interactive Kiro chats now use a Codesk-owned tmux pane for single-writer input while conversation display continues to come from Kiro's transcript parser, not terminal screen scraping.
 
 ## Kiro CLI milestone (implemented)
 
@@ -90,7 +90,7 @@ Exit criterion: the user can converse, steer or queue, issue `/usage`, answer re
 - Expose fork only if Kiro offers a safe, tested source-preserving operation; otherwise label the limitation clearly.
 - Discover already-running Kiro processes non-invasively and correlate them with Kiro session IDs where possible.
 - For externally started Kiro sessions, offer steer/queue only through a proven attachable transport. Otherwise keep the composer useful by offering a safe continuation into a Codesk-owned process rather than launching a second writer against the same active session.
-- Do not launch tmux. Existing terminal metadata may be observed, but Kiro support must not require it.
+- Launch new interactive Kiro chats in the isolated Codesk tmux socket; detect user-owned tmux panes and require one-click control adoption.
 
 Exit criterion: recent sessions have correct dates, a historical conversation can be continued from Codesk, and no duplicate writer is created for an active provider session.
 
@@ -120,7 +120,7 @@ The live release test must use a disposable real project and verify:
 9. Resume the same Kiro session by its provider session ID.
 10. Repeat the critical path on a remote project.
 
-Capture verification screenshots for the new-chat view, a tool call with output, the Steer/Queue state, `/usage`, and a resumed historical session. Run the full Codesk test suite, the performance regression runbook, and `npm run desktop:redeploy` before marking the milestone complete.
+Capture verification screenshots for the new-chat view, a tool call with output, the Steer/Queue state, `/usage`, and a resumed historical session. Run the full Codesk test suite, the tmux control runbook, the performance regression runbook, and `npm run desktop:redeploy` before marking the milestone complete.
 
 ## Definition of done
 
@@ -133,11 +133,11 @@ Kiro CLI is considered first-class only when:
 - sessions can be listed with correct timestamps and safely resumed;
 - interruption and recovery are reliable;
 - claimed capabilities are based on tested protocol behavior;
-- the integration passes automated and live screenshot verification without relying on tmux.
+- the integration passes automated and live screenshot verification without relying on tmux screen scraping.
 
 ## DeepSeek Harness milestone (implemented)
 
-Codesk integrates `dsh` through its native loopback Web/API host rather than through headless print mode, terminal scraping, or tmux. Each managed run owns a supervised `dsh web --host 127.0.0.1 --port 0` process and retains the native DSH session identity.
+Codesk keeps DSH Web as the typed protocol regression path and runs interactive DSH chats through `dsh --profile tui` in the isolated Codesk tmux socket. Transcript parsing remains the display source.
 
 Implemented behavior:
 
@@ -150,7 +150,7 @@ Implemented behavior:
 - cold continuation of the same session, safe source-preserving fork, and Esc-Esc history branching;
 - an authenticated live probe at `scripts/test-dsh-live.mjs` covering a real tool turn, queue, steer, usage, cancellation, resume, fork, and history.
 
-Managed DSH support does not create or depend on tmux. Idle runners keep the private DSH host attached for continuation but stop history polling until a turn is active, preserving the app's idle power profile.
+The structured DSH test transport keeps the private DSH host behavior; the default interactive path uses tmux and transcript-gated queue delivery.
 
 ## Antigravity milestone (implemented)
 
@@ -167,7 +167,7 @@ Implemented behavior:
 - non-invasive detection of `agy`/`antigravity-cli` processes and `--conversation` session correlation;
 - an authenticated live probe at `scripts/test-agy-live.mjs` covering a real tool turn, usage, resume, history, and interruption.
 
-Antigravity's current print protocol does not expose reliable mid-turn steering or a safe conversation fork. Codesk therefore keeps those capabilities disabled and resumes completed conversations in a new managed process instead of claiming unsafe behavior. Managed Antigravity support does not create or require tmux.
+Antigravity's print protocol remains available for structured regression. Interactive Antigravity chats run in tmux, allowing terminal-level Steer and Queue while safe conversation fork remains disabled.
 
 ## Later provider work
 

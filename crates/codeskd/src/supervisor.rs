@@ -12,9 +12,12 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    adapters,
     db::Db,
-    model::{Event, Run, RunnerExit, RunnerSpec, StartRunRequest},
+    model::{
+        Event, ExternalQueuedInput, Run, RunnerExit, RunnerSpec, StartRunRequest, TmuxControl,
+    },
+    providers,
+    tmux::{TmuxManager, TmuxPane},
     worktrees,
 };
 
@@ -23,6 +26,7 @@ pub struct Supervisor {
     pub db: Db,
     pub data_root: PathBuf,
     pub events: broadcast::Sender<Event>,
+    pub tmux: TmuxManager,
 }
 
 impl Supervisor {
@@ -30,6 +34,7 @@ impl Supervisor {
         let (events, _) = broadcast::channel(2048);
         Self {
             db,
+            tmux: TmuxManager::new(data_root.clone()),
             data_root,
             events,
         }
@@ -46,6 +51,12 @@ impl Supervisor {
             ]
             .contains(&run.status.as_str())
         }) {
+            if run.input_transport.as_deref() == Some("tmux") {
+                if self.db.tmux_control_for_run(&run.id)?.is_none() {
+                    self.db.update_run_status(&run.id, "orphaned")?;
+                }
+                continue;
+            }
             if run.process_group_id.is_some_and(process_alive)
                 || self
                     .data_root
@@ -97,7 +108,20 @@ impl Supervisor {
             value => anyhow::bail!("unsupported workspace mode: {value}"),
         };
         let id = Uuid::new_v4().to_string();
-        let spec = adapters::build(&request, &id, &cwd)?;
+        let terminal_spec =
+            if std::env::var("CODESK_RUN_TRANSPORT").is_ok_and(|value| value == "structured") {
+                None
+            } else {
+                providers::build_terminal(&request, &id, &cwd)?
+            };
+        let spec = match terminal_spec.as_ref() {
+            Some(spec) => providers::support::CommandSpec {
+                command: spec.command.clone(),
+                args: spec.args.clone(),
+                session_id: spec.session_id.clone(),
+            },
+            None => providers::build(&request, &id, &cwd)?,
+        };
         let created = Utc::now().to_rfc3339();
         let title = request
             .title
@@ -125,6 +149,9 @@ impl Supervisor {
             finished_at: None,
             exit_code: None,
             terminating_signal: None,
+            input_transport: terminal_spec.as_ref().map(|_| "tmux".to_string()),
+            tmux_name: None,
+            tmux_access_command: None,
         };
         self.db.create_run(&run)?;
         self.emit(
@@ -135,6 +162,92 @@ impl Supervisor {
             json!({"title":run.title,"cwd":run.cwd}),
             None,
         )?;
+        if terminal_spec.is_some() {
+            let control_id = Uuid::new_v4().to_string();
+            let launch = match self
+                .tmux
+                .launch(
+                    &run.provider,
+                    &run.cwd,
+                    &run.command,
+                    &run.args,
+                    &control_id,
+                )
+                .await
+            {
+                Ok(launch) => launch,
+                Err(error) => {
+                    self.db
+                        .finish_run(&id, "failed", None, None, &Utc::now().to_rfc3339())?;
+                    return Err(error);
+                }
+            };
+            let started = Utc::now().to_rfc3339();
+            self.db.update_run_tmux(
+                &id,
+                launch.pane.pane_pid,
+                &launch.pane.session_name,
+                &launch.access_command,
+                &started,
+            )?;
+            run.pid = Some(launch.pane.pane_pid);
+            run.process_group_id = Some(launch.pane.pane_pid as i32);
+            run.status = "running".into();
+            run.started_at = Some(started.clone());
+            run.tmux_name = Some(launch.pane.session_name.clone());
+            run.tmux_access_command = Some(launch.access_command.clone());
+            let now = Utc::now().to_rfc3339();
+            self.db.upsert_tmux_control(&TmuxControl {
+                id: control_id,
+                project_id: Some(run.project_id.clone()),
+                run_id: Some(run.id.clone()),
+                provider: run.provider.clone(),
+                native_session_id: run.provider_session_id.clone(),
+                transcript_path: None,
+                source_pid: launch.pane.pane_pid,
+                source_pgid: launch.pane.pane_pid as i32,
+                cwd: run.cwd.clone(),
+                original_command: std::iter::once(run.command.as_str())
+                    .chain(run.args.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                socket_path: launch.pane.socket_path.clone(),
+                pane_id: Some(launch.pane.pane_id.clone()),
+                session_name: Some(launch.pane.session_name.clone()),
+                access_command: Some(launch.access_command.clone()),
+                owned: true,
+                enabled: true,
+                status: "active".to_string(),
+                error: None,
+                queue_state: if run.prompt.trim().is_empty() {
+                    "ready"
+                } else {
+                    "awaiting_start"
+                }
+                .to_string(),
+                queue_state_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            })?;
+            self.emit(
+                &id,
+                "run.started",
+                Some("tmux"),
+                None,
+                json!({"pid":launch.pane.pane_pid,"tmux_name":launch.pane.session_name,"access_command":launch.access_command}),
+                None,
+            )?;
+            if !run.prompt.trim().is_empty() {
+                let tmux = self.tmux.clone();
+                let pane = launch.pane;
+                let prompt = run.prompt.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(1200)).await;
+                    let _ = tmux.send_prompt(&pane, &prompt).await;
+                });
+            }
+            return Ok(run);
+        }
         let run_dir = self.data_root.join("runs").join(&id);
         tokio::fs::create_dir_all(&run_dir).await?;
         let runner_spec = RunnerSpec {
@@ -207,7 +320,7 @@ impl Supervisor {
             json!({"pid":pid,"process_group_id":pgid,"durable_runner":true}),
             None,
         )?;
-        if let Some(message) = adapters::encode_initial_prompt(&run.provider, &run.prompt) {
+        if let Some(message) = providers::encode_initial_prompt(&run.provider, &run.prompt) {
             self.write_input(&id, &message).await?;
             self.emit(
                 &id,
@@ -254,13 +367,14 @@ impl Supervisor {
                                     let text = line.trim_end_matches(['\r', '\n']);
                                     if !text.is_empty() {
                                         let (kind, provider_type, payload, raw, session) =
-                                            adapters::normalize_line(&run.provider, channel, text);
+                                            providers::normalize_line(&run.provider, channel, text);
                                         if let Some(session) = session {
                                             let _ = this.db.set_provider_session(&run.id, &session);
                                         }
-                                        if let Some(status) =
-                                            adapters::status_from_event(&run.provider, raw.as_ref())
-                                        {
+                                        if let Some(status) = providers::status_from_event(
+                                            &run.provider,
+                                            raw.as_ref(),
+                                        ) {
                                             let _ = this.db.update_run_status(&run.id, status);
                                         }
                                         let _ = this.emit(
@@ -354,11 +468,50 @@ impl Supervisor {
         last_turn_id: Option<&str>,
     ) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
+        if let Some(control) = self.db.tmux_control_for_run(run_id)? {
+            if delivery == "queue" {
+                let item = ExternalQueuedInput {
+                    id: Uuid::new_v4().to_string(),
+                    pid: control.source_pid,
+                    project_id: run.project_id.clone(),
+                    session_id: control.native_session_id.clone(),
+                    message: message.to_string(),
+                    title: Some(run.title.clone()),
+                    created_at: Utc::now().to_rfc3339(),
+                    status: "queued".to_string(),
+                    error: None,
+                    run: None,
+                };
+                self.db.enqueue_tmux_input(&control.id, &item)?;
+                self.emit(
+                    run_id,
+                    "queue.added",
+                    Some("tmux"),
+                    None,
+                    json!({"queue_id":item.id,"text":message}),
+                    None,
+                )?;
+                return Ok(());
+            }
+            let pane = self.tmux_pane(&control).await?;
+            self.tmux.send_prompt(&pane, message).await?;
+            self.db
+                .update_tmux_queue_state(&control.id, "awaiting_start")?;
+            self.emit(
+                run_id,
+                "input.submitted",
+                Some("steer"),
+                None,
+                json!({"message":message,"delivery":"steer"}),
+                None,
+            )?;
+            return Ok(());
+        }
         let request_id = request_id
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let encoded =
-            adapters::encode_input(&run.provider, message, &request_id, delivery, last_turn_id)?;
+            providers::encode_input(&run.provider, message, &request_id, delivery, last_turn_id)?;
         self.write_input(run_id, &encoded).await?;
         self.emit(
             run_id,
@@ -373,8 +526,12 @@ impl Supervisor {
 
     pub async fn start_queued(&self, run_id: &str) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
+        if let Some(control) = self.db.tmux_control_for_run(run_id)? {
+            self.db.update_tmux_queue_state(&control.id, "ready")?;
+            return Ok(());
+        }
         anyhow::ensure!(
-            matches!(run.provider.as_str(), "codex" | "kiro" | "dsh"),
+            providers::require(&run.provider)?.descriptor().queued_input,
             "queued turns are not supported for this provider"
         );
         let request_id = Uuid::new_v4().to_string();
@@ -396,8 +553,23 @@ impl Supervisor {
 
     pub async fn remove_queued(&self, run_id: &str, queue_id: &str) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
+        if let Some(control) = self.db.tmux_control_for_run(run_id)? {
+            anyhow::ensure!(
+                self.db.delete_tmux_queue(&control.id, queue_id)?,
+                "queued message not found or already sending"
+            );
+            self.emit(
+                run_id,
+                "queue.removed",
+                Some("tmux"),
+                None,
+                json!({"queue_id":queue_id}),
+                None,
+            )?;
+            return Ok(());
+        }
         anyhow::ensure!(
-            matches!(run.provider.as_str(), "codex" | "kiro" | "dsh"),
+            providers::require(&run.provider)?.descriptor().queued_input,
             "queued turns are not supported for this provider"
         );
         let request_id = Uuid::new_v4().to_string();
@@ -425,7 +597,9 @@ impl Supervisor {
     ) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
         anyhow::ensure!(
-            matches!(run.provider.as_str(), "codex" | "kiro"),
+            providers::require(&run.provider)?
+                .descriptor()
+                .provider_responses,
             "provider responses are not supported for this provider"
         );
         self.write_input(
@@ -446,7 +620,22 @@ impl Supervisor {
 
     pub async fn interrupt(&self, run_id: &str) -> Result<()> {
         let run = self.db.run(run_id)?.context("run not found")?;
-        if !matches!(run.provider.as_str(), "codex" | "kiro" | "dsh") {
+        if let Some(control) = self.db.tmux_control_for_run(run_id)? {
+            let pane = self.tmux_pane(&control).await?;
+            self.tmux.interrupt(&pane).await?;
+            self.db.update_run_status(run_id, "interrupting")?;
+            self.emit(
+                run_id,
+                "control.submitted",
+                Some("tmux.send-keys"),
+                None,
+                json!({"action":"interrupt"}),
+                None,
+            )?;
+            return Ok(());
+        }
+        let adapter = providers::require(&run.provider)?;
+        if !adapter.descriptor().native_interrupt {
             return self
                 .signal(run_id, libc::SIGINT, "interrupt", "interrupting")
                 .await;
@@ -461,11 +650,7 @@ impl Supervisor {
         self.emit(
             run_id,
             "control.submitted",
-            Some(match run.provider.as_str() {
-                "kiro" => "kiro.session/cancel",
-                "dsh" => "dsh.session.cancel",
-                _ => "codex.turn/interrupt",
-            }),
+            Some(adapter.interrupt_event_type()),
             None,
             json!({"action":"interrupt","request_id":request_id}),
             None,
@@ -484,6 +669,37 @@ impl Supervisor {
         Ok(())
     }
     pub async fn signal(&self, run_id: &str, signal: i32, name: &str, status: &str) -> Result<()> {
+        if let Some(control) = self.db.tmux_control_for_run(run_id)? {
+            let pane = self.tmux_pane(&control).await?;
+            self.tmux.kill_pane(&pane).await?;
+            let terminal_status = if signal == libc::SIGKILL {
+                "killed"
+            } else {
+                "interrupted"
+            };
+            self.db.finish_run(
+                run_id,
+                terminal_status,
+                None,
+                Some(if signal == libc::SIGKILL {
+                    "SIGKILL"
+                } else {
+                    "SIGTERM"
+                }),
+                &Utc::now().to_rfc3339(),
+            )?;
+            self.db
+                .update_tmux_control_status(&control.id, "dead", None)?;
+            self.emit(
+                run_id,
+                &format!("run.{terminal_status}"),
+                Some("tmux"),
+                None,
+                json!({"action":name,"signal":signal}),
+                None,
+            )?;
+            return Ok(());
+        }
         let pgid = self
             .db
             .run(run_id)?
@@ -515,7 +731,18 @@ impl Supervisor {
         )?;
         Ok(())
     }
-    fn emit(
+
+    async fn tmux_pane(&self, control: &TmuxControl) -> Result<TmuxPane> {
+        let pane_id = control
+            .pane_id
+            .as_deref()
+            .context("tmux pane is unavailable")?;
+        self.tmux
+            .pane(control.socket_path.as_deref(), pane_id)
+            .await?
+            .context("tmux pane is no longer available")
+    }
+    pub(crate) fn emit(
         &self,
         run_id: &str,
         kind: &str,

@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.9",
+    "@tauri-apps/plugin-notification": "^2.3.2",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",

@@ -60,6 +60,12 @@ pub struct Run {
     pub finished_at: Option<String>,
     pub exit_code: Option<i32>,
     pub terminating_signal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux_access_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,18 +140,30 @@ pub struct ExternalInputRequest {
     #[serde(default = "default_input_delivery")]
     pub delivery: String,
     pub session_id: Option<String>,
+    pub project_id: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TmuxControlRequest {
+    pub project_id: String,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExternalQueuedInput {
     pub id: String,
     pub pid: u32,
+    pub project_id: String,
     pub session_id: Option<String>,
     pub message: String,
+    pub title: Option<String>,
     pub created_at: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<Run>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +189,10 @@ pub struct AdapterCapability {
     pub resume: bool,
     pub fork: bool,
     pub native_interrupt: bool,
+    pub queued_input: bool,
+    pub turn_rewind: bool,
+    pub provider_responses: bool,
+    pub runner: String,
     pub limitations: Vec<String>,
 }
 
@@ -229,7 +251,12 @@ pub struct DiscoveredAgent {
     pub managed_run_id: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
-    pub tmux_pane: Option<String>,
+    pub tty: Option<String>,
+    pub tmux_pane_id: Option<String>,
+    pub tmux_session_name: Option<String>,
+    pub tmux_access_command: Option<String>,
+    pub tmux_controlled: bool,
+    pub tmux_owned: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,6 +273,36 @@ pub struct ProviderSession {
     pub pid: Option<u32>,
     pub input_available: bool,
     pub input_transport: Option<String>,
+    pub tmux_name: Option<String>,
+    pub tmux_access_command: Option<String>,
+    pub tmux_controlled: bool,
+    pub tmux_owned: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TmuxControl {
+    pub id: String,
+    pub project_id: Option<String>,
+    pub run_id: Option<String>,
+    pub provider: String,
+    pub native_session_id: Option<String>,
+    pub transcript_path: Option<String>,
+    pub source_pid: u32,
+    pub source_pgid: i32,
+    pub cwd: String,
+    pub original_command: String,
+    pub socket_path: Option<String>,
+    pub pane_id: Option<String>,
+    pub session_name: Option<String>,
+    pub access_command: Option<String>,
+    pub owned: bool,
+    pub enabled: bool,
+    pub status: String,
+    pub error: Option<String>,
+    pub queue_state: String,
+    pub queue_state_at: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -269,6 +326,8 @@ pub struct FilesQuery {
 #[derive(Debug, Deserialize)]
 pub struct SessionsQuery {
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Deserialize)]

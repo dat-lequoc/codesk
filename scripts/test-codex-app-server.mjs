@@ -88,7 +88,7 @@ lines.on('line', (line) => {
 `, { mode: 0o755 })
 
 function startDaemon() {
-  daemon = spawn(binary, [], { env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODESK_DATA_DIR: dataDir, CODESK_PORT: String(port) }, stdio: 'ignore' })
+  daemon = spawn(binary, [], { env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODESK_DATA_DIR: dataDir, CODESK_PORT: String(port), CODESK_RUN_TRANSPORT: 'structured' }, stdio: 'ignore' })
 }
 async function stopDaemon() {
   if (!daemon || daemon.exitCode !== null) return

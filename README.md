@@ -50,7 +50,7 @@ Windows desktop and execution-host packaging are not supported yet. Codesk curre
 
 ## Supported harnesses
 
-Codesk brings **Codex, Claude Code, Kiro CLI, Pi, Antigravity, DeepSeek Harness**, and generic command-line agents into one interface.
+Codesk brings **Codex, Claude Code, OpenCode, Kiro CLI, Pi, Antigravity, DeepSeek Harness**, and generic command-line agents into one interface.
 
 Codex has first-class support through its app server: persistent sessions, live steering, queued turns, approvals and input requests, interruption, resume, fork, and conversation backtracking.
 

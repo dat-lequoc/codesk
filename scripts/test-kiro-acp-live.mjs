@@ -8,7 +8,7 @@ const port = 44000 + Math.floor(Math.random() * 1000)
 const base = `http://127.0.0.1:${port}`
 const daemon = spawn(join(process.cwd(), 'target/debug/codeskd'), [], {
   cwd: process.cwd(),
-  env: { ...process.env, CODESK_DATA_DIR: root, CODESK_PORT: String(port), RUST_LOG: 'warn' },
+  env: { ...process.env, CODESK_DATA_DIR: root, CODESK_PORT: String(port), RUST_LOG: 'warn', CODESK_RUN_TRANSPORT: 'structured' },
   stdio: ['ignore', 'pipe', 'pipe'],
 })
 

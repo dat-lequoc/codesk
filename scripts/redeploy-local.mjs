@@ -172,12 +172,20 @@ async function launchAndVerify() {
   if (!window) throw new Error('The rebuilt Codesk app launched without a window.')
   await waitForGateway()
   const screenshot = path.join(os.tmpdir(), `codesk-redeploy-${Date.now()}.png`)
-  await cua('get_window_state', {
-    pid: app.pid,
-    window_id: window.window_id,
-    screenshot_out_file: screenshot,
-  })
-  return { pid: app.pid, screenshot }
+  let lastTree = ''
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const snapshot = (await cua('get_window_state', {
+      pid: app.pid,
+      window_id: window.window_id,
+      screenshot_out_file: screenshot,
+    })).value
+    lastTree = snapshot.tree_markdown || ''
+    if (lastTree.includes('Project actions for') && !lastTree.includes('Load failed')) {
+      return { pid: app.pid, screenshot }
+    }
+    await wait(250)
+  }
+  throw new Error(`Codesk launched, but its project navigation did not finish loading. Last UI snapshot:\n${lastTree.slice(0, 4000)}`)
 }
 
 if (process.platform !== 'darwin') throw new Error('desktop:redeploy currently supports macOS only.')

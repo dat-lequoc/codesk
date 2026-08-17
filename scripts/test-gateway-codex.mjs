@@ -129,7 +129,7 @@ await fs.writeFile(path.join(clientData, 'client-state.json'), JSON.stringify({
 }, null, 2))
 
 function startDaemon() {
-  daemon = spawn(binary, [], { env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODESK_DATA_DIR: daemonData, CODESK_PORT: String(daemonPort) }, stdio: 'ignore' })
+  daemon = spawn(binary, [], { env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODESK_DATA_DIR: daemonData, CODESK_PORT: String(daemonPort), CODESK_RUN_TRANSPORT: 'structured' }, stdio: 'ignore' })
 }
 function startGateway() {
   gateway = spawn(process.execPath, ['server/index.mjs'], { cwd: root, env: { ...process.env, PORT: String(gatewayPort), CODESK_CLIENT_DATA_DIR: clientData, CODESK_DATA_DIR: daemonData, CODESK_DAEMON_BINARY: binary }, stdio: 'ignore' })
@@ -146,6 +146,8 @@ try {
   const navigation = await jsonRequest(gatewayBase, '/api/navigation')
   assert(navigation.projects.some((item) => item.id === project.id), 'fast navigation snapshot did not retain the project')
   const run = managedRun = await jsonRequest(gatewayBase, '/api/runs', { method: 'POST', body: JSON.stringify({ hostId: 'local', project_id: project.id, provider: 'codex', prompt: 'through gateway', workspace_mode: 'current_checkout' }) })
+  const immediateRunState = await jsonRequest(gatewayBase, '/api/state')
+  assert(immediateRunState.runs.some((item) => item.id === run.id), 'new run was missing from the immediate gateway state snapshot')
   await waitFor('gateway event stream', async () => (await jsonRequest(gatewayBase, `/api/runs/local/${run.id}/events?after=0`)).find((event) => event.kind === 'assistant.message' && event.payload.text === 'gateway:through gateway'))
 
   await stopOwned(gateway, 'server/index.mjs')
@@ -167,6 +169,8 @@ try {
 
   const resumed = managedRun = await jsonRequest(gatewayBase, '/api/runs', { method: 'POST', body: JSON.stringify({ hostId: 'local', project_id: project.id, provider: 'codex', title: 'Historical conversation', prompt: 'continued from history', workspace_mode: 'current_checkout', operation: 'resume', resume_session_id: 'historical-thread' }) })
   assert.equal(resumed.sessionId, 'historical-thread')
+  const immediateResumedState = await jsonRequest(gatewayBase, '/api/state')
+  assert(immediateResumedState.runs.some((item) => item.id === resumed.id), 'resumed run was missing from the immediate gateway state snapshot')
   await waitFor('historical session continuation', async () => (await jsonRequest(gatewayBase, `/api/runs/local/${resumed.id}/events?after=0`)).find((event) => event.kind === 'assistant.message' && event.payload.text === 'gateway:continued from history'))
   await jsonRequest(gatewayBase, `/api/runs/local/${resumed.id}/terminate`, { method: 'POST', body: '{}' })
   await waitFor('resumed runner cleanup', async () => (await jsonRequest(gatewayBase, '/api/state')).runs.find((item) => item.id === resumed.id && item.status === 'interrupted'))
