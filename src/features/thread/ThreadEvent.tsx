@@ -43,7 +43,8 @@ import { Bot, Clock3, FileDiff, FolderOpen, Pencil, ShieldAlert, Terminal } from
 import { api } from '../../api'
 import { activityText } from '../../lib/activity'
 import { conversationText, durationLabel } from '../../lib/format'
-import { providerIcon, providerName, providerUi } from '../../providerRegistry'
+import { providerName, providerUi } from '../../lib/providers'
+import { ProviderIcon } from '../../components/ProviderIcon'
 import type { ProviderSession, Run, RunEvent, SessionMessage } from '../../types'
 import { FileChangeCard } from './FileChangeCard'
 import { ConversationMessage, MarkdownContent } from './Markdown'
@@ -224,7 +225,7 @@ export function UsageCard({ event }: { event: RunEvent }) {
     return (
       <section className={usageCard}>
         <header className={usageHeader}>
-          {providerIcon('agy', 14)}
+          <ProviderIcon provider="agy" size={14} />
           <strong className="text-xs font-semibold">Antigravity usage</strong>
           <span className="ml-auto text-[10px] text-grass-400/70">Turn result</span>
         </header>
@@ -270,7 +271,7 @@ export function UsageCard({ event }: { event: RunEvent }) {
     return (
       <section className={usageCard}>
         <header className={usageHeader}>
-          {providerIcon('dsh', 14)}
+          <ProviderIcon provider="dsh" size={14} />
           <strong className="text-xs font-semibold">DeepSeek Harness usage</strong>
           <span className="ml-auto text-[10px] text-grass-400/70">Session snapshot</span>
         </header>
@@ -320,7 +321,7 @@ export function UsageCard({ event }: { event: RunEvent }) {
     return (
       <section className={usageCard}>
         <header className={usageHeader}>
-          {providerIcon('kiro', 14)}
+          <ProviderIcon provider="kiro" size={14} />
           <strong className="text-xs font-semibold">Kiro usage</strong>
           <span className="ml-auto text-[10px] text-grass-400/70">Unavailable</span>
         </header>
@@ -337,7 +338,7 @@ export function UsageCard({ event }: { event: RunEvent }) {
     return (
       <section className={usageCard}>
         <header className={usageHeader}>
-          {providerIcon('kiro', 14)}
+          <ProviderIcon provider="kiro" size={14} />
           <strong className="text-xs font-semibold">Kiro usage</strong>
           <span className="ml-auto text-[10px] text-grass-400/70">{plan || 'Plan snapshot'}</span>
         </header>
@@ -363,7 +364,7 @@ export function UsageCard({ event }: { event: RunEvent }) {
   return (
     <section className={usageCard}>
       <header className={usageHeader}>
-        {providerIcon('kiro', 14)}
+        <ProviderIcon provider="kiro" size={14} />
         <strong className="text-xs font-semibold">Kiro usage</strong>
         <span className="ml-auto text-[10px] text-grass-400/70">Session snapshot</span>
       </header>

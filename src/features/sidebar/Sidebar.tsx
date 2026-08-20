@@ -45,7 +45,8 @@ import {
   sessionNotificationKey,
 } from '../../lib/keys'
 import { loadExpandedProjects, saveStringSet } from '../../lib/storage'
-import { providerIcon, providerName } from '../../providerRegistry'
+import { providerName } from '../../lib/providers'
+import { ProviderIcon } from '../../components/ProviderIcon'
 import {
   budgetAfterArchive,
   budgetAfterShowMore,
@@ -95,7 +96,7 @@ export function SidebarHarness({ provider }: { provider: Provider['id'] }) {
       title={label}
       aria-label={label}
     >
-      {providerIcon(provider)}
+      <ProviderIcon provider={provider} />
     </span>
   )
 }

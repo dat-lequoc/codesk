@@ -4,7 +4,7 @@ import { AppDialog } from '../../components/ui/app-dialog'
 import { Button } from '../../components/ui/button'
 import { relative } from '../../lib/format'
 import { runNotificationKeys, sessionKey, sessionNotificationKey } from '../../lib/keys'
-import { providerName } from '../../providerRegistry'
+import { providerName } from '../../lib/providers'
 import type { Host, Project, ProviderSession, Run } from '../../types'
 
 const archivedRow =

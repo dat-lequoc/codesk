@@ -65,7 +65,8 @@ import {
   kiroSuggestionLimit,
 } from '../../lib/kiro'
 import type { SlashSuggestion } from '../../lib/kiro'
-import { providerIcon, providerName } from '../../providerRegistry'
+import { providerName } from '../../lib/providers'
+import { ProviderIcon } from '../../components/ProviderIcon'
 import type {
   ExternalQueuedInput,
   Host,
@@ -379,7 +380,7 @@ export function SessionScreen({
     <FilePreviewContext.Provider value={openFile}>
       <div className={cn(threadScreen, showEnvironment && threadScreenEnvOpen)}>
         <header className={threadHeader}>
-          {providerIcon(session.provider)}
+          <ProviderIcon provider={session.provider} />
           <strong>{session.title}</strong>
           {session.status === 'running' && (
             <span className={observedBadge}>
@@ -468,7 +469,7 @@ export function SessionScreen({
         {showEnvironment && (
           <EnvironmentPopover title="Environment" onClose={() => setShowEnvironment(false)}>
             <EnvironmentRow
-              icon={providerIcon(session.provider)}
+              icon={<ProviderIcon provider={session.provider} />}
               label="Provider"
               value={providerName(session.provider)}
             />

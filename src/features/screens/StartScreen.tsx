@@ -18,7 +18,8 @@ import {
 } from 'lucide-react'
 import { api } from '../../api'
 import { logoUrl } from '../../lib/app-state'
-import { harnessOrder, providerIcon } from '../../providerRegistry'
+import { harnessOrder } from '../../lib/providers'
+import { ProviderIcon } from '../../components/ProviderIcon'
 import type { AppState, DraftSession, GitContext, Host, Project, Run } from '../../types'
 import { ComposerFooter, ComposerFrame, ComposerInput } from '../composer/Composer'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -273,7 +274,7 @@ export function StartScreen({
                   }
                   onClick={() => setProvider(item.id)}
                 >
-                  {providerIcon(item.id)}
+                  <ProviderIcon provider={item.id} />
                   <span>{item.name}</span>
                   <i
                     className={cn(
@@ -378,7 +379,7 @@ export function StartScreen({
             </div>
             <span className="flex-1" />
             <small className="flex items-center gap-1.5 text-[10px] whitespace-nowrap text-muted [&>svg]:size-[13px]">
-              {selectedHarness && providerIcon(selectedHarness.id)}
+              {selectedHarness && <ProviderIcon provider={selectedHarness.id} />}
               {selectedHarness?.name || 'No harness available'}
             </small>
             <button

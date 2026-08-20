@@ -6,7 +6,7 @@ import { AppDialog } from '../../components/ui/app-dialog'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { StatusDot } from '../../components/ui/status-dot'
-import { providerIcon } from '../../providerRegistry'
+import { ProviderIcon } from '../../components/ProviderIcon'
 import type { DiscoveredAgent, Host } from '../../types'
 import { useEffect, useState } from 'react'
 export function ConnectionsDialog({
@@ -101,7 +101,7 @@ export function ConnectionsDialog({
                 className="mx-2.5 mb-2.5 flex h-[55px] items-center gap-2.5 rounded-lg bg-ink-850 px-2.5"
                 key={agent.id}
               >
-                {providerIcon(agent.provider)}
+                <ProviderIcon provider={agent.provider} />
                 <span className="min-w-0 flex-1">
                   <strong className="block text-xs">
                     {agent.provider} · PID {agent.pid}

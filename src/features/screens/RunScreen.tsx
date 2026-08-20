@@ -65,7 +65,7 @@ import type { ActivityEntry } from '../../lib/activity'
 import { active, coalesceStreamEvents, currentBranchEvents, pendingQueue } from '../../lib/events'
 import { kiroCommandContext, kiroSlashSuggestions, kiroSuggestionLimit } from '../../lib/kiro'
 import type { SlashSuggestion } from '../../lib/kiro'
-import { providerName, providerUi } from '../../providerRegistry'
+import { providerName, providerUi } from '../../lib/providers'
 import type { Host, Project, Provider, Run, RunEvent } from '../../types'
 import { ActivityInspectorPanel, ToolActivityGroup } from '../activity/Activity'
 import {

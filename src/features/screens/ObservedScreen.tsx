@@ -23,7 +23,8 @@ import { api } from '../../api'
 import { Spinner } from '../../components/ui/spinner'
 import { useLatest } from '../../hooks/useLatest'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
-import { providerIcon, providerName } from '../../providerRegistry'
+import { providerName } from '../../lib/providers'
+import { ProviderIcon } from '../../components/ProviderIcon'
 import type {
   DiscoveredAgent,
   ExternalQueuedInput,
@@ -134,7 +135,7 @@ export function ObservedScreen({
   return (
     <div className={threadScreen}>
       <header className={threadHeader}>
-        {providerIcon(agent.provider)}
+        <ProviderIcon provider={agent.provider} />
         <strong className={threadHeaderTitle}>{providerName(agent.provider)} session</strong>
         <span className={observedBadge}>
           <Spinner size={11} />
@@ -147,7 +148,7 @@ export function ObservedScreen({
       </header>
       <div className="mx-auto w-[min(720px,calc(100%-100px))] py-24">
         <div className="text-center [&>svg]:mx-auto [&>svg]:size-9 [&>svg]:text-fg-soft">
-          {providerIcon(agent.provider)}
+          <ProviderIcon provider={agent.provider} />
           <h1 className="mt-4 mb-2 text-2xl font-medium">
             {providerName(agent.provider)} is running
           </h1>
