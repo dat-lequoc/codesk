@@ -546,7 +546,8 @@ impl Supervisor {
                     if let Some(session) = session {
                         let _ = self.db.set_provider_session(&run.id, &session);
                     }
-                    if let Some(status) = providers::status_from_event(&run.provider, raw.as_ref()) {
+                    if let Some(status) = providers::status_from_event(&run.provider, raw.as_ref())
+                    {
                         let _ = self.db.update_run_status(&run.id, status);
                     }
                     let _ = self.emit(
@@ -673,9 +674,13 @@ impl Supervisor {
             }
             RunOutcome::Orphaned => {
                 if !is_terminal(self.db.run(&run.id).ok().flatten().as_ref()) {
-                    let _ =
-                        self.db
-                            .finish_run(&run.id, "orphaned", None, None, &Utc::now().to_rfc3339());
+                    let _ = self.db.finish_run(
+                        &run.id,
+                        "orphaned",
+                        None,
+                        None,
+                        &Utc::now().to_rfc3339(),
+                    );
                     let _ = self.emit(
                         &run.id,
                         "run.orphaned",

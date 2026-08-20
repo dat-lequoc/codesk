@@ -99,9 +99,9 @@ fn list_sync(
             .native_session_id
             .clone()
             .filter(|native_id| {
-                result
-                    .iter()
-                    .any(|item| item.provider == agent.provider && &item.native_session_id == native_id)
+                result.iter().any(|item| {
+                    item.provider == agent.provider && &item.native_session_id == native_id
+                })
             })
             .or_else(|| {
                 unique_active_session_id(project, &agent.provider, &result)
