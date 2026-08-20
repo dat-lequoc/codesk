@@ -30,6 +30,7 @@ export class Gateway {
     this.eventFailures = new Map()
     this.bootstrapping = new Set()
     this.bootstrapAttempts = new Map()
+    this.shuttingDown = false
     this.onDaemonEvent = null
     this.onHostOnline = null
   }
@@ -46,12 +47,39 @@ export class Gateway {
     const configuredBinary = process.env.CODESK_DAEMON_BINARY
     const binary = configuredBinary && fs.existsSync(configuredBinary) ? configuredBinary : path.resolve(process.cwd(), 'target/debug/codeskd')
     if (await this.health(host)) return this.markOnline(host)
-    const child = spawn(binary, [], { cwd: process.cwd(), env: { ...process.env, CODESK_PORT: String(host.daemonPort) }, stdio: ['ignore', 'pipe', 'pipe'] })
+    if (this.shuttingDown) return
+    // codeskd is ours, so it must not outlive this gateway. The watchdog it
+    // starts from CODESK_OWNER_PID covers the case where we are SIGKILLed and
+    // never get to run shutdown(). See ARCHITECTURE.md §6.5.
+    const child = spawn(binary, [], { cwd: process.cwd(), env: { ...process.env, CODESK_PORT: String(host.daemonPort), CODESK_OWNER_PID: String(process.pid) }, stdio: ['ignore', 'pipe', 'pipe'] })
     this.processes.set(host.id, child)
     child.stderr.on('data', (data) => { host.error = data.toString().trim().split('\n').at(-1) })
-    child.on('exit', () => { this.processes.delete(host.id); this.markOffline(host, 'Local daemon stopped'); setTimeout(() => this.ensureLocal(), 1500) })
-    for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (await this.health(host)) { this.markOnline(host); return } }
+    // Restarting a daemon we are deliberately stopping would undo shutdown, so
+    // the respawn is conditional on still being alive.
+    child.on('exit', () => { this.processes.delete(host.id); if (this.shuttingDown) return; this.markOffline(host, 'Local daemon stopped'); this.pollers.set('ensure:local', setTimeout(() => this.ensureLocal(), 1500)) })
+    for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (this.shuttingDown) return; if (await this.health(host)) { this.markOnline(host); return } }
     this.markOffline(host, host.error || 'Local daemon did not start')
+  }
+
+  /// Stop every process this gateway owns and stay stopped.
+  ///
+  /// Ordering matters: the flag goes up first so no exit handler or retry timer
+  /// can spawn a replacement while we are tearing down.
+  async shutdown() {
+    if (this.shuttingDown) return
+    this.shuttingDown = true
+    for (const timer of this.pollers.values()) clearTimeout(timer)
+    this.pollers.clear()
+    for (const socket of this.eventSockets.values()) socket.close()
+    this.eventSockets.clear()
+    // Covers the local codeskd and every `ssh -N` tunnel, so no forwarded port
+    // is left held open by an orphan.
+    const children = [...this.processes.values()]
+    for (const child of children) { try { child.kill('SIGTERM') } catch {} }
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline && children.some((child) => child.exitCode === null && child.signalCode === null)) await sleep(50)
+    for (const child of children) { if (child.exitCode === null && child.signalCode === null) { try { child.kill('SIGKILL') } catch {} } }
+    this.processes.clear()
   }
 
   host(id) { return this.store.state.hosts.find((host) => host.id === id) }
@@ -84,6 +112,7 @@ export class Gateway {
   async connect(hostId) {
     const host = this.host(hostId)
     if (!host || host.type !== 'ssh' || this.processes.has(host.id)) return
+    if (this.shuttingDown) return
     // An install is already in flight for this host; it reconnects when done.
     if (this.bootstrapping.has(host.id)) return
     host.status = 'connecting'; host.error = null; this.broadcast('host.updated', host)
@@ -92,6 +121,10 @@ export class Gateway {
     // reusing it makes the replacement tunnel fail even though the host is
     // reachable. Requests are already gated while the host is `connecting`.
     host.localPort = await freePort()
+    // Re-check after the await: shutdown() may have run while a port was being
+    // allocated, and spawning now would leave an ssh tunnel holding a forwarded
+    // port with nobody left to kill it.
+    if (this.shuttingDown) return
     this.store.save()
     // A multiplexed `ssh -N` may hand the forwarding request to an existing
     // ControlMaster and exit immediately. The forwarding can still exist, but
@@ -149,6 +182,7 @@ export class Gateway {
   }
 
   scheduleReconnect(hostId) {
+    if (this.shuttingDown) return
     const failures = (this.failures.get(hostId) || 0) + 1
     this.failures.set(hostId, failures)
     const delay = Math.min(60_000, 1000 * (2 ** Math.min(failures, 6))) * (0.85 + Math.random() * 0.3)
@@ -243,6 +277,7 @@ export class Gateway {
 
   connectEvents(hostId, delay = 0) {
     clearTimeout(this.pollers.get(`events:${hostId}`))
+    if (this.shuttingDown) return
     if (delay > 0) {
       this.pollers.set(`events:${hostId}`, setTimeout(() => this.connectEvents(hostId), delay))
       return
@@ -266,11 +301,22 @@ export class Gateway {
     })
     socket.on('error', () => socket.close())
     socket.on('close', async () => {
-      if (this.eventSockets.get(hostId) === socket) this.eventSockets.delete(hostId)
+      // A socket that is no longer the registered one for this host was closed
+      // deliberately — by closeEvents(), by shutdown(), or because a newer
+      // socket replaced it. Reconnecting here would resurrect a stream the
+      // caller just tore down, and since the reconnect re-arms itself the host
+      // would never actually go quiet.
+      if (this.eventSockets.get(hostId) !== socket) return
+      this.eventSockets.delete(hostId)
+      if (this.shuttingDown) return
       const current = this.host(hostId)
       if (!current || current.status !== 'online') return
-      if (!(await this.health(current))) {
-        if (current.type === 'local') { this.markOffline(current, 'Local daemon event stream disconnected'); setTimeout(() => this.ensureLocal(), 1200) }
+      const healthy = await this.health(current)
+      // shutdown() can land while the health probe is in flight; restarting the
+      // daemon here would undo the teardown that just happened.
+      if (this.shuttingDown) return
+      if (!healthy) {
+        if (current.type === 'local') { this.markOffline(current, 'Local daemon event stream disconnected'); this.pollers.set('ensure:local', setTimeout(() => this.ensureLocal(), 1200)) }
         else { const child = this.processes.get(current.id); if (child) child.kill('SIGTERM') }
         return
       }

@@ -256,6 +256,82 @@ app.get('/api/runs/:hostId/:id/events', async (req, res) => { try { res.json(awa
 app.post('/api/open-path', async (req,res)=>{try{const host=store.state.hosts.find((item)=>item.id===req.body.hostId);if(!host)throw new Error('Host not found');if(host.type!=='local')throw new Error('Opening remote folders requires an SSH-aware editor integration; the path remains available in Environment.');spawn('open',[req.body.path],{detached:true,stdio:'ignore'}).unref();res.json({ok:true})}catch(error){res.status(400).json({error:error.message})}})
 
 wss.on('connection', (socket) => socket.send(JSON.stringify({ type: 'ready', payload: { now: new Date().toISOString() } })))
+
+// --- Ownership -------------------------------------------------------------
+// This gateway exists to serve desktop app instances. When the last one is gone
+// there is nobody to serve, so it stops instead of lingering as a background
+// service that keeps a polling daemon alive. See ARCHITECTURE.md §6.5.
+//
+// An empty owner set means "unowned", not "abandoned": `npm start`, `npm run
+// dev`, and the test suite launch the gateway with no CODESK_OWNER_PID and must
+// keep running until signalled.
+const owners = new Set()
+const initialOwner = Number(process.env.CODESK_OWNER_PID)
+if (Number.isInteger(initialOwner) && initialOwner > 0) owners.add(initialOwner)
+
+function ownerAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM means the PID exists but belongs to another user, so it is alive.
+    return error.code === 'EPERM'
+  }
+}
+
+let stopping = false
+let ownerWatchdog
+async function stop(reason, code = 0) {
+  if (stopping) return
+  stopping = true
+  console.log(`Codesk client gateway stopping: ${reason}`)
+  clearInterval(ownerWatchdog)
+  await gateway.shutdown()
+  server.close()
+  for (const socket of wss.clients) socket.terminate()
+  process.exit(code)
+}
+
+ownerWatchdog = setInterval(() => {
+  if (stopping || owners.size === 0) return
+  for (const pid of owners) if (!ownerAlive(pid)) owners.delete(pid)
+  if (owners.size === 0) void stop('every owning Codesk app instance exited')
+}, 1000)
+// A watchdog is not a reason to keep the event loop alive on its own.
+ownerWatchdog.unref?.()
+
+app.post('/api/owners', (req, res) => {
+  const pid = Number(req.body?.pid)
+  if (!Number.isInteger(pid) || pid <= 0) return res.status(400).json({ error: 'A positive integer pid is required' })
+  if (!ownerAlive(pid)) return res.status(400).json({ error: `Process ${pid} is not running` })
+  // Refuse to be adopted by an app instance that did not start us. A gateway
+  // launched by hand (`npm start`, `npm run dev`) belongs to the developer's
+  // terminal, and quitting a desktop app must not take it down.
+  if (owners.size === 0) return res.status(409).json({ error: 'This gateway is unowned and will not adopt an owner' })
+  owners.add(pid)
+  res.json({ ok: true, owners: [...owners] })
+})
+
+app.post('/api/shutdown', (req, res) => {
+  const pid = Number(req.body?.pid)
+  if (Number.isInteger(pid) && pid > 0) {
+    // A pid identifies the caller as one of our owners. If it is not one, the
+    // request came from an app instance that never owned this gateway — a
+    // desktop app quitting next to a hand-started `npm run dev` — and taking the
+    // developer's server down with it would be wrong.
+    if (!owners.has(pid)) return res.json({ ok: true, stopped: false, owners: [...owners] })
+    // Releasing one owner is not a shutdown: a second app instance may still be
+    // using this gateway, and stopping here would kill its daemon too.
+    owners.delete(pid)
+    if (owners.size > 0) return res.json({ ok: true, stopped: false, owners: [...owners] })
+  }
+  res.json({ ok: true, stopped: true })
+  // Answer first so the caller's quit path is never blocked on our teardown.
+  void stop(pid ? `owner ${pid} exited` : 'shutdown was requested')
+})
+
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => void stop(`received ${signal}`))
+
 async function main() {
   await gateway.start()
   refreshStaleHosts()

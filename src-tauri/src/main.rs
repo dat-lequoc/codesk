@@ -32,7 +32,12 @@ fn main() {
                 }
             }
             let already_running = std::net::TcpStream::connect("127.0.0.1:4242").is_ok();
-            if !already_running && gateway.exists() {
+            if already_running {
+                // Another app instance owns this gateway. Register as an
+                // additional owner so it survives until the last window closes,
+                // and so quitting that other instance does not orphan our daemon.
+                post_gateway("/api/owners", &format!("{{\"pid\":{}}}", std::process::id()));
+            } else if gateway.exists() {
                 let log_dir = app.path().app_log_dir()?;
                 fs::create_dir_all(&log_dir)?;
                 let stdout = fs::OpenOptions::new()
@@ -44,6 +49,9 @@ fn main() {
                     .env("CODESK_DAEMON_BINARY", &daemon)
                     .env("CODESK_CLIENT_DATA_DIR", &client_data)
                     .env("PORT", "4242")
+                    // The gateway and the codeskd it spawns are ours: they must
+                    // exit when this process does. See ARCHITECTURE.md §6.5.
+                    .env("CODESK_OWNER_PID", std::process::id().to_string())
                     .stdin(Stdio::null())
                     .stdout(Stdio::from(stdout))
                     .stderr(Stdio::from(stderr))
@@ -51,8 +59,45 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Codesk desktop");
+        .build(tauri::generate_context!())
+        .expect("error while running Codesk desktop")
+        .run(|_app, event| {
+            // Immediate teardown on a graceful quit. The gateway's owner
+            // watchdog is the backstop for SIGKILL and crashes, but waiting a
+            // second for it would leave the daemon alive past the app's exit.
+            // Sending our pid releases only our ownership, so a second running
+            // instance keeps its gateway.
+            if matches!(event, tauri::RunEvent::Exit) {
+                post_gateway("/api/shutdown", &format!("{{\"pid\":{}}}", std::process::id()));
+            }
+        });
+}
+
+/// Best-effort POST to the local gateway with a short timeout.
+///
+/// Used on the app's exit path, so it must never block quitting: a gateway that
+/// is already gone, wedged, or not ours simply fails the connect and returns.
+fn post_gateway(route: &str, body: &str) {
+    use std::io::Write;
+    let Ok(address) = "127.0.0.1:4242".parse() else {
+        return;
+    };
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
+    else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
+    let request = format!(
+        "POST {route} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(request.as_bytes());
+    let _ = stream.flush();
+    // Give the gateway a moment to read the request before the socket closes.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    let mut discard = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut stream, &mut discard);
 }
 
 #[cfg(target_os = "macos")]
