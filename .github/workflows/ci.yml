@@ -25,6 +25,7 @@ jobs:
 
       - run: npm ci
       - run: npm run check
+      - run: npm run format:check
       - run: npm run build
       - run: cargo fmt --all -- --check
       - run: cargo test -p codeskd

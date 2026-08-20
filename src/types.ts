@@ -96,7 +96,17 @@ export type Run = {
   command?: string
   hostId: string
   cwd: string
-  status: 'queued' | 'starting' | 'running' | 'waiting_for_input' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'killed' | 'orphaned'
+  status:
+    | 'queued'
+    | 'starting'
+    | 'running'
+    | 'waiting_for_input'
+    | 'interrupting'
+    | 'completed'
+    | 'failed'
+    | 'interrupted'
+    | 'killed'
+    | 'orphaned'
   createdAt: string
   startedAt: string
   finishedAt?: string | null
@@ -205,7 +215,41 @@ export type SessionMessage = {
 }
 
 export type FileEntry = { name: string; path: string; is_dir: boolean; is_git: boolean }
-export type FileListing = { current_path: string; parent_path?: string | null; home_path: string; entries: FileEntry[] }
-export type FileContent = { path: string; name: string; content: string; mime_type?: string; data_url?: string; size: number; truncated: boolean }
-export type DiscoveredProject = { name: string; path: string; repo_root?: string | null; registered_project_id?: string | null }
-export type DiscoveredAgent = { id: string; provider: Provider['id']; pid: number; process_group_id: number; cwd?: string | null; command: string; managed_run_id?: string | null; native_session_id?: string | null; transcript_path?: string | null; tty?: string | null; tmux_pane_id?: string | null; tmux_session_name?: string | null; tmux_access_command?: string | null; tmux_controlled?: boolean; tmux_owned?: boolean }
+export type FileListing = {
+  current_path: string
+  parent_path?: string | null
+  home_path: string
+  entries: FileEntry[]
+}
+export type FileContent = {
+  path: string
+  name: string
+  content: string
+  mime_type?: string
+  data_url?: string
+  size: number
+  truncated: boolean
+}
+export type DiscoveredProject = {
+  name: string
+  path: string
+  repo_root?: string | null
+  registered_project_id?: string | null
+}
+export type DiscoveredAgent = {
+  id: string
+  provider: Provider['id']
+  pid: number
+  process_group_id: number
+  cwd?: string | null
+  command: string
+  managed_run_id?: string | null
+  native_session_id?: string | null
+  transcript_path?: string | null
+  tty?: string | null
+  tmux_pane_id?: string | null
+  tmux_session_name?: string | null
+  tmux_access_command?: string | null
+  tmux_controlled?: boolean
+  tmux_owned?: boolean
+}
