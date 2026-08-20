@@ -775,9 +775,7 @@ async fn tmux_control_worker(state: Arc<AppState>) {
                     .is_none_or(|entry| entry.attempts < RECOVERY_MAX_ATTEMPTS && entry.next <= now)
         };
         if last_recovery_scan.elapsed() >= Duration::from_secs(1)
-            && live
-                .iter()
-                .any(|control| recovery_due(control, &recovery))
+            && live.iter().any(|control| recovery_due(control, &recovery))
         {
             let _ = cached_agents(&state, true).await;
             last_recovery_scan = Instant::now();

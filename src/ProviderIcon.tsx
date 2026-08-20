@@ -1,1 +1,0 @@
-export { ProviderIcon } from './providerRegistry'

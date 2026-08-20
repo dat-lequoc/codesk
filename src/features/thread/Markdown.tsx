@@ -1,0 +1,92 @@
+import { Info } from 'lucide-react'
+import { useContext } from 'react'
+import ReactMarkdown from 'react-markdown'
+
+import { FilePreviewContext } from '../../hooks/useFilePreview'
+import { cn } from '../../lib/cn'
+import { conversationText } from '../../lib/format'
+import { externalHrefPattern, openExternalHref } from '../../lib/links'
+import { markdownPlugins } from '../../lib/markdown'
+export function MarkdownContent({ text, className = '' }: { text: string; className?: string }) {
+  const openFile = useContext(FilePreviewContext)
+  return (
+    <div className={cn('prose-codesk', className)}>
+      <ReactMarkdown
+        remarkPlugins={markdownPlugins}
+        components={{
+          a: ({ href = '', children, ...props }) => {
+            const isAnchor = href.startsWith('#')
+            const isExternal = externalHrefPattern.test(href) && !href.startsWith('file:')
+            if (!isAnchor && !isExternal && openFile)
+              return (
+                <a
+                  {...props}
+                  href={href}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    openFile(href)
+                  }}
+                >
+                  {children}
+                </a>
+              )
+            return (
+              <a
+                {...props}
+                href={href}
+                target={isExternal ? '_blank' : undefined}
+                rel={isExternal ? 'noreferrer' : undefined}
+                onClick={
+                  isExternal
+                    ? (event) => {
+                        event.preventDefault()
+                        void openExternalHref(href)
+                      }
+                    : undefined
+                }
+              >
+                {children}
+              </a>
+            )
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+export function ConversationMessage({
+  author,
+  text,
+  className = '',
+  children,
+}: {
+  author: 'user' | 'assistant'
+  text: string
+  className?: string
+  children?: React.ReactNode
+}) {
+  const content = conversationText(text)
+  if (!content.text && content.hadContext)
+    return (
+      <div className="mb-6 ml-auto flex w-max max-w-full items-center gap-[7px] rounded-lg border border-line-strong px-2.5 py-[7px] text-[11px] text-muted">
+        <Info size={13} />
+        Environment context attached
+      </div>
+    )
+  if (author === 'user')
+    return (
+      <div
+        className={cn(
+          'mb-10 ml-auto w-max max-w-[75%] rounded-2xl bg-ink-750 px-[15px] py-2.5 [&_p]:mb-0',
+          className,
+        )}
+      >
+        <MarkdownContent text={content.text} />
+        {children}
+      </div>
+    )
+  return <MarkdownContent text={content.text} className={cn('mb-[30px]', className)} />
+}
