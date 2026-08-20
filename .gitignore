@@ -13,3 +13,4 @@ Screenshot *.jpg
 main--*.js
 preload.js
 logo.jpg
+coverage/

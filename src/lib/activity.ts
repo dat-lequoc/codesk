@@ -261,7 +261,10 @@ export const liveActivityItems = (events: RunEvent[]): ActivityLedgerItem[] => {
   const items: ActivityLedgerItem[] = []
   for (const event of events) {
     if (event.kind === 'reasoning.message') {
-      items.push({ type: 'reasoning', id: event.event_id, text: String(event.payload.text || '') })
+      // The ledger renders every reasoning item it is given, so an empty one
+      // would show as a bubble containing nothing but the icon.
+      const text = String(event.payload.text || '')
+      if (text) items.push({ type: 'reasoning', id: event.event_id, text })
       continue
     }
     const entry = liveActivityEntry(event)
