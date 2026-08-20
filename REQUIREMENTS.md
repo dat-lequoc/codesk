@@ -48,7 +48,9 @@ This separation is a core invariant, not an implementation detail.
 - Every execution host runs a small Codesk daemon called `codeskd`.
 - For a local project, the desktop client may start and manage the local daemon automatically.
 - For a remote project, `codeskd` runs on the VPS and owns all remote runs.
-- The daemon must continue running independently of the desktop client.
+- A **remote** daemon must continue running independently of the desktop client.
+- The **local** daemon and the local gateway are owned by the desktop app: quitting the app must stop both. Nothing Codesk started on the user's machine may keep running, hold ports, or consume CPU after the app exits, including when the app is force-quit or crashes.
+- Losing the local daemon must not lose work. In-flight runs keep their own detached process groups and durable output journals, so the next launch reattaches them and the user resumes where they left off (see [ARCHITECTURE.md](ARCHITECTURE.md) §6.4).
 - The daemon must supervise process groups, persist run metadata, append durable event logs, and expose a versioned control protocol.
 - The daemon must recover its run inventory after it restarts.
 - Where possible, the daemon must determine whether previously supervised processes are still alive and reattach their status.

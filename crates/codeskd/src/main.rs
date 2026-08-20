@@ -12,6 +12,7 @@ mod worktrees;
 
 use anyhow::Context;
 use std::{
+    collections::HashMap,
     env,
     net::SocketAddr,
     path::PathBuf,
@@ -70,6 +71,59 @@ const TMUX_WORKER_ACTIVE_INTERVAL: Duration = Duration::from_millis(350);
 /// the next tick picks it up, so the only cost of the longer wait is how soon
 /// after that a newly controlled pane starts being serviced.
 const TMUX_WORKER_IDLE_INTERVAL: Duration = Duration::from_millis(2_000);
+/// How often an owned daemon confirms its owner is still alive.
+const OWNER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Attempts before a control stops trying to recover its session metadata.
+///
+/// Recovery can legitimately never succeed — a pane the user started outside
+/// Codesk may have no provider transcript to find. Retrying it on every tick
+/// forced a full `ps` process scan once a second for the life of the daemon, so
+/// attempts back off and then stop. The control keeps working without the
+/// metadata; only the recovery attempt is abandoned.
+const RECOVERY_MAX_ATTEMPTS: u32 = 8;
+const RECOVERY_FIRST_BACKOFF: Duration = Duration::from_secs(2);
+const RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Retry state for one control's session-metadata recovery.
+struct RecoveryBackoff {
+    attempts: u32,
+    next: Instant,
+}
+
+/// Exit when the process that started this daemon is gone.
+///
+/// A locally spawned `codeskd` belongs to the desktop app that started it and
+/// must not outlive it; see ARCHITECTURE.md §6.5. The gateway normally stops us
+/// directly, so this is the backstop for the cases it cannot cover: the gateway
+/// being `SIGKILL`ed, or the whole app being force-quit.
+///
+/// Without `CODESK_OWNER_PID` the daemon is unowned and this returns
+/// immediately, which is what standalone runs rely on: `npm start`, the test
+/// suite, and a remote daemon under systemd.
+async fn owner_watchdog() {
+    let Some(owner) = env::var("CODESK_OWNER_PID")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .filter(|pid| *pid > 1)
+    else {
+        return;
+    };
+    tracing::info!(owner, "daemon lifetime is bound to its owner");
+    loop {
+        tokio::time::sleep(OWNER_POLL_INTERVAL).await;
+        // Signal 0 checks for existence without delivering anything. EPERM means
+        // the PID is alive under another user, so only a genuine "no such
+        // process" counts as the owner being gone.
+        let alive = unsafe { libc::kill(owner, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if !alive {
+            tracing::info!(owner, "owner exited; shutting down");
+            // Runs are detached process groups with durable journals, so exiting
+            // here loses no work: the next launch reattaches them.
+            std::process::exit(0);
+        }
+    }
+}
 type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
 fn api_error(error: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -125,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
         tmux,
     });
     tokio::spawn(tmux_control_worker(state.clone()));
+    tokio::spawn(owner_watchdog());
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/capabilities", get(capabilities))
@@ -688,49 +743,62 @@ async fn tmux_control_worker(state: Arc<AppState>) {
     let mut last_recovery_scan = Instant::now()
         .checked_sub(Duration::from_secs(2))
         .unwrap_or_else(Instant::now);
+    let mut recovery: HashMap<String, RecoveryBackoff> = HashMap::new();
     loop {
-        let enabled = state
+        let live = state
             .db
             .tmux_controls()
             .unwrap_or_default()
             .into_iter()
-            .filter(|control| control.enabled)
+            // `enabled` is the user's intent and survives the pane, so it alone
+            // does not mean there is work to do. Only the two statuses this loop
+            // acts on below are actionable; `dead` and `failed` are terminal.
+            // Including them kept a table full of finished controls in the fast
+            // 350ms cadence forever, which is a measurable idle CPU cost.
+            .filter(|control| {
+                control.enabled && matches!(control.status.as_str(), "active" | "waiting_idle")
+            })
             .collect::<Vec<_>>();
-        if enabled.is_empty() {
+        if live.is_empty() {
             // Nothing is supervised, so skip the pane snapshot entirely and stop
             // waking several times a second just to re-read an empty table.
+            recovery.clear();
             tokio::time::sleep(TMUX_WORKER_IDLE_INTERVAL).await;
             continue;
         }
+        recovery.retain(|id, _| live.iter().any(|control| &control.id == id));
+        let now = Instant::now();
+        let recovery_due = |control: &TmuxControl, recovery: &HashMap<String, RecoveryBackoff>| {
+            needs_metadata(control)
+                && recovery
+                    .get(&control.id)
+                    .is_none_or(|entry| entry.attempts < RECOVERY_MAX_ATTEMPTS && entry.next <= now)
+        };
         if last_recovery_scan.elapsed() >= Duration::from_secs(1)
-            && enabled.iter().any(|control| {
-                control.status == "active"
-                    && (control.transcript_path.is_none() || control.native_session_id.is_none())
-            })
+            && live
+                .iter()
+                .any(|control| recovery_due(control, &recovery))
         {
             let _ = cached_agents(&state, true).await;
             last_recovery_scan = Instant::now();
         }
         // One pane listing per distinct socket for the whole tick, shared by
         // every control below instead of spawning `tmux` once per control.
-        let sockets = enabled
+        let sockets = live
             .iter()
             .map(|control| control.socket_path.clone())
             .collect::<Vec<_>>();
         let panes = state.tmux.pane_snapshot(&sockets).await;
-        for mut control in enabled {
-            if control.status == "active"
-                && (control.transcript_path.is_none() || control.native_session_id.is_none())
-            {
+        let mut serviceable = false;
+        for mut control in live {
+            if recovery_due(&control, &recovery) {
                 match recover_tmux_control_metadata(&state, &control).await {
-                    Ok(Some(recovered)) => control = recovered,
-                    Ok(None) => {}
-                    Err(error) => tracing::warn!(
-                        control_id = %control.id,
-                        run_id = ?control.run_id,
-                        %error,
-                        "tmux session metadata recovery is still pending"
-                    ),
+                    Ok(Some(recovered)) => {
+                        control = recovered;
+                        recovery.remove(&control.id);
+                    }
+                    Ok(None) => defer_recovery(&mut recovery, &control.id, None),
+                    Err(error) => defer_recovery(&mut recovery, &control.id, Some(&error)),
                 }
             }
             let result = if control.status == "waiting_idle" {
@@ -747,8 +815,73 @@ async fn tmux_control_worker(state: Arc<AppState>) {
                     Some(&error.to_string()),
                 );
             }
+            serviceable |= is_serviceable(&control);
         }
-        tokio::time::sleep(TMUX_WORKER_ACTIVE_INTERVAL).await;
+        // A control that cannot act needs nothing from this loop but liveness
+        // detection, and noticing a closed pane a second later is harmless. Only
+        // pay the fast cadence — a `tmux` process per socket per tick — when some
+        // control can actually make progress on it.
+        tokio::time::sleep(if serviceable {
+            TMUX_WORKER_ACTIVE_INTERVAL
+        } else {
+            TMUX_WORKER_IDLE_INTERVAL
+        })
+        .await;
+    }
+}
+
+/// Whether this control has work the fast cadence can actually advance.
+///
+/// `waiting_idle` runs a state machine with a sub-second threshold, so it always
+/// qualifies. An `active` control only qualifies once it has a transcript to read
+/// from: without one [`process_tmux_queue`] returns before doing anything, so
+/// polling it three times a second only spawns `tmux` to no purpose.
+fn is_serviceable(control: &TmuxControl) -> bool {
+    match control.status.as_str() {
+        "waiting_idle" => true,
+        "active" => control.transcript_path.is_some(),
+        _ => false,
+    }
+}
+
+/// True when a control is active but still missing the metadata needed to read
+/// its session.
+fn needs_metadata(control: &TmuxControl) -> bool {
+    control.status == "active"
+        && (control.transcript_path.is_none() || control.native_session_id.is_none())
+}
+
+/// Record a failed recovery attempt and push the next one further out.
+fn defer_recovery(
+    recovery: &mut HashMap<String, RecoveryBackoff>,
+    control_id: &str,
+    error: Option<&anyhow::Error>,
+) {
+    let entry = recovery
+        .entry(control_id.to_string())
+        .or_insert_with(|| RecoveryBackoff {
+            attempts: 0,
+            next: Instant::now(),
+        });
+    entry.attempts += 1;
+    let backoff = RECOVERY_FIRST_BACKOFF
+        .saturating_mul(1 << entry.attempts.min(8))
+        .min(RECOVERY_MAX_BACKOFF);
+    entry.next = Instant::now() + backoff;
+    if let Some(error) = error {
+        tracing::warn!(
+            control_id = %control_id,
+            attempts = entry.attempts,
+            %error,
+            "tmux session metadata recovery is still pending"
+        );
+    }
+    if entry.attempts == RECOVERY_MAX_ATTEMPTS {
+        tracing::warn!(
+            control_id = %control_id,
+            attempts = entry.attempts,
+            "giving up on tmux session metadata recovery; the control keeps running without it"
+        );
     }
 }
 

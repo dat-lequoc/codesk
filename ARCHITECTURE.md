@@ -292,6 +292,29 @@ The daemon reads running records and validates process identity using PID plus a
 
 For robust output recovery across daemon restart, the launch shim writes stdout/stderr to daemon-owned journal files in addition to streaming them. The restarted daemon resumes from file offsets.
 
+### 6.5 Local process lifetime is owned by the app
+
+Everything Codesk starts on the user's own machine — the gateway and the local `codeskd` — dies with the desktop app. There is no LaunchAgent and no background service. The app is the only reason a local daemon exists, so when the app is gone the daemon is garbage.
+
+Ownership is a PID chain, established at spawn and verified continuously:
+
+```text
+Codesk.app (owner)
+  └── codesk-gateway   CODESK_OWNER_PID = app pid
+        └── codeskd     CODESK_OWNER_PID = gateway pid
+```
+
+- Each spawned process receives `CODESK_OWNER_PID` and polls that PID once per second with a signal-0 liveness probe. This costs one syscall per second and spawns nothing. When the owner is gone, the process shuts itself down.
+- When the app finds a gateway already listening on 4242 it does not spawn a second one; it registers itself as an owner with `POST /api/owners`. The gateway tracks a set of owner PIDs and exits when the set becomes empty, so the last window to close takes the daemon down and a second app instance never orphans the first one's daemon.
+- On a graceful quit the app calls `POST /api/shutdown` from its Tauri exit hook, so teardown is immediate instead of waiting up to a second for the watchdog. The request carries the app's PID and only releases that one ownership; a PID that does not own this gateway is ignored entirely, so quitting a packaged app next to a hand-started `npm run dev` never stops the developer's server. The watchdog exists for the cases a hook cannot cover: `SIGKILL`, force-quit, and panics.
+- The gateway's local-daemon respawn timer is suppressed once shutdown begins. Without this, tearing down `codeskd` would simply resurrect it 1.5 s later.
+- Shutdown covers every child the gateway owns, including SSH tunnels for remote hosts, so no `ssh -N` process is left holding a forwarded port.
+- **Unowned mode is preserved.** With no `CODESK_OWNER_PID` in the environment, no watchdog starts and the process runs until signalled. This is what `npm run dev`, `npm start`, and the test suite rely on, and it is how a remote `codeskd` under systemd runs.
+
+This is scoped to local processes only. A remote `codeskd` is a service on the VPS with its own lifecycle, and per REQUIREMENTS.md §3.2 remote runs must not depend on a process owned by the desktop application.
+
+Killing the local daemon is safe because it is not where the work lives. Runs execute in their own detached process groups, output is journaled to disk, and stream offsets are committed to SQLite, so the next launch reattaches live runs and replays their output by the mechanism in §6.4. Users resume where they left off.
+
 ## 7. Persistence
 
 Per execution host:
@@ -382,7 +405,8 @@ During all disconnected states, the UI retains the daemon's last known run state
 
 ## 10. Deployment and service management
 
-Local macOS daemon: user LaunchAgent.  
+Local macOS daemon: owned by the desktop app, not a LaunchAgent. A LaunchAgent (or any other autostart mechanism) is deliberately rejected for the local daemon, because it outlives the app and leaves a polling daemon burning CPU on a machine whose user has closed Codesk. See §6.5.
+
 Remote Linux daemon: systemd user service where available, with a documented foreground fallback.
 
 Remote bootstrap flow:
@@ -435,3 +459,5 @@ The daemon upgrade must not kill active agent runs. If a restart is required, it
 ## 12. Architecture decision summary
 
 The essential decision is that Codesk is a distributed supervisor, not an SSH terminal wrapper. A remote project is executed and supervised on its VPS. The desktop application can disappear at any time without changing the execution state. Reconnection restores the view by querying durable daemon state and replaying sequenced events. All steering and interrupt actions travel back to the daemon that owns the real process.
+
+That independence is a statement about *remote* execution hosts. On the user's own machine the opposite rule applies: the gateway and local `codeskd` are owned by the app and exit with it (§6.5). Durability there comes from detached run process groups and on-disk journals, not from a daemon that outlives the window — so quitting Codesk leaves nothing running, and reopening it reattaches the work.
