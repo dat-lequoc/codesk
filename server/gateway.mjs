@@ -28,6 +28,8 @@ export class Gateway {
     this.failures = new Map()
     this.eventSockets = new Map()
     this.eventFailures = new Map()
+    this.bootstrapping = new Set()
+    this.bootstrapAttempts = new Map()
     this.onDaemonEvent = null
     this.onHostOnline = null
   }
@@ -65,7 +67,7 @@ export class Gateway {
 
   markOnline(host) {
     const changed = host.status !== 'online'
-    host.status = 'online'; host.error = null; host.lastSeen = new Date().toISOString(); this.failures.set(host.id, 0); this.store.save()
+    host.status = 'online'; host.error = null; host.bootstrapError = null; host.lastSeen = new Date().toISOString(); this.failures.set(host.id, 0); this.bootstrapAttempts.delete(host.id); this.store.save()
     if (changed) this.broadcast('host.updated', host)
     this.connectEvents(host.id)
     this.onHostOnline?.(host.id)
@@ -82,6 +84,8 @@ export class Gateway {
   async connect(hostId) {
     const host = this.host(hostId)
     if (!host || host.type !== 'ssh' || this.processes.has(host.id)) return
+    // An install is already in flight for this host; it reconnects when done.
+    if (this.bootstrapping.has(host.id)) return
     host.status = 'connecting'; host.error = null; this.broadcast('host.updated', host)
     // Always allocate a fresh listener. A prior SSH control socket or a tunnel
     // lost during a network transition can leave the persisted port occupied;
@@ -103,22 +107,65 @@ export class Gateway {
     child.stderr.on('data', (data) => { error = data.toString().trim().split('\n').at(-1) || error })
     child.on('exit', () => {
       this.processes.delete(host.id)
-      const failures = (this.failures.get(host.id) || 0) + 1; this.failures.set(host.id, failures)
       this.markOffline(host, error || 'SSH tunnel disconnected')
-      const delay = Math.min(60_000, 1000 * (2 ** Math.min(failures, 6))) * (0.85 + Math.random() * 0.3)
-      this.pollers.set(`connect:${host.id}`, setTimeout(() => this.connect(host.id), delay))
+      this.scheduleReconnect(host.id)
     })
     for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (await this.health(host)) return this.markOnline(host); if (child.exitCode !== null) return }
     child.kill('SIGTERM')
-    host.error = `SSH connected, but codeskd is not responding on VPS port ${host.daemonPort || 4243}. Install/start the daemon, then reconnect.`
+    // SSH itself is fine, so the host is reachable and only the daemon is
+    // missing or stopped. Provision it here instead of asking the user to run
+    // an install by hand: connecting a host is the moment they expressed the
+    // intent, and a remote with no codeskd is the normal first-connect state.
+    if (await this.autoBootstrap(host)) return
+    host.error = `SSH connected, but codeskd is not responding on VPS port ${host.daemonPort || 4243}. ${host.bootstrapError || 'Install/start the daemon, then reconnect.'}`
     this.store.save(); this.broadcast('host.updated', host)
+  }
+
+  // Returns true when an install ran (or is running) and a reconnect is
+  // already scheduled, so the caller must not overwrite the host state.
+  async autoBootstrap(host) {
+    if (this.bootstrapping.has(host.id)) return true
+    const attempts = this.bootstrapAttempts.get(host.id) || 0
+    if (attempts >= 2) return false
+    this.bootstrapping.add(host.id)
+    this.bootstrapAttempts.set(host.id, attempts + 1)
+    clearTimeout(this.pollers.get(`connect:${host.id}`))
+    host.status = 'connecting'; host.error = `Installing codeskd on ${host.name}…`; host.bootstrapError = null
+    this.store.save(); this.broadcast('host.updated', host)
+    try {
+      this.lastBootstrap = await this.bootstrapRemote(host.id, { reconnect: false })
+      return true
+    } catch (error) {
+      host.bootstrapError = `Automatic install failed: ${error.message}`
+      // autoBootstrap consumed the retry timer the tunnel exit scheduled, so a
+      // failed install must schedule its own; otherwise the host stays offline
+      // until someone reconnects it by hand.
+      this.scheduleReconnect(host.id)
+      return false
+    } finally {
+      this.bootstrapping.delete(host.id)
+      if (!host.bootstrapError) this.reconnect(host.id)
+    }
+  }
+
+  scheduleReconnect(hostId) {
+    const failures = (this.failures.get(hostId) || 0) + 1
+    this.failures.set(hostId, failures)
+    const delay = Math.min(60_000, 1000 * (2 ** Math.min(failures, 6))) * (0.85 + Math.random() * 0.3)
+    clearTimeout(this.pollers.get(`connect:${hostId}`))
+    this.pollers.set(`connect:${hostId}`, setTimeout(() => this.connect(hostId), delay))
   }
 
   async inspectRemote(hostId) {
     const host=this.host(hostId); if(!host||host.type!=='ssh') throw new Error('SSH host not found')
-    const script='set -e; printf "os="; uname -s; printf "arch="; uname -m; printf "daemon="; command -v codeskd || true; printf "systemd_user="; command -v systemctl >/dev/null && echo yes || echo no'
-    const {stdout}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,'sh','-lc',script],{timeout:12000})
-    return Object.fromEntries(stdout.trim().split('\n').map((line)=>line.split(/=(.*)/s).slice(0,2)))
+    // Each field needs its own line: a bare `printf "daemon="` with no match
+    // ran straight into the next field, so an unprovisioned host reported a
+    // bogus daemon path and skipped installation.
+    const script='set -e; echo "os=$(uname -s)"; echo "arch=$(uname -m)"; echo "daemon=$(command -v codeskd || true)"; echo "systemd_user=$(command -v systemctl >/dev/null && echo yes || echo no)"'
+    const {stdout}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(script)],{timeout:20000})
+    const inspection = Object.fromEntries(stdout.trim().split('\n').map((line)=>line.split(/=(.*)/s).slice(0,2)))
+    if (!inspection.daemon?.startsWith('/')) inspection.daemon = ''
+    return inspection
   }
 
   async sshAliases() {
@@ -136,30 +183,56 @@ export class Gateway {
     return [...aliases].sort((a,b)=>a.localeCompare(b))
   }
 
-  async bootstrapRemote(hostId, { artifactUrl, localBinaryPath } = {}) {
+  async bootstrapRemote(hostId, { artifactUrl, localBinaryPath, reconnect = true } = {}) {
     const host=this.host(hostId); if(!host||host.type!=='ssh') throw new Error('SSH host not found')
     const inspection = await this.inspectRemote(hostId)
-    if (inspection.daemon) { this.reconnect(hostId); return { ok:true, alreadyInstalled:true, inspection } }
+    if (inspection.daemon) {
+      // Binary is there but nothing is listening: (re)start the service.
+      await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(`set -eu; ${shellQuote(inspection.daemon)} install ${Number(host.daemonPort||4243)}`)],{timeout:60000,maxBuffer:1024*1024})
+      if (reconnect) this.reconnect(hostId)
+      return { ok:true, alreadyInstalled:true, inspection }
+    }
     artifactUrl ||= releaseArtifactUrl(inspection)
-    if (artifactUrl) return this.installRemote(hostId, artifactUrl)
-    if (!localBinaryPath) throw new Error(`codeskd is missing on ${host.name}. Provide a ${inspection.os}/${inspection.arch} daemon artifact.`)
-    const localOs = process.platform === 'darwin' ? 'Darwin' : process.platform === 'linux' ? 'Linux' : process.platform
-    const localArch = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x86_64' : process.arch
-    if (inspection.os !== localOs || inspection.arch !== localArch) throw new Error(`Local daemon is ${localOs}/${localArch}, but ${host.name} requires ${inspection.os}/${inspection.arch}. Provide a compatible artifact URL.`)
+    if (artifactUrl) return this.installRemote(hostId, artifactUrl, { reconnect })
+    const binary = localBinaryPath && fs.existsSync(localBinaryPath) && matchesLocalPlatform(inspection)
+      ? localBinaryPath
+      : localArtifactFor(inspection) || await this.seedFromPeer(inspection)
+    if (!binary) throw new Error(`codeskd is missing on ${host.name} and no ${inspection.os}/${inspection.arch} daemon artifact is available. Set CODESK_DAEMON_RELEASE_BASE_URL, drop a binary at dist/codeskd-${inspection.os}-${inspection.arch}, or connect another ${inspection.os}/${inspection.arch} host that already runs codeskd.`)
     const remoteTemp = `/tmp/codeskd-${Date.now()}`
-    await execFileAsync('scp',[...sshOptions,localBinaryPath,`${host.sshAlias}:${remoteTemp}`],{timeout:60000,maxBuffer:1024*1024})
+    await execFileAsync('scp',[...sshOptions,binary,`${host.sshAlias}:${remoteTemp}`],{timeout:120000,maxBuffer:1024*1024})
     const command=`set -eu; chmod +x ${shellQuote(remoteTemp)}; ${shellQuote(remoteTemp)} install ${Number(host.daemonPort||4243)}; rm -f ${shellQuote(remoteTemp)}`
-    const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,'sh','-lc',command],{timeout:60000,maxBuffer:1024*1024})
-    this.reconnect(hostId)
-    return {ok:true,stdout,stderr,inspection}
+    const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(command)],{timeout:60000,maxBuffer:1024*1024})
+    if (reconnect) this.reconnect(hostId)
+    return {ok:true,stdout,stderr,inspection,binary}
   }
 
-  async installRemote(hostId, artifactUrl) {
+  // Copies codeskd from an already-provisioned host of the same os/arch. This
+  // keeps first connects working before signed release artifacts exist: the
+  // machine that can reach both hosts is this gateway, so the hop goes through
+  // a local cache file that later installs reuse.
+  async seedFromPeer(inspection) {
+    const cached = localArtifactFor(inspection)
+    if (cached) return cached
+    for (const peer of this.store.state.hosts) {
+      if (peer.type !== 'ssh' || peer.status !== 'online') continue
+      let peerInfo
+      try { peerInfo = await this.inspectRemote(peer.id) } catch { continue }
+      if (!peerInfo.daemon || peerInfo.os !== inspection.os || peerInfo.arch !== inspection.arch) continue
+      const target = artifactPath(inspection)
+      await fs.promises.mkdir(path.dirname(target), { recursive: true })
+      await execFileAsync('scp',[...sshOptions,`${peer.sshAlias}:${peerInfo.daemon}`,target],{timeout:120000,maxBuffer:1024*1024})
+      await fs.promises.chmod(target, 0o755)
+      return target
+    }
+    return ''
+  }
+
+  async installRemote(hostId, artifactUrl, { reconnect = true } = {}) {
     const host=this.host(hostId); if(!host||host.type!=='ssh') throw new Error('SSH host not found')
     if(!artifactUrl) throw new Error('A codeskd artifact URL is required until release artifacts are configured')
     const command=`set -eu; tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT; curl -fL ${shellQuote(artifactUrl)} -o "$tmp"; chmod +x "$tmp"; "$tmp" install ${Number(host.daemonPort||4243)}`
-    const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,'sh','-lc',command],{timeout:60000,maxBuffer:1024*1024})
-    this.reconnect(hostId)
+    const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(command)],{timeout:60000,maxBuffer:1024*1024})
+    if (reconnect) this.reconnect(hostId)
     return {ok:true,stdout,stderr}
   }
 
@@ -228,5 +301,18 @@ export class Gateway {
   }
 }
 
+// A login shell would source the remote user's rc files, which frequently
+// contain bash-only syntax that fails under a POSIX /bin/sh. Run a plain
+// shell and extend PATH ourselves so `codeskd` in ~/.local/bin is still found.
+function remoteShell(script){return `sh -c ${shellQuote(`PATH="$HOME/.local/bin:$HOME/bin:$PATH"; export PATH; ${script}`)}`}
 function shellQuote(value){return `'${String(value).replaceAll("'","'\\''")}'`}
+function localPlatform(){return {os: process.platform === 'darwin' ? 'Darwin' : process.platform === 'linux' ? 'Linux' : process.platform, arch: process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x86_64' : process.arch}}
+function matchesLocalPlatform(inspection){const local=localPlatform();return inspection.os===local.os&&inspection.arch===local.arch}
+function artifactPath(inspection){return path.join(process.env.CODESK_ARTIFACT_DIR || path.join(os.homedir(),'.codesk','artifacts'),`codeskd-${inspection.os}-${inspection.arch}`)}
+function localArtifactFor(inspection){
+  const candidates=[artifactPath(inspection),path.resolve(process.cwd(),'dist',`codeskd-${inspection.os}-${inspection.arch}`)]
+  if(inspection.os==='Linux')candidates.push(path.resolve(process.cwd(),`target/${inspection.arch}-unknown-linux-musl/release/codeskd`),path.resolve(process.cwd(),`target/${inspection.arch}-unknown-linux-gnu/release/codeskd`))
+  if(matchesLocalPlatform(inspection))candidates.push(path.resolve(process.cwd(),'target/release/codeskd'),path.resolve(process.cwd(),'target/debug/codeskd'))
+  return candidates.find((candidate)=>fs.existsSync(candidate))||''
+}
 function releaseArtifactUrl(inspection){const base=process.env.CODESK_DAEMON_RELEASE_BASE_URL;if(!base)return '';const arch=inspection.arch==='x86_64'?'x86_64':inspection.arch==='aarch64'||inspection.arch==='arm64'?'aarch64':inspection.arch;return `${base.replace(/\/$/,'')}/codeskd-${inspection.os}-${arch}`}

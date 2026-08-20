@@ -14,7 +14,7 @@ use crate::{
     sessions,
 };
 
-use super::{ProviderAdapter, ProviderDescriptor, RunnerKind, support};
+use super::{ModelPage, ProviderAdapter, ProviderDescriptor, RunnerKind, TerminalStatus, support};
 
 pub(crate) struct Kiro;
 pub(crate) static ADAPTER: Kiro = Kiro;
@@ -91,6 +91,34 @@ impl ProviderAdapter for Kiro {
             args,
             session_id: request.resume_session_id.clone(),
         }))
+    }
+
+    fn keep_terminal_parent_shell(&self) -> bool {
+        true
+    }
+
+    fn terminal_ready(&self, screen: &str) -> bool {
+        screen.contains("kiro_default")
+            || screen.contains("ask a question or describe a task")
+            || screen.contains("Type /usage")
+    }
+
+    fn terminal_overlay_command(&self, message: &str) -> Option<&'static str> {
+        // `/usage` and `/context` render a full-screen panel that Kiro closes
+        // with Escape; neither writes anything to the session transcript.
+        matches!(message.trim(), "/usage" | "/context").then_some("Escape")
+    }
+
+    fn parse_terminal_usage(&self, screen: &str) -> Option<Value> {
+        parse_usage_screen(screen)
+    }
+
+    fn parse_terminal_status(&self, screen: &str) -> Option<TerminalStatus> {
+        parse_status_line(screen)
+    }
+
+    fn parse_model_page(&self, screen: &str) -> ModelPage {
+        parse_model_page(screen)
     }
 
     fn encode_input(
@@ -204,6 +232,154 @@ impl HistoryState {
             .map(|value| value.to_rfc3339())
             .unwrap_or_default()
     }
+}
+
+/// Kiro renders `/usage` as a terminal panel, not a transcript entry. Parse the
+/// captured pane so a tmux-controlled run still reports usage to the UI.
+pub(crate) fn parse_usage_screen(screen: &str) -> Option<Value> {
+    let start = screen.rfind("Estimated Usage")?;
+    let panel = &screen[start..];
+    let mut plan = None;
+    let mut resets_on = None;
+    let mut credits_used = None;
+    let mut credits_included = None;
+    let mut percent = None;
+    for line in panel.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Estimated Usage") {
+            for part in rest
+                .split('|')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+            {
+                if let Some(date) = part.strip_prefix("resets on ") {
+                    resets_on = Some(date.trim().to_string());
+                } else {
+                    plan = Some(part.to_string());
+                }
+            }
+        }
+        if let Some(rest) = line.strip_prefix("Credits (") {
+            let inner = rest.split(')').next().unwrap_or_default();
+            let mut numbers = inner
+                .split_whitespace()
+                .filter_map(|token| token.replace(',', "").parse::<f64>().ok());
+            credits_used = numbers.next();
+            credits_included = numbers.next();
+        }
+        if percent.is_none() {
+            if let Some(token) = line
+                .split_whitespace()
+                .find(|token| token.ends_with('%') && token.len() > 1)
+            {
+                percent = token.trim_end_matches('%').parse::<f64>().ok();
+            }
+        }
+    }
+    let used = credits_used?;
+    let mut payload = json!({
+        "source": "terminal",
+        "metering_usage": [{"unit":"credit","unitPlural":"credits","value":used}],
+    });
+    let map = payload.as_object_mut()?;
+    if let Some(plan) = plan {
+        map.insert("plan".into(), Value::String(plan));
+    }
+    if let Some(resets_on) = resets_on {
+        map.insert("resets_on".into(), Value::String(resets_on));
+    }
+    if let Some(included) = credits_included {
+        map.insert("credits_included".into(), json!(included));
+    }
+    if let Some(percent) = percent {
+        map.insert("plan_usage_percentage".into(), json!(percent));
+    }
+    Some(payload)
+}
+
+pub(crate) const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Kiro paints a persistent status line above the composer, for example
+/// `trusted · claude-opus-5 · xhigh · ◔ 4%    ~/proj/codesk · (main)`.
+/// It is the only place a terminal-driven session reports its live model.
+pub(crate) fn parse_status_line(screen: &str) -> Option<TerminalStatus> {
+    for line in screen.lines().rev() {
+        if !line.contains('·') {
+            continue;
+        }
+        let fields = line
+            .split('·')
+            // The trailing `cwd · (branch)` segment is separated from the state
+            // fields by a run of padding spaces.
+            .map(|field| field.split("  ").next().unwrap_or_default().trim())
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        let effort_index = fields
+            .iter()
+            .position(|field| EFFORT_LEVELS.contains(field))?;
+        if effort_index == 0 {
+            continue;
+        }
+        let model = fields[effort_index - 1];
+        if model.contains(' ') || model.is_empty() {
+            continue;
+        }
+        let context_percentage = fields.get(effort_index + 1).and_then(|field| {
+            field
+                .trim_start_matches(|character: char| !character.is_ascii_digit())
+                .trim_end_matches('%')
+                .parse::<f64>()
+                .ok()
+        });
+        return Some(TerminalStatus {
+            model: Some(model.to_string()),
+            effort: Some(fields[effort_index].to_string()),
+            agent: (effort_index >= 2).then(|| fields[0].to_string()),
+            context_percentage,
+        });
+    }
+    None
+}
+
+/// Parse one page of Kiro's `/model` picker. Rows look like
+/// `❯ claude-opus-5        2.20x credits    Claude Opus 5 … [active]`.
+pub(crate) fn parse_model_page(screen: &str) -> ModelPage {
+    let mut models = Vec::new();
+    // Kiro shows eight rows and reports the remainder as `(+11 more)`.
+    let more = screen.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("(+")?
+            .strip_suffix("more)")?
+            .trim()
+            .parse::<usize>()
+            .ok()
+    });
+    for line in screen.lines() {
+        let row = line.trim_start_matches(['❯', ' ']).trim_end();
+        let Some(credits_at) = row.find("x credits") else {
+            continue;
+        };
+        let mut head = row[..credits_at].split_whitespace();
+        let Some(id) = head.next() else { continue };
+        let multiplier = head.next_back().and_then(|value| value.parse::<f64>().ok());
+        let description = row[credits_at + "x credits".len()..].trim();
+        let active = description.ends_with("[active]");
+        // Codesk runs detached panes at tmux's default 80 columns, so Kiro
+        // truncates the description and the `[active]` marker may be cut off.
+        // The live model is read from the status line instead.
+        let description = description
+            .trim_end_matches("[active]")
+            .trim()
+            .trim_end_matches(['.', '\u{2026}'])
+            .trim();
+        models.push(json!({
+            "id": id,
+            "description": description,
+            "credit_multiplier": multiplier,
+            "active": active,
+        }));
+    }
+    ModelPage { models, more }
 }
 
 pub(crate) fn messages(
@@ -474,7 +650,97 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{HistoryState, messages, parse_history_line};
+    use super::{
+        ADAPTER, HistoryState, messages, parse_history_line, parse_model_page, parse_status_line,
+        parse_usage_screen,
+    };
+    use crate::providers::ProviderAdapter;
+
+    #[test]
+    fn reads_the_live_model_and_effort_from_the_status_line() {
+        // Verbatim status line from a real kiro-cli pane.
+        let screen = "  KIRO_E2E_OK\n\u{25b8} Credits: 0.28 \u{2022} Time: 2s\n────────\ntrusted \u{b7} claude-sonnet-5 \u{b7} high \u{b7} \u{25d4} 4%                    ~/proj/codesk \u{b7} (main)\n ask a question or describe a task \u{21b5}\n";
+        let status = parse_status_line(screen).expect("status line should parse");
+        assert_eq!(status.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(status.effort.as_deref(), Some("high"));
+        assert_eq!(status.agent.as_deref(), Some("trusted"));
+        assert_eq!(status.context_percentage, Some(4.0));
+    }
+
+    #[test]
+    fn ignores_conversation_text_that_merely_contains_separators() {
+        assert!(parse_status_line("a \u{b7} b \u{b7} c\n").is_none());
+    }
+
+    #[test]
+    fn parses_a_page_of_the_model_picker_and_marks_the_active_model() {
+        // Verbatim rows from a real `/model` picker.
+        let screen = "Select model:   type to search\n\u{276f} auto                 1.00x credits    Models chosen by task for optimal usage and consistent quality\n  claude-opus-5        2.20x credits    Claude Opus 5 model with 1M context window [active]\n  gpt-5.6-luna         0.10x credits    Experimental preview of OpenAI GPT 5.6 Luna with 272k context window\n(+11 more)\n esc to close \u{b7} \u{2191}\u{2193} to navigate \u{b7} \u{21b5} to select\n";
+        let page = parse_model_page(screen);
+        assert_eq!(page.more, Some(11));
+        let models = page.models;
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0]["id"], "auto");
+        assert_eq!(models[0]["credit_multiplier"], json!(1.0));
+        assert_eq!(models[0]["active"], json!(false));
+        assert_eq!(models[1]["id"], "claude-opus-5");
+        assert_eq!(models[1]["active"], json!(true));
+        assert_eq!(
+            models[1]["description"],
+            "Claude Opus 5 model with 1M context window"
+        );
+        assert_eq!(models[2]["credit_multiplier"], json!(0.1));
+
+        // At tmux's default 80 columns Kiro truncates the description.
+        let narrow =
+            "  claude-opus-5        2.20x credits    Claude Opus 5 model with 1M context...\n";
+        let truncated = parse_model_page(narrow).models;
+        assert_eq!(truncated[0]["id"], "claude-opus-5");
+        assert_eq!(
+            truncated[0]["description"],
+            "Claude Opus 5 model with 1M context"
+        );
+    }
+
+    #[test]
+    fn parses_the_kiro_usage_panel_from_a_captured_pane() {
+        // Verbatim capture of `/usage` from a real kiro-cli pane.
+        let screen = "  Reply with exactly KIRO_USAGE_UI_OK and nothing else.\n\n  KIRO_USAGE_UI_OK\n\n\u{25b8} Credits: 0.28 \u{2022} Time: 4s\n\n────────────────────────\n /usage\n────────────────────────\n Estimated Usage | resets on 2026-09-01 | KIRO PRO+\n Credits (1596.69 of 2000 covered in plan)\n\n ██████████████████████████████████████████████████ 79.8%\n\n Additional credits\n────────────────────────\n esc to close                       Tab to switch to /context\n";
+        let usage = parse_usage_screen(screen).expect("usage panel should parse");
+        assert_eq!(usage["plan"], "KIRO PRO+");
+        assert_eq!(usage["resets_on"], "2026-09-01");
+        assert_eq!(usage["credits_included"], json!(2000.0));
+        assert_eq!(usage["plan_usage_percentage"], json!(79.8));
+        assert_eq!(usage["metering_usage"][0]["value"], json!(1596.69));
+        assert_eq!(usage["metering_usage"][0]["unitPlural"], "credits");
+    }
+
+    #[test]
+    fn ignores_a_pane_without_a_usage_panel() {
+        assert!(parse_usage_screen("kiro_default\n> ask a question").is_none());
+    }
+
+    #[test]
+    fn recognizes_terminal_only_commands() {
+        assert_eq!(ADAPTER.terminal_overlay_command("/usage"), Some("Escape"));
+        assert_eq!(
+            ADAPTER.terminal_overlay_command(" /context "),
+            Some("Escape")
+        );
+        assert_eq!(ADAPTER.terminal_overlay_command("/compact"), None);
+        assert_eq!(ADAPTER.terminal_overlay_command("hello"), None);
+    }
+
+    #[test]
+    fn kiro_terminal_keeps_a_parent_shell() {
+        assert!(ADAPTER.keep_terminal_parent_shell());
+    }
+
+    #[test]
+    fn detects_the_ready_kiro_terminal() {
+        assert!(ADAPTER.terminal_ready("kiro_default · claude-opus-5 · xhigh"));
+        assert!(!ADAPTER.terminal_ready("An early release of Kiro CLI V3"));
+    }
 
     #[test]
     fn parses_real_kiro_tool_calls_and_results() {

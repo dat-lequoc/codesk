@@ -274,6 +274,8 @@ pub struct DiscoveredAgent {
     pub tmux_access_command: Option<String>,
     pub tmux_controlled: bool,
     pub tmux_owned: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -288,12 +290,15 @@ pub struct ProviderSession {
     pub updated_at: String,
     pub status: String,
     pub pid: Option<u32>,
+    pub managed_run_id: Option<String>,
     pub input_available: bool,
     pub input_transport: Option<String>,
     pub tmux_name: Option<String>,
     pub tmux_access_command: Option<String>,
     pub tmux_controlled: bool,
     pub tmux_owned: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone)]

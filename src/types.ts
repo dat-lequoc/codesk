@@ -126,6 +126,10 @@ export type AppState = {
     pinnedSessions: ProviderSession[]
     archivedSessionKeys: string[]
     archivedSessions: ProviderSession[]
+    /// Managed runs the user has archived, keyed `hostId:runId`. Runs need no
+    /// snapshot because the daemon keeps reporting them, unlike historical
+    /// provider sessions which can drop out of the index.
+    archivedRunKeys: string[]
   }
   discoveredAgentsByHost?: Record<string, DiscoveredAgent[]>
 }
@@ -155,12 +159,15 @@ export type ProviderSession = {
   sortAt: string
   status: 'running' | 'stopped' | 'idle'
   pid?: number | null
+  managedRunId?: string | null
   inputAvailable?: boolean
   inputTransport?: 'resume' | 'acp' | 'api' | 'tmux' | null
   tmuxName?: string | null
   tmuxAccessCommand?: string | null
   tmuxControlled?: boolean
   tmuxOwned?: boolean
+  model?: string | null
+  effort?: string | null
 }
 
 export type ExternalQueuedInput = {

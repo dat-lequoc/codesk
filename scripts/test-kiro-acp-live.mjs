@@ -78,15 +78,46 @@ try {
   const sessionId = sessionEvent?.raw_payload?.sessionId || run.provider_session_id
   if (!sessionId) throw new Error('Kiro ACP did not publish a session id')
 
-  await request(`/v1/runs/${runId}/input`, {
-    method: 'POST',
-    body: JSON.stringify({ message: '/usage', delivery: 'auto', request_id: crypto.randomUUID() }),
-  })
+  const commandsEvent = initial.find((event) => event.kind === 'commands.updated')
+  const commandNames = (commandsEvent?.payload?.commands || []).map((command) => command.name)
+  for (const required of ['/usage', '/model', '/effort', '/compact']) {
+    if (!commandNames.includes(required)) throw new Error(`Kiro did not advertise ${required}: ${JSON.stringify(commandNames)}`)
+  }
+  const sessionResponse = initial.find((event) => event.raw_payload?.result?.models?.currentModelId)
+  const currentModel = sessionResponse?.raw_payload?.result?.models?.currentModelId
+  const availableModels = sessionResponse?.raw_payload?.result?.models?.availableModels || []
+  if (!currentModel || !availableModels.some((model) => model.modelId === currentModel)) throw new Error(`Kiro ACP model state unavailable: ${JSON.stringify(sessionResponse)}`)
+  const currentEffort = [...initial].reverse().find((event) => typeof event.payload?.effort === 'string')?.payload?.effort
+  if (!currentEffort) throw new Error('Kiro ACP effort state unavailable')
+
+  const runCommand = async (message, expected) => {
+    const before = await events()
+    const beforeAssistant = before.filter((event) => event.kind === 'assistant.message').length
+    const beforeCompleted = before.filter((event) => event.kind === 'turn.completed').length
+    await request(`/v1/runs/${runId}/input`, {
+      method: 'POST',
+      body: JSON.stringify({ message, delivery: 'auto', request_id: crypto.randomUUID() }),
+    })
+    return waitFor(async () => {
+      const list = await events()
+      const assistant = list.filter((event) => event.kind === 'assistant.message').slice(beforeAssistant).map((event) => String(event.payload?.text || '')).join('')
+      const completed = list.filter((event) => event.kind === 'turn.completed').length > beforeCompleted
+      return completed && expected.test(assistant) ? { list, assistant } : false
+    })
+  }
+
+  await runCommand('/model', new RegExp(currentModel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  await runCommand(`/model ${currentModel}`, new RegExp(`Model changed to ${currentModel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i'))
+  await runCommand('/effort', /Available effort levels/i)
+  await runCommand(`/effort ${currentEffort}`, new RegExp(`Effort set to ${currentEffort}`, 'i'))
+  await runCommand('/compact', /compact/i)
+  await runCommand('/usage', /Plan:|usage/i)
+
   const usage = await waitFor(async () => {
     const list = await events()
     return list.find((event) => event.kind === 'usage.updated') || false
   })
-  if (!usage.payload?.metering_usage || usage.payload.context_usage_percentage === null) throw new Error(`usage card did not include a snapshot: ${JSON.stringify(usage)}`)
+  if (!Number.isFinite(Number(usage.payload?.context_usage_percentage))) throw new Error(`usage card did not include a context snapshot: ${JSON.stringify(usage)}`)
 
   await waitFor(async () => {
     const current = await request(`/v1/runs/${runId}`)
@@ -119,7 +150,7 @@ try {
     return assistant.includes('KIRO_CODESK_RESUME_OK')
   })
   await request(`/v1/runs/${resumed.id}/terminate`, { method: 'POST', body: '{}' })
-  console.log(JSON.stringify({ ok: true, provider: 'kiro', sessionId, usage: { context_usage_percentage: usage.payload.context_usage_percentage, metering_usage: usage.payload.metering_usage } }))
+  console.log(JSON.stringify({ ok: true, provider: 'kiro', sessionId, commands: commandNames.length, model: currentModel, effort: currentEffort, usage: { context_usage_percentage: usage.payload.context_usage_percentage, metering_usage: usage.payload.metering_usage } }))
 } catch (error) {
   failed = true
   if (runId) {

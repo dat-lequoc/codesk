@@ -919,6 +919,24 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_kiro_available_slash_commands() {
+        let (kind, provider_type, payload, _, session) = normalize_line(
+            "kiro",
+            "stdout",
+            r#"{"jsonrpc":"2.0","method":"_kiro.dev/commands/available","params":{"sessionId":"session-1","commands":[{"name":"/usage","description":"Show billing and usage information","meta":{"inputType":"panel"}},{"name":"/model","description":"Select or list available models","meta":{"inputType":"selection"}},{"name":"/effort","description":"Set thinking effort for this session","meta":{"inputType":"selection"}},{"name":"/compact","description":"Compact conversation history"}]}}"#,
+        );
+        assert_eq!(kind, "commands.updated");
+        assert_eq!(
+            provider_type.as_deref(),
+            Some("kiro._kiro.dev/commands/available")
+        );
+        assert_eq!(session.as_deref(), Some("session-1"));
+        assert_eq!(payload["commands"].as_array().unwrap().len(), 4);
+        assert_eq!(payload["commands"][0]["name"], "/usage");
+        assert_eq!(payload["commands"][1]["meta"]["inputType"], "selection");
+    }
+
+    #[test]
     fn builds_and_normalizes_opencode_acp_sessions() {
         if find_executable("opencode").is_some() {
             let request = StartRunRequest {

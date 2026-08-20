@@ -58,6 +58,7 @@ export const api = {
   controlRun: (hostId: string, id: string, action: 'interrupt' | 'terminate' | 'kill') => request(`/api/runs/${hostId}/${id}/${action}`, { method: 'POST' }),
   input: (hostId: string, id: string, message: string, delivery: 'auto' | 'steer' | 'queue' | 'fork' = 'auto', lastTurnId?: string | null) => request(`/api/runs/${hostId}/${id}/input`, { method: 'POST', body: JSON.stringify({ message, delivery, last_turn_id: lastTurnId, request_id: crypto.randomUUID() }) }),
   providerResponse: (hostId: string, id: string, rpcId: unknown, result: unknown) => request(`/api/runs/${hostId}/${id}/response`, { method: 'POST', body: JSON.stringify({ rpc_id: rpcId, result }) }),
+  providerModels: (hostId: string, runId: string) => request<{ models: Array<{ id: string; description: string; credit_multiplier?: number | null; active?: boolean }> }>(`/api/runs/${hostId}/${runId}/models`, { method: 'POST', body: '{}' }),
   startQueued: (hostId: string, id: string) => request(`/api/runs/${hostId}/${id}/queue/start`, { method: 'POST', body: '{}' }),
   removeQueued: (hostId: string, id: string, queueId: string) => request(`/api/runs/${hostId}/${id}/queue/${encodeURIComponent(queueId)}`, { method: 'DELETE' }),
 }

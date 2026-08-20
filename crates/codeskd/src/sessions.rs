@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -19,6 +19,14 @@ use crate::{
 };
 
 const MAX_SESSIONS_PER_PROVIDER: usize = 50;
+/// Newest indexed sessions checked when a discovered process has to be matched to
+/// a conversation by transcript activity instead of by an open file descriptor.
+const ACTIVE_SESSION_SCAN_LIMIT: usize = 12;
+/// A live turn keeps writing to its transcript, one record per step. A transcript
+/// that stops mid-turn and then goes quiet for longer than this belongs to a
+/// conversation nobody is driving any more — interrupted, or closed while a tool
+/// call was still pending — and must not compete with the live one for a process.
+const ACTIVE_TRANSCRIPT_WINDOW: Duration = Duration::from_secs(10 * 60);
 const MAX_CODEX_CANDIDATES: usize = 1500;
 const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_INDEX_TAIL_BYTES: u64 = 1024 * 1024;
@@ -27,6 +35,13 @@ const MAX_STREAM_BYTES: u64 = 256 * 1024;
 const MAX_MESSAGES: usize = 4000;
 const STATUS_SCAN_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_STATUS_RECORD_BYTES: usize = 512 * 1024;
+const MAX_TURN_ACTIVE_CACHE_ENTRIES: usize = 512;
+
+/// Memoized turn-active answers keyed by transcript path, valid while the file's
+/// length and modification time are unchanged.
+type TurnActiveCache = HashMap<PathBuf, ((u64, std::time::Duration), bool)>;
+static TURN_ACTIVE_CACHE: std::sync::OnceLock<std::sync::Mutex<TurnActiveCache>> =
+    std::sync::OnceLock::new();
 
 pub async fn list(
     project: &Project,
@@ -80,11 +95,19 @@ fn list_sync(
                 .as_deref()
                 .is_some_and(|cwd| cwd_matches(cwd, &project.path))
     }) {
-        let native_id = agent.native_session_id.clone().or_else(|| {
-            unique_active_session_id(project, &agent.provider, &result)
-                .ok()
-                .flatten()
-        });
+        let native_id = agent
+            .native_session_id
+            .clone()
+            .filter(|native_id| {
+                result
+                    .iter()
+                    .any(|item| item.provider == agent.provider && &item.native_session_id == native_id)
+            })
+            .or_else(|| {
+                unique_active_session_id(project, &agent.provider, &result)
+                    .ok()
+                    .flatten()
+            });
         let Some(native_id) = native_id.as_deref() else {
             continue;
         };
@@ -94,9 +117,16 @@ fn list_sync(
         else {
             continue;
         };
-        if session.pid.is_none() {
-            session.pid = Some(agent.pid);
+        // A provider session must map to one coherent live writer. If stale or
+        // duplicate panes reference the same native session, never combine the
+        // PID from one agent with the tmux metadata from another.
+        if session.pid.is_some() {
+            continue;
         }
+        session.pid = Some(agent.pid);
+        session.managed_run_id = agent.managed_run_id.clone();
+        session.model = agent.model.clone();
+        session.effort = agent.effort.clone();
         session.tmux_name = agent.tmux_session_name.clone();
         session.tmux_access_command = agent.tmux_access_command.clone();
         session.tmux_controlled = agent.tmux_controlled;
@@ -120,47 +150,77 @@ fn list_sync(
     Ok(result)
 }
 
+/// Resolves the conversation a discovered process is working on when the process
+/// itself does not say. Harnesses differ here: Codex keeps its rollout file open,
+/// so `lsof` alone identifies the session, while Kiro appends to its transcript
+/// and closes it again, leaving no file descriptor to follow. For those, the
+/// live session is the indexed one whose transcript still has an unfinished
+/// turn. Ambiguity is never guessed away: two active transcripts attribute
+/// nothing, because a wrong attribution shows a running badge on the wrong
+/// conversation and points steering at the wrong pane.
 fn unique_active_session_id(
     project: &Project,
     provider: &str,
     indexed: &[ProviderSession],
 ) -> Result<Option<String>> {
-    let mut candidates = match provider {
-        "pi" => jsonl_files(
-            &home_dir().join(".pi/agent/sessions").join(format!(
-                "--{}--",
-                project.path.trim_matches('/').replace('/', "-")
-            )),
-            false,
-        )?,
-        "claude" => {
-            let mut files = Vec::new();
-            for directory in claude_project_directories(&home_dir(), &project.path) {
-                files.extend(jsonl_files(&directory, false)?);
-            }
-            files
-        }
-        _ => return Ok(None),
+    let Some(adapter) = providers::get(provider) else {
+        return Ok(None);
     };
-    sort_recent(&mut candidates);
-    candidates.truncate(12);
+    let cutoff = SystemTime::now()
+        .checked_sub(ACTIVE_TRANSCRIPT_WINDOW)
+        .unwrap_or(UNIX_EPOCH);
+    let mut candidates = indexed
+        .iter()
+        .filter(|session| session.provider == provider)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    candidates.truncate(ACTIVE_SESSION_SCAN_LIMIT);
     let active = candidates
         .into_iter()
-        .filter(|path| {
-            providers::get(provider).is_some_and(|adapter| adapter.transcript_turn_active(path))
+        .filter_map(|session| {
+            let path = source_path(project, provider, &session.native_session_id).ok()?;
+            let writing = fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified >= cutoff);
+            (writing && adapter.transcript_turn_active(&path))
+                .then(|| session.native_session_id.clone())
         })
-        .filter_map(|path| index_file(project, provider, &path).ok().flatten())
-        .filter(|session| {
-            indexed.iter().any(|item| {
-                item.provider == provider && item.native_session_id == session.native_session_id
-            })
-        })
-        .map(|session| session.native_session_id)
         .collect::<Vec<_>>();
     Ok((active.len() == 1).then(|| active[0].clone()))
 }
 
 pub(crate) fn transcript_turn_active(path: &Path, provider: &str) -> bool {
+    // The tmux supervisor asks this for every controlled session on every tick,
+    // and a transcript only changes when the harness writes to it. Memoize on
+    // length plus modification time so a quiet session costs one `stat` instead
+    // of an open, a reverse tail scan, and several JSON parses.
+    let fingerprint = fs::metadata(path).ok().and_then(|metadata| {
+        Some((
+            metadata.len(),
+            metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?,
+        ))
+    });
+    let cache = TURN_ACTIVE_CACHE.get_or_init(Default::default);
+    if let Some(fingerprint) = fingerprint {
+        if let Some((cached_fingerprint, active)) =
+            cache.lock().ok().and_then(|cache| cache.get(path).copied())
+        {
+            if cached_fingerprint == fingerprint {
+                return active;
+            }
+        }
+    }
+    let active = scan_transcript_turn_active(path, provider);
+    if let (Some(fingerprint), Ok(mut cache)) = (fingerprint, cache.lock()) {
+        if cache.len() > MAX_TURN_ACTIVE_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(path.to_path_buf(), (fingerprint, active));
+    }
+    active
+}
+
+fn scan_transcript_turn_active(path: &Path, provider: &str) -> bool {
     if provider == "dsh" {
         return dsh_values(path, MAX_TRANSCRIPT_BYTES)
             .map(|values| {
@@ -226,7 +286,14 @@ pub(crate) fn transcript_turn_active(path: &Path, provider: &str) -> bool {
         }
         "kiro" => match value["kind"].as_str() {
             Some("Prompt") | Some("ToolResults") => Some(true),
-            Some("AssistantMessage") => Some(false),
+            // Kiro appends one AssistantMessage per step, so the tail of a live
+            // turn is an assistant record far more often than a prompt or a tool
+            // result. Only a record that stops asking for tools ends the turn.
+            Some("AssistantMessage") => Some(
+                value["data"]["content"]
+                    .as_array()
+                    .is_some_and(|content| content.iter().any(|item| item["kind"] == "toolUse")),
+            ),
             _ => None,
         },
         "agy" => {
@@ -397,6 +464,9 @@ fn index_opencode_database(
             updated_at: unix_millis_rfc3339(updated_at),
             status: "idle".to_string(),
             pid: None,
+            managed_run_id: None,
+            model: None,
+            effort: None,
             input_available: false,
             input_transport: None,
             tmux_name: None,
@@ -616,6 +686,9 @@ fn index_kiro_file(project: &Project, path: &Path) -> Result<Option<ProviderSess
         updated_at,
         status: "idle".to_string(),
         pid: None,
+        managed_run_id: None,
+        model: None,
+        effort: None,
         input_available: false,
         input_transport: None,
         tmux_name: None,
@@ -743,6 +816,9 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
         updated_at,
         status: "idle".to_string(),
         pid: None,
+        managed_run_id: None,
+        model: None,
+        effort: None,
         input_available: false,
         input_transport: None,
         tmux_name: None,
@@ -842,6 +918,9 @@ fn index_agy_from_home(
                             },
                             status: "idle".to_string(),
                             pid: None,
+                            managed_run_id: None,
+                            model: None,
+                            effort: None,
                             input_available: false,
                             input_transport: None,
                             tmux_name: None,
@@ -898,6 +977,9 @@ fn index_agy_from_home(
                     updated_at: modified_at,
                     status: "idle".to_string(),
                     pid: None,
+                    managed_run_id: None,
+                    model: None,
+                    effort: None,
                     input_available: false,
                     input_transport: None,
                     tmux_name: None,
@@ -1081,6 +1163,9 @@ fn index_codex_database(
             updated_at: unix_seconds_rfc3339(updated_at),
             status: "idle".to_string(),
             pid: None,
+            managed_run_id: None,
+            model: None,
+            effort: None,
             input_available: false,
             input_transport: None,
             tmux_name: None,
@@ -1359,6 +1444,9 @@ fn index_file(project: &Project, provider: &str, path: &Path) -> Result<Option<P
         updated_at: latest_rfc3339(&modified_at, &latest_event_at),
         status: "idle".to_string(),
         pid: None,
+        managed_run_id: None,
+        model: None,
+        effort: None,
         input_available: false,
         input_transport: None,
         tmux_name: None,
@@ -2971,6 +3059,9 @@ mod tests {
             updated_at: String::new(),
             status: "idle".into(),
             pid: None,
+            managed_run_id: None,
+            model: None,
+            effort: None,
             input_available: false,
             input_transport: None,
             tmux_name: None,
@@ -3128,6 +3219,56 @@ mod tests {
             .write_all(b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
             .unwrap();
         assert!(!transcript_turn_active(&path, "codex"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_kiro_turn_stays_active_until_the_assistant_stops_calling_tools() {
+        let root = std::env::temp_dir().join(format!("codesk-kiro-turn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let append = |record: &Value| {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(format!("{record}\n").as_bytes())
+                .unwrap();
+        };
+        let prompt = json!({"version":"v1","kind":"Prompt","data":{
+            "message_id":"1",
+            "content":[{"kind":"text","data":"check the sidebar"}]
+        }});
+        // Kiro writes one AssistantMessage per tool-calling step, so this record
+        // is what the tail of a live turn looks like nearly all of the time.
+        let tool_step = json!({"version":"v1","kind":"AssistantMessage","data":{
+            "message_id":"2",
+            "content":[
+                {"kind":"thinking","data":{"text":"reading the file"}},
+                {"kind":"text","data":""},
+                {"kind":"toolUse","data":{"toolUseId":"toolu_1","name":"shell","input":{"command":"ls"}}}
+            ]
+        }});
+        let tool_results = json!({"version":"v1","kind":"ToolResults","data":{
+            "message_id":"3",
+            "results":{"toolu_1":{"status":"success"}}
+        }});
+        let answer = json!({"version":"v1","kind":"AssistantMessage","data":{
+            "message_id":"4",
+            "content":[{"kind":"text","data":"done"}]
+        }});
+
+        fs::write(&path, format!("{prompt}\n")).unwrap();
+        assert!(transcript_turn_active(&path, "kiro"));
+        append(&tool_step);
+        assert!(
+            transcript_turn_active(&path, "kiro"),
+            "an assistant record that requests a tool is mid-turn"
+        );
+        append(&tool_results);
+        assert!(transcript_turn_active(&path, "kiro"));
+        append(&answer);
+        assert!(!transcript_turn_active(&path, "kiro"));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -21,6 +21,13 @@ impl Db {
         let connection =
             Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
+        // WAL defaults to `synchronous=FULL`, which fsyncs on every commit. Run
+        // events arrive one per streamed provider delta, so that default turns a
+        // fast Codex turn into hundreds of disk syncs per second. NORMAL keeps
+        // WAL crash-safe against process death and only risks the most recent
+        // commits on host power loss, which is the right trade for a
+        // reconstructible activity log.
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute_batch(SCHEMA)?;
         let has_registered: i64 = connection.query_row(
@@ -337,8 +344,12 @@ impl Db {
     }
 
     pub fn upsert_tmux_control(&self, control: &TmuxControl) -> Result<()> {
+        // Identity columns are normally sticky, because a live pane reports its
+        // session id only intermittently. They are not sticky across a provider
+        // change: the pane then hosts a different harness, and the recorded
+        // conversation belongs to the one that left.
         self.0.lock().unwrap().execute(
-            "INSERT INTO tmux_controls(id,project_id,run_id,provider,native_session_id,transcript_path,source_pid,source_pgid,cwd,original_command,socket_path,pane_id,session_name,access_command,owned,enabled,status,error,queue_state,queue_state_at,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,run_id=COALESCE(excluded.run_id,tmux_controls.run_id),provider=excluded.provider,native_session_id=COALESCE(excluded.native_session_id,tmux_controls.native_session_id),transcript_path=COALESCE(excluded.transcript_path,tmux_controls.transcript_path),source_pid=excluded.source_pid,source_pgid=excluded.source_pgid,cwd=excluded.cwd,original_command=excluded.original_command,socket_path=excluded.socket_path,pane_id=excluded.pane_id,session_name=excluded.session_name,access_command=excluded.access_command,owned=excluded.owned,enabled=excluded.enabled,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at",
+            "INSERT INTO tmux_controls(id,project_id,run_id,provider,native_session_id,transcript_path,source_pid,source_pgid,cwd,original_command,socket_path,pane_id,session_name,access_command,owned,enabled,status,error,queue_state,queue_state_at,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,run_id=CASE WHEN excluded.provider<>tmux_controls.provider THEN excluded.run_id ELSE COALESCE(excluded.run_id,tmux_controls.run_id) END,native_session_id=CASE WHEN excluded.provider<>tmux_controls.provider THEN excluded.native_session_id ELSE COALESCE(excluded.native_session_id,tmux_controls.native_session_id) END,transcript_path=CASE WHEN excluded.provider<>tmux_controls.provider THEN excluded.transcript_path ELSE COALESCE(excluded.transcript_path,tmux_controls.transcript_path) END,provider=excluded.provider,source_pid=excluded.source_pid,source_pgid=excluded.source_pgid,cwd=excluded.cwd,original_command=excluded.original_command,socket_path=excluded.socket_path,pane_id=excluded.pane_id,session_name=excluded.session_name,access_command=excluded.access_command,owned=excluded.owned,enabled=excluded.enabled,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at",
             params![control.id,control.project_id,control.run_id,control.provider,control.native_session_id,control.transcript_path,control.source_pid,control.source_pgid,control.cwd,control.original_command,control.socket_path,control.pane_id,control.session_name,control.access_command,control.owned,control.enabled,control.status,control.error,control.queue_state,control.queue_state_at,control.created_at,control.updated_at],
         )?;
         Ok(())
@@ -407,6 +418,17 @@ impl Db {
                 row_to_tmux_control,
             )
             .optional()?)
+    }
+
+    /// Drops the conversation a pane used to host. tmux recycles pane ids, so a
+    /// control row can outlive the harness it was written for; its session id and
+    /// transcript then describe a conversation that no longer runs there.
+    pub fn clear_tmux_control_identity(&self, id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute(
+            "UPDATE tmux_controls SET native_session_id=NULL,transcript_path=NULL,run_id=NULL WHERE id=?1",
+            params![id],
+        )?;
+        Ok(())
     }
 
     pub fn update_tmux_control_status(
@@ -657,6 +679,70 @@ CREATE INDEX IF NOT EXISTS tmux_queue_control ON tmux_queue(control_id,created_a
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    fn tmux_control_fixture(id: &str, provider: &str) -> TmuxControl {
+        let now = chrono::Utc::now().to_rfc3339();
+        TmuxControl {
+            id: id.into(),
+            project_id: None,
+            run_id: Some("run-1".into()),
+            provider: provider.into(),
+            native_session_id: None,
+            transcript_path: None,
+            source_pid: 42,
+            source_pgid: 42,
+            cwd: "/tmp".into(),
+            original_command: provider.into(),
+            socket_path: Some("/tmp/codesk.sock".into()),
+            pane_id: Some("%3".into()),
+            session_name: Some("codesk".into()),
+            access_command: Some("tmux attach".into()),
+            owned: false,
+            enabled: true,
+            status: "active".into(),
+            error: None,
+            queue_state: "ready".into(),
+            queue_state_at: now.clone(),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn a_pane_that_changes_provider_drops_the_previous_conversation() {
+        let path = std::env::temp_dir().join(format!("codeskd-pane-{}.db", Uuid::new_v4()));
+        let control_id = Uuid::new_v4().to_string();
+        let db = Db::open(&path).unwrap();
+
+        let mut codex = tmux_control_fixture(&control_id, "codex");
+        codex.native_session_id = Some("01a00cf4-codex".into());
+        codex.transcript_path = Some("/home/user/.codex/sessions/rollout.jsonl".into());
+        db.upsert_tmux_control(&codex).unwrap();
+
+        // The same pane reports the session id only intermittently, so a later
+        // sighting of the same harness must not lose it.
+        let mut quiet = tmux_control_fixture(&control_id, "codex");
+        quiet.run_id = None;
+        db.upsert_tmux_control(&quiet).unwrap();
+        let kept = db.tmux_control(&control_id).unwrap().unwrap();
+        assert_eq!(kept.native_session_id.as_deref(), Some("01a00cf4-codex"));
+        assert_eq!(kept.run_id.as_deref(), Some("run-1"));
+
+        // A different harness in that pane owns a different conversation.
+        let mut kiro = tmux_control_fixture(&control_id, "kiro");
+        kiro.run_id = None;
+        db.upsert_tmux_control(&kiro).unwrap();
+        let replaced = db.tmux_control(&control_id).unwrap().unwrap();
+        assert_eq!(replaced.provider, "kiro");
+        assert_eq!(replaced.native_session_id, None);
+        assert_eq!(replaced.transcript_path, None);
+        assert_eq!(replaced.run_id, None);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    }
 
     #[test]
     fn tmux_queue_is_ordered_and_survives_database_reopen() {

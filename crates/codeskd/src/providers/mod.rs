@@ -20,6 +20,24 @@ pub(crate) mod support;
 
 pub(crate) type NormalizedEvent = (String, Option<String>, Value, Option<Value>, Option<String>);
 
+/// One visible page of an interactive model picker. `more` is the harness's own
+/// count of rows below the fold, which is the only reliable way to know when
+/// paging is complete.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ModelPage {
+    pub models: Vec<Value>,
+    pub more: Option<usize>,
+}
+
+/// Live harness state read from a terminal status line.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct TerminalStatus {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub agent: Option<String>,
+    pub context_percentage: Option<f64>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunnerKind {
     Stdio,
@@ -72,6 +90,38 @@ pub(crate) trait ProviderAdapter: Sync {
         _cwd: &str,
     ) -> Result<Option<support::CommandSpec>> {
         Ok(None)
+    }
+
+    fn keep_terminal_parent_shell(&self) -> bool {
+        false
+    }
+
+    fn terminal_ready(&self, _screen: &str) -> bool {
+        true
+    }
+
+    /// A command that the harness renders in its own terminal UI instead of the
+    /// conversation transcript. Codesk captures the pane afterwards so the run
+    /// still gets an event, and dismisses the overlay so the pane stays
+    /// steerable. Returns the key that closes the overlay.
+    fn terminal_overlay_command(&self, _message: &str) -> Option<&'static str> {
+        None
+    }
+
+    /// Parse a captured terminal overlay into a usage payload.
+    fn parse_terminal_usage(&self, _screen: &str) -> Option<Value> {
+        None
+    }
+
+    /// Read the harness status line so Codesk can report the live model and
+    /// effort for a session it drives through a terminal instead of a protocol.
+    fn parse_terminal_status(&self, _screen: &str) -> Option<TerminalStatus> {
+        None
+    }
+
+    /// Parse one visible page of the harness's interactive model picker.
+    fn parse_model_page(&self, _screen: &str) -> ModelPage {
+        ModelPage::default()
     }
 
     fn encode_initial_prompt(&self, _prompt: &str) -> Option<String> {
@@ -216,6 +266,32 @@ pub(crate) fn build_terminal(
     cwd: &str,
 ) -> Result<Option<support::CommandSpec>> {
     require(&request.provider)?.build_terminal(request, session_key, cwd)
+}
+
+pub(crate) fn keep_terminal_parent_shell(provider: &str) -> bool {
+    get(provider).is_some_and(|adapter| adapter.keep_terminal_parent_shell())
+}
+
+pub(crate) fn terminal_ready(provider: &str, screen: &str) -> bool {
+    get(provider).is_none_or(|adapter| adapter.terminal_ready(screen))
+}
+
+pub(crate) fn terminal_overlay_command(provider: &str, message: &str) -> Option<&'static str> {
+    get(provider).and_then(|adapter| adapter.terminal_overlay_command(message))
+}
+
+pub(crate) fn parse_terminal_usage(provider: &str, screen: &str) -> Option<Value> {
+    get(provider).and_then(|adapter| adapter.parse_terminal_usage(screen))
+}
+
+pub(crate) fn parse_terminal_status(provider: &str, screen: &str) -> Option<TerminalStatus> {
+    get(provider).and_then(|adapter| adapter.parse_terminal_status(screen))
+}
+
+pub(crate) fn parse_model_page(provider: &str, screen: &str) -> ModelPage {
+    get(provider)
+        .map(|adapter| adapter.parse_model_page(screen))
+        .unwrap_or_default()
 }
 
 pub(crate) fn encode_initial_prompt(provider: &str, prompt: &str) -> Option<String> {

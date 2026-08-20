@@ -3,21 +3,55 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
-  Archive, Bell, Bot, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, Clock3, Copy, Eye, FileDiff, FileText, Folder, FolderGit2, FolderOpen, Home, ImageIcon, Info,
+  Archive, Bell, Bot, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, Clock3, Copy, Eye, FileDiff, FileText, Folder, FolderGit2, FolderOpen, Home, ImageIcon, Info,
   GitBranch, GitMerge, Globe2, Laptop, MoreHorizontal, Plug, Plus, Radio, RefreshCw,
   ListPlus, Pencil, Pin, PinOff, Search, Send, Server, Settings2, ShieldAlert, Square, Terminal, Trash2, TreePine,
   WifiOff, X, Zap,
 } from 'lucide-react'
 import { api, gatewayOrigin } from './api'
 import { harnessOrder, providerIcon, providerName, providerUi } from './providerRegistry'
+import { budgetAfterArchive, budgetAfterShowMore, hasHiddenItems, itemBudget } from './sessionBudget'
 import type { AppState, DiscoveredAgent, DraftSession, ExternalQueuedInput, FileContent, FileEntry, GitContext, Host, Project, Provider, ProviderSession, Run, RunEvent, SessionMessage } from './types'
 
-const empty: AppState = { hosts: [], projects: [], runs: [], sessions: [], drafts: [], providersByHost: {}, discoveredAgentsByHost: {}, settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [] } }
+const empty: AppState = { hosts: [], projects: [], runs: [], sessions: [], drafts: [], providersByHost: {}, discoveredAgentsByHost: {}, settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [], archivedRunKeys: [] } }
 const active = new Set(['queued', 'starting', 'running', 'waiting_for_input', 'interrupting'])
-const markdownPlugins = [remarkGfm]
 const environmentContextPattern = /<environment_context(?:\s[^>]*)?>[\s\S]*?<\/environment_context>/gi
 const logoUrl = new URL('../logo.png', import.meta.url).href
 const FilePreviewContext = createContext<((href: string) => void) | null>(null)
+
+const bareRepositoryUrlPattern = /\b(?:www\.[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+(?:\/[^\s<]*)?|(?:github\.com|gitlab\.com|bitbucket\.org)\/[^\s<]+)/gi
+const trimBareUrl = (value: string) => {
+  let result = value.replace(/[.,;:!?]+$/, '')
+  for (const [open, close] of [['(', ')'], ['[', ']'], ['{', '}']] as const) {
+    while (result.endsWith(close) && result.split(open).length < result.split(close).length) result = result.slice(0, -1)
+  }
+  return result
+}
+const remarkBareRepositoryLinks = () => (tree: any) => {
+  const walk = (parent: any) => {
+    if (!Array.isArray(parent.children) || ['link', 'linkReference', 'code', 'inlineCode'].includes(parent.type)) return
+    for (let index = 0; index < parent.children.length; index += 1) {
+      const child = parent.children[index]
+      if (child.type !== 'text' || typeof child.value !== 'string') { walk(child); continue }
+      bareRepositoryUrlPattern.lastIndex = 0
+      const replacement: any[] = []; let cursor = 0; let match: RegExpExecArray | null
+      while ((match = bareRepositoryUrlPattern.exec(child.value))) {
+        const raw = match[0]; const linked = trimBareUrl(raw)
+        if (!linked) continue
+        if (match.index > cursor) replacement.push({ type: 'text', value: child.value.slice(cursor, match.index) })
+        replacement.push({ type: 'link', url: `https://${linked}`, children: [{ type: 'text', value: linked }] })
+        if (linked.length < raw.length) replacement.push({ type: 'text', value: raw.slice(linked.length) })
+        cursor = match.index + raw.length
+      }
+      if (!replacement.length) continue
+      if (cursor < child.value.length) replacement.push({ type: 'text', value: child.value.slice(cursor) })
+      parent.children.splice(index, 1, ...replacement)
+      index += replacement.length - 1
+    }
+  }
+  walk(tree)
+}
+const markdownPlugins = [remarkGfm, remarkBareRepositoryLinks]
 
 const relative = (value?: string | null) => { if (!value) return ''; const seconds = Math.floor((Date.now() - new Date(value).getTime()) / 1000); return seconds < 60 ? 'now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h` }
 const isTauriDesktop = () => '__TAURI_INTERNALS__' in window
@@ -46,6 +80,10 @@ const notify = async (title: string, body: string, tag: string) => {
 }
 const projectKey = (project: Project) => `${project.hostId}:${project.id}`
 const normalizedFolder = (value: string) => value.length > 1 ? value.replace(/\/+$/, '') : value
+/// Folders shown before the "Outside your projects" list collapses. Remote hosts
+/// can be running many harnesses at once, and this list must not crowd out the
+/// projects the user actually registered.
+const DETACHED_FOLDER_PREVIEW = 4
 const projectForAgent = (projects: Project[], hostId: string, agent: DiscoveredAgent) => projects.find((project) => project.hostId === hostId && agent.cwd && normalizedFolder(agent.cwd) === normalizedFolder(project.path))
 const observedAgents = (state: AppState) => {
   const sessions = new Map<string, { hostId: string; agent: DiscoveredAgent; project?: Project }>()
@@ -58,9 +96,16 @@ const observedAgents = (state: AppState) => {
   }
   return [...sessions.values()]
 }
-const projectItemPageSize = 5
+/// Indeterminate arc spinner, following the approach loading-ui.com uses for its
+/// Arc component: a rotating circle with one transparent side that inherits
+/// `currentColor`. Written as plain CSS because this app has no utility-class
+/// framework, so callers set only size, thickness and `--duration`.
+const Spinner = ({ className = '' }: { className?: string }) => <i className={`arc-spinner ${className}`.trim()} aria-hidden="true" />
 function SidebarHarness({ provider }: { provider: Provider['id'] }) { const label = providerName(provider); return <span className={`sidebar-harness provider-${provider}`} title={label} aria-label={label}>{providerIcon(provider)}</span> }
 const sessionKey = (session: Pick<ProviderSession, 'hostId' | 'id'>) => `${session.hostId}:${session.id}`
+/// Identity of a run row in navigation, used for pinning-style user state such
+/// as archiving. Distinct from a provider session key: run ids are daemon-issued.
+const runRowKey = (run: Pick<Run, 'hostId' | 'id'>) => `${run.hostId}:${run.id}`
 const recentFirst = (left: ProviderSession, right: ProviderSession) => right.sortAt.localeCompare(left.sortAt) || Number(right.status === 'running') - Number(left.status === 'running')
 const runEventNotificationKey = (_hostId: string, runId: string) => `run:${runId}`
 const sessionNotificationKey = (session: Pick<ProviderSession, 'hostId' | 'provider' | 'nativeSessionId'>) => `session:${session.hostId}:${session.provider}:${session.nativeSessionId}`
@@ -184,7 +229,7 @@ function usePersistentComposerDraft(key: string) {
   })
   return [value, setValue] as const
 }
-const normalizeState = (value: AppState) => ({ ...value, drafts: value.drafts || [], settings: { notifications: value.settings?.notifications ?? true, pinnedSessionKeys: value.settings?.pinnedSessionKeys || [], pinnedSessions: value.settings?.pinnedSessions || [], archivedSessionKeys: value.settings?.archivedSessionKeys || [], archivedSessions: value.settings?.archivedSessions || [] } })
+const normalizeState = (value: AppState) => ({ ...value, drafts: value.drafts || [], settings: { notifications: value.settings?.notifications ?? true, pinnedSessionKeys: value.settings?.pinnedSessionKeys || [], pinnedSessions: value.settings?.pinnedSessions || [], archivedSessionKeys: value.settings?.archivedSessionKeys || [], archivedSessions: value.settings?.archivedSessions || [], archivedRunKeys: value.settings?.archivedRunKeys || [] } })
 const conversationText = (value: string) => {
   const hadContext = environmentContextPattern.test(value)
   environmentContextPattern.lastIndex = 0
@@ -307,6 +352,13 @@ export function App() {
     return () => { window.removeEventListener('focus', readSelected); document.removeEventListener('visibilitychange', readSelected) }
   }, [run?.id, selectedSessionKey])
   useEffect(() => { if (!run || events[run.id]) return; api.events(run.hostId, run.id).then((items) => setEvents((current) => ({ ...current, [run.id]: items }))).catch(() => {}) }, [run?.id])
+  useEffect(() => {
+    // A tmux session is rendered from its provider transcript, but Codesk's own
+    // synthetic events (usage snapshots) live on the backing managed run.
+    const runId = session?.managedRunId
+    if (!session || !runId || events[runId]) return
+    api.events(session.hostId, runId).then((items) => setEvents((current) => ({ ...current, [runId]: items }))).catch(() => {})
+  }, [session?.managedRunId, session?.hostId])
   useEffect(() => {
     if (!session || !selectedSessionKey || sessionHostStatus !== 'online') return
     let stopped = false
@@ -464,6 +516,7 @@ export function App() {
     return [...merged.values()]
   }, [state.sessions, state.settings.pinnedSessions, state.settings.archivedSessions, extraSessions])
   const archivedSessions = state.settings.archivedSessionKeys.map((key) => allSessions.find((item) => sessionKey(item) === key)).filter((item): item is ProviderSession => Boolean(item)).sort(recentFirst)
+  const archivedRuns = state.settings.archivedRunKeys.map((key) => state.runs.find((item) => runRowKey(item) === key)).filter((item): item is Run => Boolean(item)).sort((left, right) => right.createdAt.localeCompare(left.createdAt))
   const agents = useMemo(() => observedAgents(state), [state])
   const selectedAgent = agents.find(({ hostId, agent }) => `${hostId}:${agent.id}` === selectedAgentKey) || null
   const project = draft ? state.projects.find((item) => item.id === draft.projectId && item.hostId === draft.hostId) : session ? state.projects.find((item) => item.id === session.projectId && item.hostId === session.hostId) : run ? state.projects.find((item) => item.id === run.projectId && item.hostId === run.hostId) : selectedAgent?.project || state.projects.find((item) => projectKey(item) === selectedProjectKey) || state.projects[0]
@@ -507,6 +560,20 @@ export function App() {
     try { const saved = await api.updateSettings({ archivedSessionKeys, archivedSessions: archivedSnapshots, pinnedSessionKeys, pinnedSessions }); setState((current) => ({ ...current, settings: saved })) }
     catch (cause) { setState((current) => ({ ...current, settings: prior })); if (!isArchived && selectedSessionKey === key) setSelectedSessionKey(key); setError(cause instanceof Error ? cause.message : String(cause)) }
   }
+  // Managed runs get the same archive affordance as provider sessions. A run
+  // that never produced a matching provider session — a failed or interrupted
+  // one, most often — is listed indefinitely, so without this there is no way
+  // to clear it out of a project.
+  const toggleArchiveRun = async (nextRun: Run) => {
+    const key = runRowKey(nextRun); const archived = state.settings.archivedRunKeys; const isArchived = archived.includes(key)
+    const archivedRunKeys = isArchived ? archived.filter((item) => item !== key) : [...archived, key]
+    const prior = state.settings; const nextSettings = { ...prior, archivedRunKeys }
+    setState((current) => ({ ...current, settings: nextSettings }))
+    const deselect = !isArchived && selectedId === nextRun.id
+    if (deselect) setSelectedId(null)
+    try { const saved = await api.updateSettings({ archivedRunKeys }); setState((current) => ({ ...current, settings: saved })) }
+    catch (cause) { setState((current) => ({ ...current, settings: prior })); if (deselect) setSelectedId(nextRun.id); setError(cause instanceof Error ? cause.message : String(cause)) }
+  }
   const archiveProjectSessions = async (nextProject: Project) => {
     const projectSessions = allSessions.filter((item) => item.hostId === nextProject.hostId && item.projectId === nextProject.id && !state.settings.archivedSessionKeys.includes(sessionKey(item)))
     if (!projectSessions.length) return
@@ -536,25 +603,25 @@ export function App() {
     finally { setRemovingProject(false) }
   }
   return <div className="codex-shell">
-    <Sidebar state={state} runs={state.runs} sessions={allSessions} agents={agents} unreadKeys={unreadKeys} selectedId={selectedId} selectedSessionKey={selectedSessionKey} selectedAgentKey={selectedAgentKey} selectedDraftId={selectedDraftId} selectedProjectKey={selectedProjectKey} query={query} onQuery={setQuery} onSelectRun={(next) => { readRun(next); selectRun(next) }} onSelectSession={(next) => { readSession(next); selectSession(next) }} onSelectDraft={selectDraft} onSelectAgent={selectAgent} onSelectProject={selectProject} onRemoveProject={setProjectToRemove} onArchiveProject={archiveProjectSessions} onTogglePin={togglePin} onToggleArchive={toggleArchive} onRefreshProject={async (project) => { try { const key = projectKey(project); const items = await api.refreshProjectSessions(project.hostId, project.id); setExtraSessions((current) => ({ ...current, [key]: items })); setState((current) => ({ ...current, sessions: [...current.sessions.filter((session) => session.hostId !== project.hostId || session.projectId !== project.id), ...items].sort(recentFirst) })) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } }} onShowMore={async (project, visibleLimit) => { const key = projectKey(project); try { const items = await api.projectSessions(project.hostId, project.id, visibleLimit + 1); setExtraSessions((current) => ({ ...current, [key]: items })); return true } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false } }} onNewRun={() => void newDraft()} onNewProject={() => setNewProject(true)} onSettings={() => setSettings(true)} onArchives={() => setArchives(true)} />
+    <Sidebar state={state} runs={state.runs} sessions={allSessions} agents={agents} unreadKeys={unreadKeys} selectedId={selectedId} selectedSessionKey={selectedSessionKey} selectedAgentKey={selectedAgentKey} selectedDraftId={selectedDraftId} selectedProjectKey={selectedProjectKey} query={query} onQuery={setQuery} onSelectRun={(next) => { readRun(next); selectRun(next) }} onSelectSession={(next) => { readSession(next); selectSession(next) }} onSelectDraft={selectDraft} onSelectAgent={selectAgent} onSelectProject={selectProject} onRemoveProject={setProjectToRemove} onArchiveProject={archiveProjectSessions} onTogglePin={togglePin} onToggleArchive={toggleArchive} onToggleArchiveRun={toggleArchiveRun} onRefreshProject={async (project) => { try { const key = projectKey(project); const items = await api.refreshProjectSessions(project.hostId, project.id); setExtraSessions((current) => ({ ...current, [key]: items })); setState((current) => ({ ...current, sessions: [...current.sessions.filter((session) => session.hostId !== project.hostId || session.projectId !== project.id), ...items].sort(recentFirst) })) } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } }} onShowMore={async (project, visibleLimit) => { const key = projectKey(project); try { const items = await api.projectSessions(project.hostId, project.id, visibleLimit + 1); setExtraSessions((current) => ({ ...current, [key]: items })); return true } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false } }} onNewRun={() => void newDraft()} onNewProject={() => setNewProject(true)} onRegisterFolder={async (hostId, path) => { try { const name = path.split('/').filter(Boolean).at(-1) || path; await api.createProject({ hostId, name, path }); await reload() } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } }} onSettings={() => setSettings(true)} onArchives={() => setArchives(true)} />
     <section className="codex-main">
-      {session ? <SessionScreen key={`session:${sessionNotificationKey(session)}`} session={session} messages={sessionMessages[selectedSessionKey!] || []} project={project} host={host} provider={sessionProvider} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} /> : run ? <RunScreen key={`run:${run.hostId}:${run.id}`} run={run} events={events[run.id] || []} project={project} host={host} provider={provider} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} /> : selectedAgent ? <ObservedScreen key={`agent:${selectedAgent.hostId}:${selectedAgent.agent.id}`} host={state.hosts.find((item) => item.id === selectedAgent.hostId)} project={selectedAgent.project} provider={state.providersByHost[selectedAgent.hostId]?.find((item) => item.id === selectedAgent.agent.provider)} agent={selectedAgent.agent} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} /> : <StartScreen key={draft?.id || (project ? projectKey(project) : 'empty')} state={state} draft={draft || undefined} project={project} host={host} onProject={() => setNewProject(true)} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} />}
+      {session ? <SessionScreen key={`session:${sessionNotificationKey(session)}`} session={session} messages={sessionMessages[selectedSessionKey!] || []} runEvents={session.managedRunId ? (events[session.managedRunId] || []) : []} project={project} host={host} provider={sessionProvider} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} /> : run ? <RunScreen key={`run:${run.hostId}:${run.id}`} run={run} events={events[run.id] || []} project={project} host={host} provider={provider} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} /> : selectedAgent ? <ObservedScreen key={`agent:${selectedAgent.hostId}:${selectedAgent.agent.id}`} host={state.hosts.find((item) => item.id === selectedAgent.hostId)} project={selectedAgent.project} provider={state.providersByHost[selectedAgent.hostId]?.find((item) => item.id === selectedAgent.agent.provider)} agent={selectedAgent.agent} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} /> : <StartScreen key={draft?.id || (project ? projectKey(project) : 'empty')} state={state} draft={draft || undefined} project={project} host={host} onProject={() => setNewProject(true)} onStarted={(next) => { selectRun(next); void reload() }} onError={setError} />}
     </section>
     {error && <div className="toast-error">{error}<button onClick={() => setError('')}><X size={14} /></button></div>}
     {newProject && <ProjectDialog hosts={state.hosts} onClose={() => setNewProject(false)} onCreated={async () => { setNewProject(false); await reload() }} />}
     {settings && <ConnectionsDialog hosts={state.hosts} onClose={() => setSettings(false)} onChanged={reload} />}
-    {archives && <ArchivedChatsDialog sessions={archivedSessions} runs={state.runs} unreadKeys={unreadKeys} projects={state.projects} hosts={state.hosts} onOpen={(next) => { readSession(next); selectSession(next); setArchives(false) }} onRestore={toggleArchive} onClose={() => setArchives(false)} />}
+    {archives && <ArchivedChatsDialog sessions={archivedSessions} archivedRuns={archivedRuns} runs={state.runs} unreadKeys={unreadKeys} projects={state.projects} hosts={state.hosts} onOpen={(next) => { readSession(next); selectSession(next); setArchives(false) }} onRestore={toggleArchive} onRestoreRun={toggleArchiveRun} onOpenRun={(next) => { readRun(next); selectRun(next); setArchives(false) }} onClose={() => setArchives(false)} />}
     {projectToRemove && <RemoveProjectDialog project={projectToRemove} busy={removingProject} onClose={() => { if (!removingProject) setProjectToRemove(null) }} onConfirm={() => void removeProject(projectToRemove)} />}
   </div>
 }
 
-function Sidebar({ state, runs, sessions, agents, unreadKeys, selectedId, selectedSessionKey, selectedAgentKey, selectedDraftId, selectedProjectKey, query, onQuery, onSelectRun, onSelectSession, onSelectDraft, onSelectAgent, onSelectProject, onRemoveProject, onArchiveProject, onTogglePin, onToggleArchive, onRefreshProject, onShowMore, onNewRun, onNewProject, onSettings, onArchives }: {
+function Sidebar({ state, runs, sessions, agents, unreadKeys, selectedId, selectedSessionKey, selectedAgentKey, selectedDraftId, selectedProjectKey, query, onQuery, onSelectRun, onSelectSession, onSelectDraft, onSelectAgent, onSelectProject, onRemoveProject, onArchiveProject, onTogglePin, onToggleArchive, onToggleArchiveRun, onRefreshProject, onShowMore, onNewRun, onNewProject, onRegisterFolder, onSettings, onArchives }: {
   state: AppState; runs: Run[]; sessions: ProviderSession[]; agents: ReturnType<typeof observedAgents>
   unreadKeys: Set<string>
   selectedId: string | null; selectedSessionKey: string | null; selectedAgentKey: string | null; selectedDraftId: string | null; selectedProjectKey: string | null
   query: string; onQuery: (value: string) => void; onSelectRun: (run: Run) => void; onSelectSession: (session: ProviderSession) => void; onSelectDraft: (draft: DraftSession) => void
-  onSelectAgent: (hostId: string, agent: DiscoveredAgent, project?: Project) => void; onSelectProject: (project: Project) => void; onRemoveProject: (project: Project) => void; onArchiveProject: (project: Project) => Promise<void>; onTogglePin: (session: ProviderSession) => Promise<void>; onToggleArchive: (session: ProviderSession) => Promise<void>; onRefreshProject: (project: Project) => Promise<void>
-  onShowMore: (project: Project, visibleLimit: number) => Promise<boolean>; onNewRun: () => void; onNewProject: () => void; onSettings: () => void; onArchives: () => void
+  onSelectAgent: (hostId: string, agent: DiscoveredAgent, project?: Project) => void; onSelectProject: (project: Project) => void; onRemoveProject: (project: Project) => void; onArchiveProject: (project: Project) => Promise<void>; onTogglePin: (session: ProviderSession) => Promise<void>; onToggleArchive: (session: ProviderSession) => Promise<void>; onToggleArchiveRun: (run: Run) => Promise<void>; onRefreshProject: (project: Project) => Promise<void>
+  onShowMore: (project: Project, visibleLimit: number) => Promise<boolean>; onNewRun: () => void; onNewProject: () => void; onRegisterFolder: (hostId: string, path: string) => Promise<void>; onSettings: () => void; onArchives: () => void
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(loadExpandedProjects)
   const [projectItemLimits, setProjectItemLimits] = useState<Map<string, number>>(() => new Map())
@@ -577,6 +644,7 @@ function Sidebar({ state, runs, sessions, agents, unreadKeys, selectedId, select
   const unreadCount = unreadKeys.size
   const pinnedKeys = state.settings.pinnedSessionKeys
   const archivedKeys = new Set(state.settings.archivedSessionKeys)
+  const archivedRunKeys = new Set(state.settings.archivedRunKeys)
   const pinnedSessions = pinnedKeys.map((key) => sessions.find((session) => sessionKey(session) === key)).filter((session): session is ProviderSession => Boolean(session)).filter((session) => !archivedKeys.has(sessionKey(session))).filter((session) => {
     if (!needle) return true
     const project = state.projects.find((item) => item.id === session.projectId && item.hostId === session.hostId); const host = state.hosts.find((item) => item.id === session.hostId)
@@ -620,16 +688,36 @@ function Sidebar({ state, runs, sessions, agents, unreadKeys, selectedId, select
     return () => { document.removeEventListener('pointerdown', close, true); document.removeEventListener('keydown', escape); window.removeEventListener('resize', resize) }
   }, [projectMenu])
   const toggle = (key: string) => setExpanded((current) => { const next = new Set(current); next.has(key) ? next.delete(key) : next.add(key); saveStringSet('codesk.expanded-projects:v1', next); return next })
+  /// A harness only becomes a conversation once its working directory is a
+  /// registered project, so agents found anywhere else would otherwise be
+  /// discovered and then silently dropped from navigation.
+  const [showAllDetached, setShowAllDetached] = useState(false)
+  const [registeringFolder, setRegisteringFolder] = useState('')
   const createProjectDraft = async (project: Project) => { const key = projectKey(project); if (!expanded.has(key)) toggle(key); onSelectDraft(await api.createDraft({ hostId: project.hostId, projectId: project.id })) }
   const openProjectMenu = (event: ReactMouseEvent<HTMLElement>, project: Project, canArchive: boolean) => {
     event.preventDefault(); event.stopPropagation()
     const rect = event.currentTarget.getBoundingClientRect(); const width = 226; const height = 126
     setProjectMenu({ project, canArchive, left: Math.max(10, Math.min(window.innerWidth - width - 10, rect.right - width)), top: Math.max(10, Math.min(window.innerHeight - height - 10, rect.bottom + 5)) })
   }
+  // How many items a project may list. Zero is a real budget the user can reach
+  // by archiving, so a stored zero must not be mistaken for a missing entry.
+  const projectItemLimit = (key: string) => itemBudget(projectItemLimits, key)
   const expandSessions = async (project: Project) => {
     const key = projectKey(project)
-    const nextLimit = (projectItemLimits.get(key) || projectItemPageSize) + projectItemPageSize
-    if (await onShowMore(project, nextLimit)) setProjectItemLimits((current) => new Map(current).set(key, nextLimit))
+    const grown = budgetAfterShowMore(projectItemLimits, key)
+    if (await onShowMore(project, itemBudget(grown, key))) setProjectItemLimits(grown)
+  }
+  // Archiving a listed conversation should shrink the list. Holding the budget
+  // fixed would promote the next hidden conversation into the freed slot, so the
+  // count never drops and archiving feels like it did nothing. Shrink the budget
+  // with it and let Show more be the only thing that grows it again.
+  const archiveSession = async (project: Project, session: ProviderSession) => {
+    setProjectItemLimits((current) => budgetAfterArchive(current, projectKey(project)))
+    await onToggleArchive(session)
+  }
+  const archiveRun = async (project: Project, run: Run) => {
+    setProjectItemLimits((current) => budgetAfterArchive(current, projectKey(project)))
+    await onToggleArchiveRun(run)
   }
   const refreshProject = async (project: Project) => {
     const key = projectKey(project)
@@ -646,6 +734,18 @@ function Sidebar({ state, runs, sessions, agents, unreadKeys, selectedId, select
     onQuery(value)
   }
   const openSearch = () => { setSearchOpen(true); window.setTimeout(() => searchInput.current?.focus(), 0) }
+  const detachedFolders = [...agents.filter((item) => !item.project).reduce((groups, item) => {
+    const folder = item.agent.cwd ? normalizedFolder(item.agent.cwd) : ''
+    const key = `${item.hostId}:${folder}`
+    const group = groups.get(key) || { hostId: item.hostId, folder, providers: [] as string[], agents: [] as DiscoveredAgent[], newest: item.agent }
+    if (!group.providers.includes(item.agent.provider)) group.providers.push(item.agent.provider)
+    group.agents.push(item.agent)
+    if (item.agent.pid > group.newest.pid) group.newest = item.agent
+    groups.set(key, group)
+    return groups
+  }, new Map<string, { hostId: string; folder: string; providers: string[]; agents: DiscoveredAgent[]; newest: DiscoveredAgent }>()).values()]
+    .filter((group) => !needle || `${group.folder} ${group.providers.map(providerName).join(' ')}`.toLowerCase().includes(needle))
+    .sort((left, right) => left.folder.localeCompare(right.folder))
   let visibleProjectCount = 0
   return <aside className="codex-sidebar">
     <div className="sidebar-top"><img className="app-logo" src={logoUrl} alt="" /><strong>Codesk</strong><ChevronDown size={14} /><span /><button title="Search conversations" onClick={openSearch}><Search size={17} /></button><button className="notifications-button" title={unreadCount ? `${unreadCount} unread agent updates` : 'Notifications'} aria-label={unreadCount ? `${unreadCount} unread agent updates` : 'Notifications'}><Bell size={17} />{unreadCount > 0 && <i className="notifications-badge">{unreadCount > 9 ? '9+' : unreadCount}</i>}</button></div>
@@ -659,12 +759,18 @@ function Sidebar({ state, runs, sessions, agents, unreadKeys, selectedId, select
         const key = sessionKey(session); const project = state.projects.find((item) => item.id === session.projectId && item.hostId === session.hostId); const host = state.hosts.find((item) => item.id === session.hostId)
         return <div className="pinned-row" key={key}><button data-session-key={key} className={`pinned-session ${key === selectedSessionKey ? 'selected' : ''}`} title={`${providerName(session.provider)} · ${project?.name || session.cwd} · ${host?.name || session.hostId}`} onClick={() => onSelectSession(session)} onContextMenu={(event) => { event.preventDefault(); void onTogglePin(session) }}><Pin size={12} /><span><strong><SidebarHarness provider={session.provider} />{hasUnreadSession(session) && <i className="sidebar-unread-dot" title="Unread agent update" aria-label="Unread agent update" />}<span>{session.title}</span></strong><small>{project?.name || 'Unknown project'} · {host?.name || session.hostId}</small></span></button><button className="session-pin" title="Unpin conversation" onClick={() => void onTogglePin(session)}><PinOff size={12} /></button></div>
       })}</section>}
+      {detachedFolders.length > 0 && <section className="detached-section" aria-label="Agents outside your projects"><div className="side-heading"><span>Outside your projects</span></div>{(showAllDetached ? detachedFolders : detachedFolders.slice(0, DETACHED_FOLDER_PREVIEW)).map((group) => {
+        const host = state.hosts.find((item) => item.id === group.hostId); const folderKey = `${group.hostId}:${group.folder}`
+        const label = group.folder.split('/').filter(Boolean).at(-1) || group.folder || 'Unknown folder'
+        const agentKey = `${group.hostId}:${group.newest.id}`
+        return <div className="detached-row" key={folderKey}><button className={`detached-main ${agentKey === selectedAgentKey ? 'selected' : ''}`} title={`${group.agents.length} running ${group.agents.length === 1 ? 'agent' : 'agents'} in ${group.folder || 'an unreported folder'} · ${host?.name || group.hostId}`} onClick={() => onSelectAgent(group.hostId, group.newest)}><span className="recent-status"><Spinner /></span><span className="sidebar-session-title">{group.providers.map((provider) => <SidebarHarness key={provider} provider={provider} />)}<span>{label}</span></span>{group.agents.length > 1 && <small>{group.agents.length}</small>}</button><button className="detached-add" disabled={!group.folder || registeringFolder === folderKey} title={group.folder ? `Add ${group.folder} as a project` : 'This agent did not report a working directory'} aria-label={group.folder ? `Add ${group.folder} as a project` : 'No working directory to add'} onClick={async () => { setRegisteringFolder(folderKey); try { await onRegisterFolder(group.hostId, group.folder) } finally { setRegisteringFolder('') } }}>{registeringFolder === folderKey ? <RefreshCw className="spin" size={12} /> : <Plus size={13} />}</button></div>
+      })}{detachedFolders.length > DETACHED_FOLDER_PREVIEW && <button className="project-show-more" onClick={() => setShowAllDetached((value) => !value)}>{showAllDetached ? 'Show less' : `Show ${detachedFolders.length - DETACHED_FOLDER_PREVIEW} more`}</button>}</section>}
       <section className="projects-section" aria-label="Projects"><div className="side-heading"><span>Projects</span><button title="Add project" onClick={onNewProject}><Plus size={15} /></button></div><div className="project-tree" role="tree">{state.projects.map((project) => {
         const key = projectKey(project); const host = state.hosts.find((item) => item.id === project.hostId); const refreshing = refreshingProjects.has(key)
         const allProjectDrafts = state.drafts.filter((draft) => draft.projectId === project.id && draft.hostId === project.hostId && draft.prompt?.trim())
         const providerProjectSessions = sessions.filter((session) => session.projectId === project.id && session.hostId === project.hostId)
         const allProjectSessions = providerProjectSessions.filter((session) => !archivedKeys.has(sessionKey(session))).sort(recentFirst)
-        const allProjectRuns = runs.filter((run) => run.projectId === project.id && run.hostId === project.hostId && (run.id === selectedId || !providerProjectSessions.some((session) => session.nativeSessionId === run.sessionId)))
+        const allProjectRuns = runs.filter((run) => run.projectId === project.id && run.hostId === project.hostId && !archivedRunKeys.has(runRowKey(run)) && (run.id === selectedId || !providerProjectSessions.some((session) => session.nativeSessionId === run.sessionId)))
         const projectUnread = allProjectSessions.some(hasUnreadSession) || allProjectRuns.some(hasUnreadRun)
         const allProjectAgents = agents.filter((item) => item.project && projectKey(item.project) === key && !providerProjectSessions.some((session) => session.provider === item.agent.provider && session.status === 'running'))
         const projectMatches = `${project.name} ${project.path} ${host?.name || ''}`.toLowerCase().includes(needle)
@@ -676,43 +782,50 @@ function Sidebar({ state, runs, sessions, agents, unreadKeys, selectedId, select
         visibleProjectCount += 1
         const open = needle ? true : expanded.has(key)
         const totalProjectItems = projectDrafts.length + matchingSessions.length + projectRuns.length + projectAgents.length
-        const itemLimit = needle ? totalProjectItems : projectItemLimits.get(key) || projectItemPageSize
+        const itemLimit = needle ? totalProjectItems : projectItemLimit(key)
         const unreadProjectSessions = matchingSessions.filter(hasUnreadSession)
         const unreadProjectRuns = projectRuns.filter(hasUnreadRun)
-        const readProjectSessions = matchingSessions.filter((session) => !hasUnreadSession(session))
-        const readProjectRuns = projectRuns.filter((run) => !hasUnreadRun(run))
+        // A running conversation keeps a slot ahead of quiet history, so the count
+        // in the project header always has a row to point at.
+        const runningProjectSessions = matchingSessions.filter((session) => session.status === 'running' && !hasUnreadSession(session))
+        const activeProjectRuns = projectRuns.filter((run) => active.has(run.status) && !hasUnreadRun(run))
+        const readProjectSessions = matchingSessions.filter((session) => !hasUnreadSession(session) && session.status !== 'running')
+        const readProjectRuns = projectRuns.filter((run) => !hasUnreadRun(run) && !active.has(run.status))
         let slotsRemaining = itemLimit
         const visibleUnreadSessions = unreadProjectSessions.slice(0, slotsRemaining); slotsRemaining -= visibleUnreadSessions.length
         const visibleUnreadRuns = unreadProjectRuns.slice(0, slotsRemaining); slotsRemaining -= visibleUnreadRuns.length
+        const visibleRunningSessions = runningProjectSessions.slice(0, slotsRemaining); slotsRemaining -= visibleRunningSessions.length
+        const visibleActiveRuns = activeProjectRuns.slice(0, slotsRemaining); slotsRemaining -= visibleActiveRuns.length
         const visibleProjectDrafts = projectDrafts.slice(0, slotsRemaining); slotsRemaining -= visibleProjectDrafts.length
         const visibleReadSessions = readProjectSessions.slice(0, slotsRemaining); slotsRemaining -= visibleReadSessions.length
         const visibleReadRuns = readProjectRuns.slice(0, slotsRemaining); slotsRemaining -= visibleReadRuns.length
         const visibleProjectAgents = projectAgents.slice(0, slotsRemaining)
-        const visibleProjectSessions = [...visibleUnreadSessions, ...visibleReadSessions]
-        const visibleProjectRuns = [...visibleUnreadRuns, ...visibleReadRuns]
-        const runningCount = allProjectSessions.filter((session) => session.status === 'running').length
+        const visibleProjectSessions = [...visibleUnreadSessions, ...visibleRunningSessions, ...visibleReadSessions]
+        const visibleProjectRuns = [...visibleUnreadRuns, ...visibleActiveRuns, ...visibleReadRuns]
+        const runningSessions = matchingSessions.filter((session) => session.status === 'running')
+        const runningCount = runningSessions.length
         const projectOnlySelected = selectedProjectKey === key && !selectedId && !selectedSessionKey && !selectedAgentKey && !selectedDraftId
         return <div className={`project-group host-${host?.status || 'offline'}`} key={key} role="treeitem" aria-expanded={open}>
-          <div className={`project-row ${projectOnlySelected ? 'selected' : ''} ${projectMenu?.project.id === project.id && projectMenu.project.hostId === project.hostId ? 'menu-open' : ''}`} onContextMenu={(event) => openProjectMenu(event, project, allProjectSessions.length > 0)}><button className="project-chevron" aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} onClick={() => toggle(key)}>{open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</button><button className="project-main" onClick={() => onSelectProject(project)}><FolderGit2 size={14} /><strong>{project.name}</strong></button>{projectUnread && <i className="project-unread-dot" title="Unread agent update" aria-label="Unread agent update" />}{runningCount > 0 && <span className="project-running-count"><Radio size={9} />{runningCount}</span>}<button className={`project-refresh-trigger ${refreshing ? 'refreshing' : ''}`} aria-label={`Refresh sessions for ${project.name}`} title={`Refresh sessions for ${project.name}`} disabled={refreshing || host?.status !== 'online'} onClick={(event) => { event.stopPropagation(); void refreshProject(project) }}><RefreshCw className={refreshing ? 'spin' : ''} size={13} /></button><button className="project-menu-trigger" aria-label={`Project actions for ${project.name}`} aria-controls="project-actions-menu" aria-expanded={projectMenu?.project.id === project.id && projectMenu.project.hostId === project.hostId} title={`Project actions for ${project.name}`} onClick={(event) => openProjectMenu(event, project, allProjectSessions.length > 0)}><MoreHorizontal size={14} /></button><span className="project-host-tag">{host?.name || project.hostId}</span><i className={host?.status} title={host?.status || 'offline'} /></div>
+          <div className={`project-row ${projectOnlySelected ? 'selected' : ''} ${projectMenu?.project.id === project.id && projectMenu.project.hostId === project.hostId ? 'menu-open' : ''}`} onContextMenu={(event) => openProjectMenu(event, project, allProjectSessions.length > 0)}><button className="project-chevron" aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} onClick={() => toggle(key)}>{open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</button><button className="project-main" onClick={() => onSelectProject(project)}><FolderGit2 size={14} /><strong>{project.name}</strong></button>{projectUnread && <i className="project-unread-dot" title="Unread agent update" aria-label="Unread agent update" />}{runningCount > 0 && <button type="button" className="project-running-count" title={runningCount === 1 ? `Running: ${runningSessions[0].title}` : `${runningCount} running conversations`} aria-label={runningCount === 1 ? `Open running conversation ${runningSessions[0].title}` : `Show ${runningCount} running conversations in ${project.name}`} onClick={(event) => { event.stopPropagation(); if (!open) toggle(key); if (runningCount === 1) onSelectSession(runningSessions[0]) }}><Spinner className="count-spinner" />{runningCount}</button>}<button className={`project-refresh-trigger ${refreshing ? 'refreshing' : ''}`} aria-label={`Refresh sessions for ${project.name}`} title={`Refresh sessions for ${project.name}`} disabled={refreshing || host?.status !== 'online'} onClick={(event) => { event.stopPropagation(); void refreshProject(project) }}><RefreshCw className={refreshing ? 'spin' : ''} size={13} /></button><button className="project-menu-trigger" aria-label={`Project actions for ${project.name}`} aria-controls="project-actions-menu" aria-expanded={projectMenu?.project.id === project.id && projectMenu.project.hostId === project.hostId} title={`Project actions for ${project.name}`} onClick={(event) => openProjectMenu(event, project, allProjectSessions.length > 0)}><MoreHorizontal size={14} /></button><span className="project-host-tag">{host?.name || project.hostId}</span><i className={host?.status} title={host?.status || 'offline'} /></div>
           {open && <div className="project-sessions" role="group">
             {visibleProjectDrafts.map((draft) => <button key={draft.id} className={`project-session draft ${draft.id === selectedDraftId ? 'selected' : ''}`} onClick={() => onSelectDraft(draft)}><span className="recent-status"><Pencil size={10} /></span><span className="sidebar-session-title"><SidebarHarness provider={draft.provider} /><span>{draftTitle(draft)}</span></span><small className="sidebar-session-meta">{relative(draft.updatedAt)}</small></button>)}
-            {visibleProjectSessions.map((session) => { const sessionId = sessionKey(session); const pinned = pinnedKeys.includes(sessionId); const unread = hasUnreadSession(session); return <div className="project-session-row" key={sessionId}><button data-session-key={sessionId} className={`project-session ${session.status} ${unread ? 'unread' : ''} ${sessionId === selectedSessionKey ? 'selected' : ''}`} title={`${providerName(session.provider)} · ${session.title}`} onClick={() => onSelectSession(session)} onContextMenu={(event) => { event.preventDefault(); void onTogglePin(session) }}><span className="recent-status">{unread ? <i className="sidebar-unread-dot" title="Unread agent update" aria-label="Unread agent update" /> : session.status === 'running' ? <Radio size={11} /> : session.status === 'stopped' ? <Circle className="stopped-dot" size={7} fill="currentColor" /> : null}</span><span className="sidebar-session-title"><SidebarHarness provider={session.provider} /><span>{session.title}</span></span>{session.status === 'running' ? <small className="running-label sidebar-session-meta"><b>Running</b></small> : <small className="sidebar-session-meta">{relative(session.updatedAt)}</small>}</button><button className="session-archive" title="Archive conversation" onClick={() => void onToggleArchive(session)}><Archive size={12} /></button><button className={`session-pin ${pinned ? 'pinned' : ''}`} title={pinned ? 'Unpin conversation' : 'Pin conversation'} onClick={() => void onTogglePin(session)}>{pinned ? <PinOff size={12} /> : <Pin size={12} />}</button></div> })}
-            {visibleProjectRuns.map((run) => { const unread = hasUnreadRun(run); return <button key={`${run.hostId}:${run.id}`} className={`project-session ${unread ? 'unread' : ''} ${run.id === selectedId ? 'selected' : ''}`} title={`${providerName(run.provider)} · ${run.title}`} onClick={() => onSelectRun(run)}><span className="recent-status">{unread ? <i className="sidebar-unread-dot" title="Unread agent update" aria-label="Unread agent update" /> : active.has(run.status) ? <Radio size={11} /> : <Circle size={7} fill="currentColor" />}</span><span className="sidebar-session-title"><SidebarHarness provider={run.provider} /><span>{run.title}</span></span><small className="sidebar-session-meta">{relative(run.createdAt)}</small></button> })}
-            {visibleProjectAgents.map(({ hostId, agent }) => <button key={`${hostId}:${agent.id}`} className={`project-session observed ${`${hostId}:${agent.id}` === selectedAgentKey ? 'selected' : ''}`} onClick={() => onSelectAgent(hostId, agent, project)}><span className="recent-status"><Radio size={11} /></span><span className="sidebar-session-title"><SidebarHarness provider={agent.provider} /><span>Observed session</span></span><small>observed</small></button>)}
-            {!needle && totalProjectItems > itemLimit && <button className="project-show-more" onClick={() => void expandSessions(project)}>Show more</button>}
+            {visibleProjectSessions.map((session) => { const sessionId = sessionKey(session); const pinned = pinnedKeys.includes(sessionId); const unread = hasUnreadSession(session); return <div className="project-session-row" key={sessionId}><button data-session-key={sessionId} className={`project-session ${session.status} ${unread ? 'unread' : ''} ${sessionId === selectedSessionKey ? 'selected' : ''}`} title={`${providerName(session.provider)} · ${session.title}`} onClick={() => onSelectSession(session)} onContextMenu={(event) => { event.preventDefault(); void onTogglePin(session) }}><span className="recent-status">{session.status === 'running' ? <Spinner /> : session.status === 'stopped' ? <Circle className="stopped-dot" size={7} fill="currentColor" /> : null}</span><span className="sidebar-session-title"><SidebarHarness provider={session.provider} /><span>{session.title}</span></span>{unread ? <i className="sidebar-unread-dot" title="Finished — unread agent update" aria-label="Finished, unread agent update" /> : <small className="sidebar-session-meta">{relative(session.updatedAt)}</small>}</button><button className="session-archive" title="Archive conversation" onClick={() => void archiveSession(project, session)}><Archive size={12} /></button><button className={`session-pin ${pinned ? 'pinned' : ''}`} title={pinned ? 'Unpin conversation' : 'Pin conversation'} onClick={() => void onTogglePin(session)}>{pinned ? <PinOff size={12} /> : <Pin size={12} />}</button></div> })}
+            {visibleProjectRuns.map((run) => { const unread = hasUnreadRun(run); return <div className="project-session-row" key={`${run.hostId}:${run.id}`}><button className={`project-session ${unread ? 'unread' : ''} ${run.id === selectedId ? 'selected' : ''}`} title={`${providerName(run.provider)} · ${run.title}`} onClick={() => onSelectRun(run)}><span className="recent-status">{active.has(run.status) ? <Spinner /> : <Circle size={7} fill="currentColor" />}</span><span className="sidebar-session-title"><SidebarHarness provider={run.provider} /><span>{run.title}</span></span>{unread ? <i className="sidebar-unread-dot" title="Finished — unread agent update" aria-label="Finished, unread agent update" /> : <small className="sidebar-session-meta">{relative(run.createdAt)}</small>}</button><button className="session-archive run-archive" title="Archive run" onClick={() => void archiveRun(project, run)}><Archive size={12} /></button></div> })}
+            {visibleProjectAgents.map(({ hostId, agent }) => <button key={`${hostId}:${agent.id}`} className={`project-session observed ${`${hostId}:${agent.id}` === selectedAgentKey ? 'selected' : ''}`} onClick={() => onSelectAgent(hostId, agent, project)}><span className="recent-status"><Spinner /></span><span className="sidebar-session-title"><SidebarHarness provider={agent.provider} /><span>Observed session</span></span><small>observed</small></button>)}
+            {!needle && hasHiddenItems(totalProjectItems, itemLimit) && <button className="project-show-more" onClick={() => void expandSessions(project)}>Show more</button>}
             {totalProjectItems === 0 && <div className="project-empty">No chats</div>}
           </div>}
         </div>
       })}{needle && visibleProjectCount === 0 && <div className="navigation-empty">No matching projects or conversations</div>}</div></section>
     </div>
     {projectMenu && <div id="project-actions-menu" ref={projectMenuRef} className="project-actions-menu" role="group" aria-label={`Actions for ${projectMenu.project.name}`} style={{ top: projectMenu.top, left: projectMenu.left }}><button type="button" onClick={() => { const next = projectMenu.project; setProjectMenu(null); void createProjectDraft(next) }}><Plus size={15} /><span>New chat</span></button><button type="button" disabled={!projectMenu.canArchive} onClick={() => { const next = projectMenu.project; setProjectMenu(null); void onArchiveProject(next) }}><Archive size={15} /><span>Archive chats</span></button><div className="project-actions-divider" role="separator" /><button type="button" className="danger" onClick={() => { const next = projectMenu.project; setProjectMenu(null); onRemoveProject(next) }}><Trash2 size={15} /><span>Remove project</span></button></div>}
-    <div className="side-bottom"><button onClick={onSettings}><Settings2 size={17} /><span>Gateway / Settings</span></button><button onClick={onArchives}><Archive size={17} /><span>Archived chats</span>{state.settings.archivedSessionKeys.length > 0 && <small>{state.settings.archivedSessionKeys.length}</small>}</button></div>
+    <div className="side-bottom"><button onClick={onSettings}><Settings2 size={17} /><span>Gateway / Settings</span></button><button onClick={onArchives}><Archive size={17} /><span>Archived chats</span>{state.settings.archivedSessionKeys.length + state.settings.archivedRunKeys.length > 0 && <small>{state.settings.archivedSessionKeys.length + state.settings.archivedRunKeys.length}</small>}</button></div>
   </aside>
 }
 
-function ArchivedChatsDialog({ sessions, runs, unreadKeys, projects, hosts, onOpen, onRestore, onClose }: { sessions: ProviderSession[]; runs: Run[]; unreadKeys: Set<string>; projects: Project[]; hosts: Host[]; onOpen: (session: ProviderSession) => void; onRestore: (session: ProviderSession) => Promise<void>; onClose: () => void }) {
+function ArchivedChatsDialog({ sessions, archivedRuns, runs, unreadKeys, projects, hosts, onOpen, onOpenRun, onRestore, onRestoreRun, onClose }: { sessions: ProviderSession[]; archivedRuns: Run[]; runs: Run[]; unreadKeys: Set<string>; projects: Project[]; hosts: Host[]; onOpen: (session: ProviderSession) => void; onOpenRun: (run: Run) => void; onRestore: (session: ProviderSession) => Promise<void>; onRestoreRun: (run: Run) => Promise<void>; onClose: () => void }) {
   const hasUnread = (session: ProviderSession) => unreadKeys.has(sessionNotificationKey(session)) || runs.some((run) => run.hostId === session.hostId && run.provider === session.provider && run.sessionId === session.nativeSessionId && runNotificationKeys(run).some((key) => unreadKeys.has(key)))
-  return <div className="dialog-backdrop"><div className="codex-dialog archived-dialog"><header><div><h2>Archived chats</h2><p>Archived conversations stay available without cluttering project navigation.</p></div><button title="Close" onClick={onClose}><X size={19} /></button></header><div className="archived-list">{sessions.length ? sessions.map((session) => { const project = projects.find((item) => item.id === session.projectId && item.hostId === session.hostId); const host = hosts.find((item) => item.id === session.hostId); return <div className="archived-row" key={sessionKey(session)}><button className="archived-main" onClick={() => onOpen(session)}><Archive size={14} /><span><strong>{hasUnread(session) && <i className="sidebar-unread-dot" title="Unread agent update" aria-label="Unread agent update" />}<span>{session.title}</span></strong><small>{project?.name || session.cwd} · {host?.name || session.hostId} · {relative(session.updatedAt)}</small></span></button><button className="archived-restore" onClick={() => void onRestore(session)}>Unarchive</button></div> }) : <div className="archived-empty"><Archive size={24} /><strong>No archived chats</strong><span>Use the archive button beside a project conversation to move it here.</span></div>}</div></div></div>
+  return <div className="dialog-backdrop"><div className="codex-dialog archived-dialog"><header><div><h2>Archived chats</h2><p>Archived conversations stay available without cluttering project navigation.</p></div><button title="Close" onClick={onClose}><X size={19} /></button></header><div className="archived-list">{sessions.length + archivedRuns.length ? <>{sessions.map((session) => { const project = projects.find((item) => item.id === session.projectId && item.hostId === session.hostId); const host = hosts.find((item) => item.id === session.hostId); return <div className="archived-row" key={sessionKey(session)}><button className="archived-main" onClick={() => onOpen(session)}><Archive size={14} /><span><strong>{hasUnread(session) && <i className="sidebar-unread-dot" title="Unread agent update" aria-label="Unread agent update" />}<span>{session.title}</span></strong><small>{project?.name || session.cwd} · {host?.name || session.hostId} · {relative(session.updatedAt)}</small></span></button><button className="archived-restore" onClick={() => void onRestore(session)}>Unarchive</button></div> })}{archivedRuns.map((run) => { const project = projects.find((item) => item.id === run.projectId && item.hostId === run.hostId); const host = hosts.find((item) => item.id === run.hostId); return <div className="archived-row" key={`run:${run.hostId}:${run.id}`}><button className="archived-main" onClick={() => onOpenRun(run)}><Archive size={14} /><span><strong><span>{run.title}</span></strong><small>{providerName(run.provider)} run · {run.status} · {project?.name || run.cwd} · {host?.name || run.hostId} · {relative(run.createdAt)}</small></span></button><button className="archived-restore" onClick={() => void onRestoreRun(run)}>Unarchive</button></div> })}</> : <div className="archived-empty"><Archive size={24} /><strong>No archived chats</strong><span>Use the archive button beside a project conversation to move it here.</span></div>}</div></div></div>
 }
 
 function RemoveProjectDialog({ project, busy, onClose, onConfirm }: { project: Project; busy: boolean; onClose: () => void; onConfirm: () => void }) {
@@ -721,7 +834,94 @@ function RemoveProjectDialog({ project, busy, onClose, onConfirm }: { project: P
 
 function ComposerFrame({ className, onSubmit, children }: { className: string; onSubmit: (event: FormEvent) => void; children: React.ReactNode }) { return <form className={className} onSubmit={onSubmit}>{children}</form> }
 function ComposerInput(props: React.ComponentProps<'textarea'>) { return <textarea {...props} /> }
-function ComposerFooter({ className, children }: { className?: string; children: React.ReactNode }) { return <div className={className}>{children}</div> }
+function ComposerFooter({ className, children }: { className?: string; children: React.ReactNode }) { return <div className={`composer-footer ${className || ''}`}>{children}</div> }
+
+type SlashCommand = { name: string; description: string; meta?: { hidden?: boolean; inputType?: string } }
+type SlashSuggestion = { value: string; label: string; description: string; detail?: string }
+type KiroCommandContext = { commands: SlashCommand[]; models: Array<{ id: string; description: string }>; currentModel?: string; currentEffort?: string; modelsPending?: boolean }
+
+const fallbackKiroCommands: SlashCommand[] = [
+  { name: '/usage', description: 'Show billing and usage information' },
+  { name: '/model', description: 'Select or list available models', meta: { inputType: 'selection' } },
+  { name: '/effort', description: 'Set thinking effort for this session', meta: { inputType: 'selection' } },
+  { name: '/compact', description: 'Compact conversation history' },
+]
+const kiroEffortLevels = ['low', 'medium', 'high', 'xhigh', 'max']
+// Kiro's model catalog is account-level, so one discovery per host is enough.
+const kiroModelCatalog = new Map<string, Array<{ id: string; description: string }>>()
+const recordValue = (value: unknown): Record<string, any> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : undefined
+const kiroCommandContext = (events: RunEvent[]): KiroCommandContext => {
+  let commands: SlashCommand[] = []
+  let models: Array<{ id: string; description: string }> = []
+  let currentModel: string | undefined
+  let currentEffort: string | undefined
+  for (const event of events) {
+    if (event.kind === 'commands.updated' && Array.isArray(event.payload.commands)) {
+      commands = event.payload.commands.flatMap((value) => {
+        const command = recordValue(value)
+        const meta = recordValue(command?.meta)
+        return typeof command?.name === 'string' && !meta?.hidden ? [{ name: command.name, description: typeof command.description === 'string' ? command.description : '', meta }] : []
+      })
+    }
+    if (typeof event.payload.effort === 'string') currentEffort = event.payload.effort
+    const raw = recordValue(event.raw_payload)
+    const result = recordValue(raw?.result)
+    const modelState = recordValue(result?.models)
+    if (typeof modelState?.currentModelId === 'string') currentModel = modelState.currentModelId
+    if (Array.isArray(modelState?.availableModels)) models = modelState.availableModels.flatMap((value: unknown) => {
+      const model = recordValue(value)
+      const id = typeof model?.modelId === 'string' ? model.modelId : typeof model?.id === 'string' ? model.id : ''
+      return id ? [{ id, description: typeof model?.description === 'string' ? model.description : '' }] : []
+    })
+    if (event.kind === 'assistant.message' && typeof event.payload.text === 'string') {
+      const changedModel = event.payload.text.match(/Model changed to\s+([^\s]+)/i)?.[1]
+      const changedEffort = event.payload.text.match(/Effort set to\s+([^\s]+)/i)?.[1]
+      if (changedModel) currentModel = changedModel
+      if (changedEffort) currentEffort = changedEffort
+    }
+  }
+  return { commands: commands.length ? commands : fallbackKiroCommands, models, currentModel, currentEffort }
+}
+const kiroSuggestionLimit = (message: string) => /^\s*\/\S+\s/.test(message) ? 24 : 8
+const kiroSlashSuggestions = (message: string, context: KiroCommandContext): SlashSuggestion[] => {
+  const input = message.trimStart()
+  if (!input.startsWith('/') || input.includes('\n')) return []
+  const separator = input.search(/\s/)
+  const commandName = (separator < 0 ? input : input.slice(0, separator)).toLowerCase()
+  const argument = separator < 0 ? '' : input.slice(separator + 1).trim().toLowerCase()
+  if (separator < 0) {
+    const priority = new Map(['/usage', '/model', '/effort', '/compact'].map((name, index) => [name, index]))
+    return context.commands
+    .filter((command) => command.name.toLowerCase().startsWith(commandName))
+    .sort((left, right) => (priority.get(left.name) ?? 100) - (priority.get(right.name) ?? 100) || left.name.localeCompare(right.name))
+    .map((command) => ({
+      value: command.name === '/effort' || command.name === '/model' ? `${command.name} ` : command.name,
+      label: command.name,
+      description: command.description,
+    }))
+  }
+  if (commandName === '/model') {
+    if (!context.models.length && context.modelsPending) return [{ value: input, label: 'Reading model list', description: `Asking ${context.currentModel || 'the harness'} for its available models`, detail: 'Loading' }]
+    return context.models
+      .filter((model) => !argument || model.id.toLowerCase().includes(argument) || model.description.toLowerCase().includes(argument))
+      .map((model) => ({ value: `/model ${model.id}`, label: model.id, description: model.description, detail: model.id === context.currentModel ? 'Current model' : 'Model' }))
+  }
+  if (commandName === '/effort') return kiroEffortLevels
+    .filter((effort) => effort.startsWith(argument))
+    .map((effort) => ({ value: `/effort ${effort}`, label: effort, description: `Use ${effort} thinking effort`, detail: effort === context.currentEffort ? 'Current effort' : 'Effort' }))
+  return []
+}
+function SlashCommandMenu({ suggestions, selected, onSelect, onChoose }: { suggestions: SlashSuggestion[]; selected: number; onSelect: (index: number) => void; onChoose: (suggestion: SlashSuggestion) => void }) {
+  const selectedOption = useRef<HTMLButtonElement>(null)
+  // The list scrolls once a catalog is longer than the overlay, so keep the
+  // keyboard selection visible instead of letting it walk out of view.
+  useEffect(() => { selectedOption.current?.scrollIntoView({ block: 'nearest' }) }, [selected, suggestions.length])
+  if (!suggestions.length) return null
+  return <div className="slash-command-menu">
+    <div className="slash-command-options" role="listbox" aria-label="Kiro commands">{suggestions.map((suggestion, index) => <button key={suggestion.value} ref={index === selected ? selectedOption : undefined} type="button" role="option" aria-selected={index === selected} onMouseEnter={() => onSelect(index)} onClick={() => onChoose(suggestion)}><Terminal size={14} /><span><strong>{suggestion.label}</strong><small>{suggestion.description}</small></span>{suggestion.detail && <em>{suggestion.detail}</em>}</button>)}</div>
+    {suggestions.length > 1 && <footer className="slash-command-hint"><span><ChevronUp size={11} /><ChevronDown size={11} />to navigate</span><span>↵ to select</span><span>Tab to complete</span><small>{selected + 1} of {suggestions.length}</small></footer>}
+  </div>
+}
 
 function StartScreen({ state, draft, project, host, onProject, onStarted, onError }: { state: AppState; draft?: DraftSession; project?: Project; host?: Host; onProject: () => void; onStarted: (run: Run) => void; onError: (message: string) => void }) {
   const [prompt, setPrompt] = useState(draft?.prompt || ''); const [provider, setProvider] = useState(draft?.provider || 'codex'); const [workspace, setWorkspace] = useState<'current_checkout' | 'managed_worktree'>(draft?.workspaceMode || 'current_checkout'); const [workspaceMenu, setWorkspaceMenu] = useState(false); const [busy, setBusy] = useState(false); const [gitContext, setGitContext] = useState<GitContext | null>(null)
@@ -768,6 +968,18 @@ const turnDurations = (events: RunEvent[]) => {
   return durations
 }
 const externalHrefPattern = /^[a-z][a-z\d+.-]*:/i
+const openExternalHref = async (href: string) => {
+  if (isTauriDesktop()) {
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener')
+      await openUrl(href)
+      return
+    } catch (cause) {
+      console.error('Could not open external link through Tauri', cause)
+    }
+  }
+  window.open(href, '_blank', 'noopener,noreferrer')
+}
 const linkedFilePath = (href: string, cwd: string) => {
   let value = href
   if (value.startsWith('file://')) { try { value = new URL(value).pathname } catch {} }
@@ -793,7 +1005,7 @@ function MarkdownContent({ text, className = '' }: { text: string; className?: s
   return <div className={`markdown-content ${className}`}><ReactMarkdown remarkPlugins={markdownPlugins} components={{ a: ({ href = '', children, ...props }) => {
     const isAnchor = href.startsWith('#'); const isExternal = externalHrefPattern.test(href) && !href.startsWith('file:')
     if (!isAnchor && !isExternal && openFile) return <a {...props} href={href} onClick={(event) => { event.preventDefault(); openFile(href) }}>{children}</a>
-    return <a {...props} href={href} target={isExternal ? '_blank' : undefined} rel={isExternal ? 'noreferrer' : undefined}>{children}</a>
+    return <a {...props} href={href} target={isExternal ? '_blank' : undefined} rel={isExternal ? 'noreferrer' : undefined} onClick={isExternal ? (event) => { event.preventDefault(); void openExternalHref(href) } : undefined}>{children}</a>
   } }}>{text}</ReactMarkdown></div>
 }
 function FilePreviewPanel({ state, onClose }: { state: FilePreviewState; onClose: () => void }) {
@@ -1141,6 +1353,15 @@ function UsageCard({ event }: { event: RunEvent }) {
   const used = Number(event.payload.context_usage_percentage)
   const metering = Array.isArray(event.payload.metering_usage) ? event.payload.metering_usage as Array<{ value?: number; unit?: string; unitPlural?: string }> : []
   const credits = metering.map((item) => `${Number(item.value || 0).toFixed(3)} ${item.unitPlural || item.unit || 'credits'}`).join(' + ')
+  const plan = typeof event.payload.plan === 'string' ? event.payload.plan : null
+  const resetsOn = typeof event.payload.resets_on === 'string' ? event.payload.resets_on : null
+  const planPercent = Number(event.payload.plan_usage_percentage)
+  const planIncluded = Number(event.payload.credits_included)
+  const usageError = typeof event.payload.error === 'string' ? event.payload.error : null
+  if (usageError) return <section className="usage-card"><header>{providerIcon('kiro', 14)}<strong>Kiro usage</strong><span>Unavailable</span></header><div className="usage-grid"><div><small>Result</small><b>No usage reported</b><em>{usageError}</em></div></div></section>
+  if (plan || Number.isFinite(planPercent)) {
+    return <section className="usage-card"><header>{providerIcon('kiro', 14)}<strong>Kiro usage</strong><span>{plan || 'Plan snapshot'}</span></header><div className="usage-grid"><div><small>Plan credits</small><b>{credits || 'No credit data yet'}</b>{planIncluded > 0 && <em>of {planIncluded.toLocaleString()} covered in plan</em>}</div><div><small>Plan used</small><b>{Number.isFinite(planPercent) ? `${planPercent.toFixed(1)}%` : 'Unavailable'}</b>{resetsOn && <em>resets on {resetsOn}</em>}</div></div></section>
+  }
   return <section className="usage-card"><header>{providerIcon('kiro', 14)}<strong>Kiro usage</strong><span>Session snapshot</span></header><div className="usage-grid"><div><small>Context</small><b>{Number.isFinite(context) ? `${context.toFixed(1)}%` : 'Unavailable'}</b>{size > 0 && <em>{size.toLocaleString()} tokens</em>}</div><div><small>Metering</small><b>{credits || 'No credit data yet'}</b>{used > 0 && <em>{used.toFixed(1)}% context used</em>}</div></div></section>
 }
 
@@ -1167,6 +1388,7 @@ function VirtualTimeline<T>({ items, scrollRef, itemKey, renderItem, before }: {
 
 function RunScreen({ run, events, project, host, provider, onStarted, onError }: { run: Run; events: RunEvent[]; project?: Project; host?: Host; provider?: Provider; onStarted: (run: Run) => void; onError: (message: string) => void }) {
   const [message, setMessage] = usePersistentComposerDraft(`run:${run.hostId}:${run.id}`); const [sending, setSending] = useState(false); const [rewind, setRewind] = useState<{ turnId: string; lastTurnId: string | null; text: string } | null>(null); const [showEnvironment, setShowEnvironment] = useState(false); const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null); const [workspaceLabel, setWorkspaceLabel] = useState(run.worktreeId ? 'Managed worktree' : 'Current checkout'); const [worktreeBusy, setWorktreeBusy] = useState(false); const scroll = useRef<HTMLDivElement>(null); const following = useRef(true); const lastEscape = useRef(0); const submitting = useRef(false)
+  const composerInput = useRef<HTMLTextAreaElement>(null); const [commandIndex, setCommandIndex] = useState(0)
   const filePreview = useFilePreview(run.hostId, run.cwd)
   useEffect(() => { if (following.current) requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight })) }, [events.length])
   useEffect(() => { let cancelled = false; if (run.worktreeId) api.worktreeStatus(run.hostId, run.worktreeId).then((status) => { if (!cancelled) setWorkspaceLabel(status.worktree.branch || 'Managed worktree') }).catch(() => {}); else if (project && host?.status === 'online') api.projectContext(project.hostId, project.id).then((context) => { if (!cancelled) setWorkspaceLabel(context.branch || 'Current checkout') }).catch(() => {}); return () => { cancelled = true } }, [run.hostId, run.worktreeId, project?.id, host?.status])
@@ -1187,10 +1409,15 @@ function RunScreen({ run, events, project, host, provider, onStarted, onError }:
   const selectedActivity = selectedActivityId ? activityEntries.find((entry) => entry.id === selectedActivityId) || null : null
   const durations = turnDurations(displayEvents)
   const queued = pendingQueue(branchEvents)
+  const commandContext = useMemo(() => kiroCommandContext(branchEvents), [branchEvents])
+  const commandSuggestions = useMemo(() => run.provider === 'kiro' ? kiroSlashSuggestions(message, commandContext).slice(0, kiroSuggestionLimit(message)) : [], [run.provider, message, commandContext])
+  const selectedCommandIndex = Math.min(commandIndex, Math.max(0, commandSuggestions.length - 1))
+  const chooseCommand = (suggestion: SlashSuggestion) => { setMessage(suggestion.value); requestAnimationFrame(() => composerInput.current?.focus()) }
   const backtrackable = branchEvents.filter((event, index, all) => event.kind === 'user.message' && typeof event.payload.turn_id === 'string' && typeof event.payload.text === 'string' && all.findIndex((candidate) => candidate.kind === 'user.message' && candidate.payload.turn_id === event.payload.turn_id) === index)
   const backtrackableEventIds = new Set(backtrackable.map((event) => event.event_id))
   const resolvedRequests = new Set(branchEvents.filter((event) => (event.provider_event_type === 'codex.serverRequest/resolved' || event.kind === 'provider.response.submitted' || event.kind === 'provider.response') && (event.payload.request_id !== undefined || event.payload.rpc_id !== undefined)).map((event) => String(event.payload.request_id ?? event.payload.rpc_id)))
   useEffect(() => { submitting.current = false; setSending(false); setSelectedActivityId(null); filePreview.close() }, [run.id])
+  useEffect(() => { setCommandIndex(0) }, [message])
   useEffect(() => { if (selectedActivityId && !selectedActivity) setSelectedActivityId(null) }, [selectedActivityId, selectedActivity])
   const openFile = (href: string) => { setSelectedActivityId(null); filePreview.open(href) }
   const selectActivity = (entry: ActivityEntry) => { filePreview.close(); setShowEnvironment(false); setSelectedActivityId(entry.id) }
@@ -1209,6 +1436,10 @@ function RunScreen({ run, events, project, host, provider, onStarted, onError }:
     finally { setWorktreeBusy(false) }
   }
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (commandSuggestions.length && event.key === 'ArrowDown') { event.preventDefault(); setCommandIndex((value) => (value + 1) % commandSuggestions.length); return }
+    if (commandSuggestions.length && event.key === 'ArrowUp') { event.preventDefault(); setCommandIndex((value) => (value - 1 + commandSuggestions.length) % commandSuggestions.length); return }
+    if (commandSuggestions.length && event.key === 'Tab') { event.preventDefault(); chooseCommand(commandSuggestions[selectedCommandIndex]); return }
+    if (commandSuggestions.length && event.key === 'Enter' && !event.shiftKey && message !== commandSuggestions[selectedCommandIndex].value) { event.preventDefault(); chooseCommand(commandSuggestions[selectedCommandIndex]); return }
     if (tmuxRun && event.key === 'Tab') { event.preventDefault(); void sendPrompt('queue'); return }
     if (tmuxRun && event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendPrompt(); return }
     if (event.key !== 'Escape') { lastEscape.current = 0; return }
@@ -1227,16 +1458,19 @@ function RunScreen({ run, events, project, host, provider, onStarted, onError }:
     {showEnvironment && <EnvironmentPopover title="Environment" onClose={() => setShowEnvironment(false)}><EnvironmentRow icon={<Terminal size={16} />} label="Provider" value={provider?.name || run.provider} /><EnvironmentRow icon={host?.type === 'ssh' ? <Globe2 size={16} /> : <Laptop size={16} />} label="Location" value={host?.name} /><EnvironmentRow icon={<FolderGit2 size={16} />} label="Project" value={project?.name} /><EnvironmentRow icon={<GitBranch size={16} />} label="Workspace" value={workspaceLabel} /><EnvironmentRow icon={<Folder size={16} />} label="Path" value={run.cwd} /><TmuxDetails name={run.tmuxName} command={run.tmuxAccessCommand} /><div className="environment-actions"><button onClick={() => api.openPath(run.hostId, run.cwd)}>Open folder</button>{run.worktreeId && !active.has(run.status) && <><button onClick={async () => { const status = await api.worktreeStatus(run.hostId, run.worktreeId!); alert(`${status.summary}\n\n${status.diff_stat}`) }}>Inspect changes</button><button disabled={worktreeBusy} onClick={() => void mergeManagedWorktree()}><GitMerge size={12} />{worktreeBusy ? 'Merging…' : 'Merge'}</button><button className="danger" onClick={async () => { const status = await api.worktreeStatus(run.hostId, run.worktreeId!); if (confirm(status.dirty ? 'This worktree has uncommitted changes. Force remove it?' : 'Remove this managed worktree?')) await api.removeWorktree(run.hostId, run.worktreeId!, status.dirty) }}>Remove worktree</button></>}</div>{host?.status !== 'online' && <p><WifiOff size={13} />Viewer reconnecting; run remains on host.</p>}</EnvironmentPopover>}
     {selectedActivity && <ActivityInspectorPanel entry={selectedActivity} hostId={run.hostId} cwd={run.cwd} onClose={() => setSelectedActivityId(null)} />}
     {!selectedActivity && filePreview.preview && <FilePreviewPanel state={filePreview.preview} onClose={filePreview.close} />}
-    <ComposerFrame className={`thread-composer ${rewind ? 'rewinding' : ''}`} onSubmit={send}>{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.length} queued</strong>{run.status === 'waiting_for_input' && !tmuxRun && <button type="button" onClick={() => api.startQueued(run.hostId, run.id)}>Run next</button>}</header>{queued.map((item) => <div key={item.id}><span title={item.error || item.message}>{item.message}{item.error ? ' · failed to start' : ''}</span><button type="button" title="Remove queued prompt" onClick={() => api.removeQueued(run.hostId, run.id, item.id)}><X size={12} /></button></div>)}</div>}{rewind && <div className="rewind-banner"><Pencil size={13} />Editing previous message · sending creates a branch<button type="button" title="Cancel editing previous message" onClick={() => { setRewind(null); setMessage('') }}><X size={13} /></button></div>}<ComposerInput disabled={sending || (active.has(run.status) ? !canUseAttachedSession : !(run.sessionId && provider?.resume))} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={tmuxRun ? 'Steer now · Tab queues after this turn' : active.has(run.status) ? (run.status === 'waiting_for_input' ? queued.length ? 'Run or remove queued prompts before editing history' : 'Continue this thread · edit a message above or press Esc Esc' : ui.activeInput === 'queue' ? `Queue for after this ${providerName(run.provider)} turn` : provider?.live_input ? 'Steer this turn' : 'Live steering is not available for this provider') : (run.sessionId && provider?.resume ? 'Continue this session' : 'This provider session cannot be resumed')} /><ComposerFooter><button type="button"><Plus size={18} /></button>{turnRunning && <button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}><Square size={14} />Interrupt</button>}{queuedInput && turnRunning && <button type="button" className="queue" disabled={!message.trim() || sending} onClick={queue}><ListPlus size={14} />Queue</button>}{tmuxRun && <span className="delivery-mode"><Send size={13} />Enter · Steer</span>}{ui.closeAttached && run.status === 'waiting_for_input' && <button type="button" className="interrupt" onClick={() => confirm(`Close this attached ${providerName(run.provider)} session?`) && api.controlRun(run.hostId, run.id, 'terminate')}><Square size={14} />Close</button>}{run.status === 'interrupting' && <><button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}>Terminate</button><button type="button" className="interrupt" onClick={() => confirm('Force kill the full process group?') && api.controlRun(run.hostId, run.id, 'kill')}>Kill</button></>}<span /><small>{tmuxRun ? run.tmuxName : run.model || provider?.name}</small>{!active.has(run.status) && run.sessionId && provider?.fork && <button type="button" disabled={sending || !message.trim()} onClick={() => void sendPrompt('fork')}>Fork</button>}<button className="send" disabled={sending || !message.trim() || (active.has(run.status) ? !canUseAttachedSession : !(run.sessionId && provider?.resume))}>{sending ? <RefreshCw className="spin" size={15} /> : rewind ? <GitBranch size={16} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame>
+    <ComposerFrame className={`thread-composer ${rewind ? 'rewinding' : ''} ${commandSuggestions.length ? 'command-menu-open' : ''}`} onSubmit={send}><SlashCommandMenu suggestions={commandSuggestions} selected={selectedCommandIndex} onSelect={setCommandIndex} onChoose={chooseCommand} />{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.length} queued</strong>{run.status === 'waiting_for_input' && !tmuxRun && <button type="button" onClick={() => api.startQueued(run.hostId, run.id)}>Run next</button>}</header>{queued.map((item) => <div key={item.id}><span title={item.error || item.message}>{item.message}{item.error ? ' · failed to start' : ''}</span><button type="button" title="Remove queued prompt" onClick={() => api.removeQueued(run.hostId, run.id, item.id)}><X size={12} /></button></div>)}</div>}{rewind && <div className="rewind-banner"><Pencil size={13} />Editing previous message · sending creates a branch<button type="button" title="Cancel editing previous message" onClick={() => { setRewind(null); setMessage('') }}><X size={13} /></button></div>}<ComposerInput ref={composerInput} disabled={sending || (active.has(run.status) ? !canUseAttachedSession : !(run.sessionId && provider?.resume))} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={tmuxRun ? 'Steer now · Tab queues after this turn' : active.has(run.status) ? (run.status === 'waiting_for_input' ? queued.length ? 'Run or remove queued prompts before editing history' : 'Continue this thread · edit a message above or press Esc Esc' : ui.activeInput === 'queue' ? `Queue for after this ${providerName(run.provider)} turn` : provider?.live_input ? 'Steer this turn' : 'Live steering is not available for this provider') : (run.sessionId && provider?.resume ? 'Continue this session' : 'This provider session cannot be resumed')} /><ComposerFooter><button type="button"><Plus size={18} /></button>{turnRunning && <button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}><Square size={14} />Interrupt</button>}{queuedInput && turnRunning && <button type="button" className="queue" disabled={!message.trim() || sending} onClick={queue}><ListPlus size={14} />Queue</button>}{tmuxRun && <span className="delivery-mode"><Send size={13} />Enter · Steer</span>}{ui.closeAttached && run.status === 'waiting_for_input' && <button type="button" className="interrupt" onClick={() => confirm(`Close this attached ${providerName(run.provider)} session?`) && api.controlRun(run.hostId, run.id, 'terminate')}><Square size={14} />Close</button>}{run.status === 'interrupting' && <><button type="button" className="interrupt" onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}>Terminate</button><button type="button" className="interrupt" onClick={() => confirm('Force kill the full process group?') && api.controlRun(run.hostId, run.id, 'kill')}>Kill</button></>}<span /><small>{run.provider === 'kiro' ? [commandContext.currentModel || run.model || 'Kiro', commandContext.currentEffort].filter(Boolean).join(' · ') : tmuxRun ? run.tmuxName : run.model || provider?.name}</small>{!active.has(run.status) && run.sessionId && provider?.fork && <button type="button" disabled={sending || !message.trim()} onClick={() => void sendPrompt('fork')}>Fork</button>}<button className="send" disabled={sending || !message.trim() || (active.has(run.status) ? !canUseAttachedSession : !(run.sessionId && provider?.resume))}>{sending ? <RefreshCw className="spin" size={15} /> : rewind ? <GitBranch size={16} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame>
   </div></FilePreviewContext.Provider>
 }
 
-function SessionScreen({ session, messages, project, host, provider, onStarted, onError }: { session: ProviderSession; messages: SessionMessage[]; project?: Project; host?: Host; provider?: Provider; onStarted: (run: Run) => void; onError: (message: string) => void }) {
+function SessionScreen({ session, messages, runEvents, project, host, provider, onStarted, onError }: { session: ProviderSession; messages: SessionMessage[]; runEvents: RunEvent[]; project?: Project; host?: Host; provider?: Provider; onStarted: (run: Run) => void; onError: (message: string) => void }) {
   const scroll = useRef<HTMLDivElement>(null); const following = useRef(true); const [showEnvironment, setShowEnvironment] = useState(false); const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null); const [message, setMessage] = usePersistentComposerDraft(`session:${session.hostId}:${session.provider}:${session.nativeSessionId}`); const [busy, setBusy] = useState(false); const [controlBusy, setControlBusy] = useState<'adopt' | 'move' | null>(null); const [moving, setMoving] = useState(false); const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
-  const submitting = useRef(false)
+  const submitting = useRef(false); const composerInput = useRef<HTMLTextAreaElement>(null); const [commandIndex, setCommandIndex] = useState(0)
   const adoptedRun = useRef<string | null>(null)
   const filePreview = useFilePreview(session.hostId, session.cwd)
   const timeline = useMemo(() => historicalTimelineItems(messages), [messages])
+  // Terminal-only commands such as /usage never reach the transcript; Codesk
+  // reports them as run events on the backing managed run.
+  const latestUsage = useMemo(() => runEvents.filter((event) => event.kind === 'usage.updated').at(-1) || null, [runEvents])
   const activityEntries = timeline.flatMap((item) => isHistoricalActivity(item) ? historicalActivityItems(item.messages).flatMap((activity) => activity.type === 'entry' ? [activity.entry] : []) : [])
   const selectedActivity = selectedActivityId ? activityEntries.find((entry) => entry.id === selectedActivityId) || null : null
   const attached = Boolean(session.pid)
@@ -1244,6 +1478,32 @@ function SessionScreen({ session, messages, project, host, provider, onStarted, 
   const canUseAttachedSession = attached && host?.status === 'online' && session.inputTransport === 'tmux' && session.tmuxControlled === true
   const canResume = !attached && session.status !== 'running' && host?.status === 'online' && provider?.available === true && provider.resume
   const canSend = canUseAttachedSession || canResume
+  const [models, setModels] = useState(() => kiroModelCatalog.get(session.hostId) || [])
+  const modelsRequested = useRef(false)
+  // A terminal-driven session reports its live model and effort on the harness
+  // status line, which is more current than anything replayed from events.
+  const commandContext = useMemo(() => {
+    const base = kiroCommandContext(runEvents)
+    return { ...base, models: models.length ? models : base.models, currentModel: session.model || base.currentModel, currentEffort: session.effort || base.currentEffort, modelsPending: session.provider === 'kiro' && Boolean(session.managedRunId) }
+  }, [runEvents, models, session.model, session.effort, session.provider, session.managedRunId])
+  // Kiro exposes no non-interactive model listing, so the catalog is read from
+  // its picker the first time the operator actually asks for `/model`.
+  useEffect(() => {
+    if (session.provider !== 'kiro' || !session.managedRunId || !canUseAttachedSession) return
+    if (models.length || modelsRequested.current || !message.trimStart().toLowerCase().startsWith('/model')) return
+    modelsRequested.current = true
+    api.providerModels(session.hostId, session.managedRunId)
+      .then((result) => {
+        const catalog = result.models.map((model) => ({ id: model.id, description: model.description || '' }))
+        if (!catalog.length) return
+        kiroModelCatalog.set(session.hostId, catalog)
+        setModels(catalog)
+      })
+      .catch(() => { modelsRequested.current = false })
+  }, [message, session.provider, session.managedRunId, session.hostId, canUseAttachedSession, models.length])
+  const commandSuggestions = useMemo(() => session.provider === 'kiro' ? kiroSlashSuggestions(message, commandContext).slice(0, kiroSuggestionLimit(message)) : [], [session.provider, message, commandContext])
+  const selectedCommandIndex = Math.min(commandIndex, Math.max(0, commandSuggestions.length - 1))
+  const chooseCommand = (suggestion: SlashSuggestion) => { setMessage(suggestion.value); requestAnimationFrame(() => composerInput.current?.focus()) }
   const submitMessage = async (mode: 'steer' | 'queue' = 'steer') => {
     const prompt = message.trim()
     if (!prompt || !canSend || submitting.current) return
@@ -1251,10 +1511,17 @@ function SessionScreen({ session, messages, project, host, provider, onStarted, 
     setBusy(true)
     try {
       if (canUseAttachedSession) {
-        const result = await api.externalSessionInput(session, prompt, mode)
-        if (result.queued) setQueued((items) => [...items.filter((item) => item.id !== result.queued!.id), result.queued!])
-        setMessage('')
-        if (result.run) onStarted(result.run)
+        // A session backed by a Codesk-managed run must go through the run
+        // input API; the external-session path refuses managed writers.
+        if (session.managedRunId) {
+          await api.input(session.hostId, session.managedRunId, prompt, mode)
+          setMessage('')
+        } else {
+          const result = await api.externalSessionInput(session, prompt, mode)
+          if (result.queued) setQueued((items) => [...items.filter((item) => item.id !== result.queued!.id), result.queued!])
+          setMessage('')
+          if (result.run) onStarted(result.run)
+        }
       } else {
         const run = await api.resumeSession(session, prompt)
         setMessage('')
@@ -1266,6 +1533,10 @@ function SessionScreen({ session, messages, project, host, provider, onStarted, 
   }
   const continueSession = (event: FormEvent) => { event.preventDefault(); void submitMessage() }
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (commandSuggestions.length && event.key === 'ArrowDown') { event.preventDefault(); setCommandIndex((value) => (value + 1) % commandSuggestions.length); return }
+    if (commandSuggestions.length && event.key === 'ArrowUp') { event.preventDefault(); setCommandIndex((value) => (value - 1 + commandSuggestions.length) % commandSuggestions.length); return }
+    if (commandSuggestions.length && event.key === 'Tab') { event.preventDefault(); chooseCommand(commandSuggestions[selectedCommandIndex]); return }
+    if (commandSuggestions.length && event.key === 'Enter' && !event.shiftKey && message !== commandSuggestions[selectedCommandIndex].value) { event.preventDefault(); chooseCommand(commandSuggestions[selectedCommandIndex]); return }
     if (event.key === 'Tab' && canUseAttachedSession) {
       event.preventDefault()
       void submitMessage('queue')
@@ -1277,6 +1548,7 @@ function SessionScreen({ session, messages, project, host, provider, onStarted, 
     }
   }
   useEffect(() => { submitting.current = false; adoptedRun.current = null; setBusy(false); setControlBusy(null); setMoving(false); setQueued([]); setSelectedActivityId(null); filePreview.close() }, [session.hostId, session.id])
+  useEffect(() => { setCommandIndex(0) }, [message])
   useEffect(() => { if (selectedActivityId && !selectedActivity) setSelectedActivityId(null) }, [selectedActivityId, selectedActivity])
   useEffect(() => {
     if (!session.pid || !canUseAttachedSession || host?.status !== 'online') return
@@ -1331,13 +1603,13 @@ function SessionScreen({ session, messages, project, host, provider, onStarted, 
   const openFile = (href: string) => { setSelectedActivityId(null); filePreview.open(href) }
   const selectActivity = (entry: ActivityEntry) => { filePreview.close(); setShowEnvironment(false); setSelectedActivityId(entry.id) }
   return <FilePreviewContext.Provider value={openFile}><div className={`thread-screen provider-thread ${showEnvironment ? 'environment-open' : ''} ${filePreview.preview || selectedActivity ? 'file-preview-open' : ''}`}>
-    <header className="thread-header">{providerIcon(session.provider)}<strong>{session.title}</strong>{session.status === 'running' && <span className="observed-badge"><Radio size={11} />Running</span>}<span /><button title="Thread actions"><MoreHorizontal size={18} /></button><button className={`environment-toggle ${showEnvironment ? 'active' : ''}`} onClick={() => setShowEnvironment((value) => !value)}><Info size={15} />Environment</button></header>
-    <div className={`thread-scroll history-scroll ${canSend ? 'continuable' : ''}`} ref={scroll} onScroll={() => { const element = scroll.current; if (element) following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}>{messages.length ? <VirtualTimeline items={timeline} scrollRef={scroll} itemKey={(item) => isHistoricalActivity(item) ? item.id : item.id} renderItem={(item) => isHistoricalActivity(item) ? <HistoricalActivityGroup messages={item.messages} selectedId={selectedActivityId} onSelect={selectActivity} /> : item.kind === 'turn_completed' ? <div className="turn-boundary"><span />{item.duration_ms !== undefined ? `Worked for ${durationLabel(item.duration_ms)}` : 'Turn completed'}<span /></div> : <ConversationMessage role={item.role} text={item.text} />} /> : <div className="thread-column">{host?.status !== 'online' ? <div className="thread-empty-state"><WifiOff size={20} /><strong>{host?.name || 'This host'} is offline</strong><p>The project and conversation remain in navigation. Messages will load when the host reconnects.</p></div> : <div className="thread-status"><RefreshCw className="spin" size={13} />Loading conversation</div>}</div>}</div>
+    <header className="thread-header">{providerIcon(session.provider)}<strong>{session.title}</strong>{session.status === 'running' && <span className="observed-badge"><Spinner />Running</span>}<span /><button title="Thread actions"><MoreHorizontal size={18} /></button><button className={`environment-toggle ${showEnvironment ? 'active' : ''}`} onClick={() => setShowEnvironment((value) => !value)}><Info size={15} />Environment</button></header>
+    <div className={`thread-scroll history-scroll ${canSend ? 'continuable' : ''}`} ref={scroll} onScroll={() => { const element = scroll.current; if (element) following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}>{messages.length ? <VirtualTimeline items={timeline} scrollRef={scroll} itemKey={(item) => isHistoricalActivity(item) ? item.id : item.id} renderItem={(item) => isHistoricalActivity(item) ? <HistoricalActivityGroup messages={item.messages} selectedId={selectedActivityId} onSelect={selectActivity} /> : item.kind === 'turn_completed' ? <div className="turn-boundary"><span />{item.duration_ms !== undefined ? `Worked for ${durationLabel(item.duration_ms)}` : 'Turn completed'}<span /></div> : <ConversationMessage role={item.role} text={item.text} />} /> : <div className="thread-column">{host?.status !== 'online' ? <div className="thread-empty-state"><WifiOff size={20} /><strong>{host?.name || 'This host'} is offline</strong><p>The project and conversation remain in navigation. Messages will load when the host reconnects.</p></div> : <div className="thread-status"><RefreshCw className="spin" size={13} />Loading conversation</div>}</div>}{latestUsage && <div className="thread-column"><UsageCard event={latestUsage} /></div>}</div>
     {showEnvironment && <EnvironmentPopover title="Environment" onClose={() => setShowEnvironment(false)}><EnvironmentRow icon={providerIcon(session.provider)} label="Provider" value={providerName(session.provider)} /><EnvironmentRow icon={host?.type === 'ssh' ? <Globe2 size={16} /> : <Laptop size={16} />} label="Location" value={host?.name} /><EnvironmentRow icon={<FolderGit2 size={16} />} label="Project" value={project?.name} /><TmuxDetails name={session.tmuxName} command={session.tmuxAccessCommand} /></EnvironmentPopover>}
     {selectedActivity && <ActivityInspectorPanel entry={selectedActivity} hostId={session.hostId} cwd={session.cwd} onClose={() => setSelectedActivityId(null)} />}
     {!selectedActivity && filePreview.preview && <FilePreviewPanel state={filePreview.preview} onClose={filePreview.close} />}
     {attached && !canUseAttachedSession && host?.status === 'online' && <div className="tmux-control-notice"><div><Terminal size={16} /><span><strong>{session.tmuxName ? 'tmux session detected' : moving ? 'Moving to tmux' : 'Terminal session'}</strong><small>{session.tmuxName ? 'Enable control to steer now or queue the next turn.' : moving ? 'Codesk will switch after the active turn becomes idle.' : 'Move this session to tmux to enable safe Steer and Queue input.'}</small></span></div><TmuxDetails name={session.tmuxName} command={session.tmuxAccessCommand} /><button type="button" disabled={Boolean(controlBusy) || moving} onClick={async () => { if (!session.pid) return; const action = session.tmuxName ? 'adopt' : 'move'; setControlBusy(action); try { if (action === 'adopt') await api.adoptExternalTmux(session); else { await api.moveExternalToTmux(session); setMoving(true) } } catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) } finally { setControlBusy(null) } }}>{controlBusy ? <RefreshCw className="spin" size={14} /> : session.tmuxName ? <Plug size={14} /> : <Terminal size={14} />}{session.tmuxName ? 'Enable control' : moving ? 'Waiting for idle' : 'Move to tmux'}</button></div>}
-    {canSend ? <ComposerFrame className="thread-composer history-composer" onSubmit={continueSession}>{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.filter((item) => item.status === 'queued' || item.status === 'sending').length} queued</strong></header>{queued.map((item) => <div key={item.id} className={item.status === 'failed' ? 'failed' : ''}><span title={item.error || item.message}>{item.message}{item.status === 'sending' ? ' · sending' : item.status === 'queued' ? ' · after this turn' : item.error ? ` · ${item.error}` : ''}</span>{queuePid && <button type="button" title="Remove queued prompt" onClick={async () => { await api.removeExternalQueued(session.hostId, queuePid, item.id); setQueued((items) => items.filter((candidate) => candidate.id !== item.id)) }}><X size={12} /></button>}</div>)}</div>}<ComposerInput autoFocus disabled={busy} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={canUseAttachedSession ? `Steer this ${providerName(session.provider)} session` : `Continue this ${providerName(session.provider)} conversation`} /><ComposerFooter><button type="button"><Plus size={18} /></button>{canUseAttachedSession && <><span className="delivery-mode"><Send size={13} />Enter · Steer</span><span className="delivery-mode queue"><ListPlus size={13} />Tab · Queue</span></>}<span /><small>{canUseAttachedSession ? session.tmuxName : `Resume · ${provider?.name}`}</small><button className="send" disabled={!message.trim() || busy} title={canUseAttachedSession ? 'Steer now (Tab queues instead)' : 'Continue conversation'}>{busy ? <RefreshCw className="spin" size={15} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame> : !attached && <div className="history-notice"><Info size={14} /><span><strong>{host?.status !== 'online' ? 'Host offline' : provider && !provider.available ? `${provider.name} unavailable` : 'Continuation unavailable'}</strong>{host?.status !== 'online' ? 'Reconnect the host to continue this conversation.' : provider && !provider.available ? `Install or reconnect ${provider.name} on this host to continue.` : 'This provider does not expose a supported resume path for this session.'}</span></div>}
+    {canSend ? <ComposerFrame className={`thread-composer history-composer ${commandSuggestions.length ? 'command-menu-open' : ''}`} onSubmit={continueSession}><SlashCommandMenu suggestions={commandSuggestions} selected={selectedCommandIndex} onSelect={setCommandIndex} onChoose={chooseCommand} />{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.filter((item) => item.status === 'queued' || item.status === 'sending').length} queued</strong></header>{queued.map((item) => <div key={item.id} className={item.status === 'failed' ? 'failed' : ''}><span title={item.error || item.message}>{item.message}{item.status === 'sending' ? ' · sending' : item.status === 'queued' ? ' · after this turn' : item.error ? ` · ${item.error}` : ''}</span>{queuePid && <button type="button" title="Remove queued prompt" onClick={async () => { await api.removeExternalQueued(session.hostId, queuePid, item.id); setQueued((items) => items.filter((candidate) => candidate.id !== item.id)) }}><X size={12} /></button>}</div>)}</div>}<ComposerInput ref={composerInput} autoFocus disabled={busy} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={canUseAttachedSession ? `Steer this ${providerName(session.provider)} session` : `Continue this ${providerName(session.provider)} conversation`} /><ComposerFooter><button type="button"><Plus size={18} /></button>{canUseAttachedSession && <><span className="delivery-mode"><Send size={13} />Enter · Steer</span><span className="delivery-mode queue"><ListPlus size={13} />Tab · Queue</span></>}<span /><small>{canUseAttachedSession ? [commandContext.currentModel, commandContext.currentEffort].filter(Boolean).join(' · ') || session.tmuxName : `Resume · ${provider?.name}`}</small><button className="send" disabled={!message.trim() || busy} title={canUseAttachedSession ? 'Steer now (Tab queues instead)' : 'Continue conversation'}>{busy ? <RefreshCw className="spin" size={15} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame> : !attached && <div className="history-notice"><Info size={14} /><span><strong>{host?.status !== 'online' ? 'Host offline' : provider && !provider.available ? `${provider.name} unavailable` : 'Continuation unavailable'}</strong>{host?.status !== 'online' ? 'Reconnect the host to continue this conversation.' : provider && !provider.available ? `Install or reconnect ${provider.name} on this host to continue.` : 'This provider does not expose a supported resume path for this session.'}</span></div>}
   </div></FilePreviewContext.Provider>
 }
 
@@ -1371,13 +1643,14 @@ function ObservedScreen({ host, project, provider, agent, onStarted, onError }: 
         }
         setQueued(items)
       } catch {}
-      if (!stopped) timer = window.setTimeout(poll, 1000)
+      if (!stopped && !document.hidden) timer = window.setTimeout(poll, 1000)
     }
-    timer = window.setTimeout(poll, 1000)
-    return () => { stopped = true; clearTimeout(timer) }
+    const visibility = () => { clearTimeout(timer); if (!document.hidden) void poll() }
+    document.addEventListener('visibilitychange', visibility); timer = window.setTimeout(poll, 1000)
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
   }, [host?.id, host?.status, agent.pid, queued.length > 0, controlled])
   return <div className="thread-screen observed-screen">
-    <header className="thread-header">{providerIcon(agent.provider)}<strong>{providerName(agent.provider)} session</strong><span className="observed-badge"><Radio size={11} />Observed</span><span /><button><MoreHorizontal size={18} /></button></header>
+    <header className="thread-header">{providerIcon(agent.provider)}<strong>{providerName(agent.provider)} session</strong><span className="observed-badge"><Spinner />Observed</span><span /><button><MoreHorizontal size={18} /></button></header>
     <div className="observed-content"><div className="observed-hero">{providerIcon(agent.provider)}<h1>{providerName(agent.provider)} is running</h1><p>{controlled ? 'Codesk can steer this tmux session directly and queue the next turn.' : agent.tmux_session_name ? 'Codesk found this tmux session. Enable control to send input safely.' : 'Move this terminal session to tmux after its active turn becomes idle.'}</p></div><TmuxDetails name={agent.tmux_session_name} command={agent.tmux_access_command} />{project && agent.native_session_id && !controlled && <button className="observed-tmux-action" type="button" disabled={controlBusy || moving} onClick={async () => { if (!host) return; setControlBusy(true); try { if (agent.tmux_session_name) await api.adoptExternalAgentTmux(host.id, project.id, agent.pid, agent.native_session_id); else { await api.moveExternalAgentToTmux(host.id, project.id, agent.pid, agent.native_session_id); setMoving(true) } } catch (cause) { onError(cause instanceof Error ? cause.message : String(cause)) } finally { setControlBusy(false) } }}>{controlBusy ? <RefreshCw className="spin" size={14} /> : <Terminal size={14} />}{agent.tmux_session_name ? 'Enable control' : moving ? 'Waiting for idle' : 'Move to tmux'}</button>}</div>
     {canContinue && <ComposerFrame className="thread-composer history-composer" onSubmit={(event) => { event.preventDefault(); void submit() }}>{queued.length > 0 && <div className="queue-panel"><header><ListPlus size={13} /><strong>{queued.length} queued</strong></header>{queued.map((item) => <div key={item.id} className={item.status === 'failed' ? 'failed' : ''}><span title={item.error || item.message}>{item.message}{item.status === 'sending' ? ' · sending' : item.status === 'queued' ? ' · after this turn' : item.error ? ` · ${item.error}` : ''}</span></div>)}</div>}<ComposerInput autoFocus disabled={busy || host?.status !== 'online'} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={keyDown} placeholder="Steer this session · Tab queues after this turn" /><ComposerFooter><button type="button"><Plus size={18} /></button><span className="delivery-mode"><Send size={13} />Enter · Steer</span><span className="delivery-mode queue"><ListPlus size={13} />Tab · Queue</span><span /><small>{agent.tmux_session_name}</small><button className="send" disabled={!message.trim() || busy || host?.status !== 'online'}>{busy ? <RefreshCw className="spin" size={15} /> : <Send size={17} />}</button></ComposerFooter></ComposerFrame>}
   </div>

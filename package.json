@@ -18,18 +18,24 @@
     "build": "vite build",
     "build:gateway": "node scripts/build-gateway.mjs",
     "start": "node server/index.mjs",
-    "test": "cargo build -p codeskd && cargo test -p codeskd && node scripts/test-codex-app-server.mjs && node scripts/test-gateway-codex.mjs && node scripts/test-daemon-survival.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs && node scripts/test-drafts.mjs",
+    "test": "cargo build -p codeskd && cargo test -p codeskd && node scripts/test-session-budget.mjs && node scripts/test-run-archive.mjs && node scripts/test-codex-app-server.mjs && node scripts/test-gateway-codex.mjs && node scripts/test-daemon-survival.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs && node scripts/test-drafts.mjs && node scripts/test-host-bootstrap-retry.mjs",
     "check": "tsc --noEmit",
+    "bench:codex": "cargo build -p codeskd && node scripts/bench-codex-runtime.mjs",
     "desktop": "tauri dev",
     "desktop:build": "npm run build:gateway && cargo build -p codeskd && tauri build",
     "desktop:redeploy": "node scripts/redeploy-local.mjs",
     "desktop:handoff": "npm run desktop:redeploy",
+    "test:kiro-live": "cargo build -p codeskd && node scripts/test-kiro-acp-live.mjs",
+    "test:kiro-tmux-live": "cargo build -p codeskd && node scripts/test-kiro-tmux-live.mjs",
     "test:dsh-live": "node scripts/test-dsh-live.mjs",
-    "test:agy-live": "cargo build -p codeskd && node scripts/test-agy-live.mjs"
+    "test:agy-live": "cargo build -p codeskd && node scripts/test-agy-live.mjs",
+    "test:kiro-model-live": "cargo build -p codeskd && node scripts/test-kiro-model-live.mjs",
+    "test:bootstrap-live": "node scripts/test-remote-bootstrap-live.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.9",
     "@tauri-apps/plugin-notification": "^2.3.2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
@@ -39,12 +45,14 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^5.0.0",
     "concurrently": "^9.2.0",
+    "tailwindcss": "4.3.3",
     "typescript": "^5.9.2",
     "vite": "^7.1.2"
   }

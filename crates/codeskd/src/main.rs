@@ -64,6 +64,12 @@ struct DiscoveryCache {
 }
 
 const DISCOVERY_TTL: Duration = Duration::from_secs(60);
+/// Cadence used while at least one tmux session is under Codesk control.
+const TMUX_WORKER_ACTIVE_INTERVAL: Duration = Duration::from_millis(350);
+/// Cadence used when nothing is under control. Enabling control writes a row and
+/// the next tick picks it up, so the only cost of the longer wait is how soon
+/// after that a newly controlled pane starts being serviced.
+const TMUX_WORKER_IDLE_INTERVAL: Duration = Duration::from_millis(2_000);
 type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
 fn api_error(error: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -171,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/runs/{id}/events", get(run_events))
         .route("/v1/runs/{id}/input", post(input))
         .route("/v1/runs/{id}/response", post(provider_response))
+        .route("/v1/runs/{id}/models", post(provider_models))
         .route("/v1/runs/{id}/queue/start", post(start_queued))
         .route("/v1/runs/{id}/queue/{queue_id}", delete(remove_queued))
         .route("/v1/runs/{id}/interrupt", post(interrupt))
@@ -657,6 +664,22 @@ async fn control_pane(state: &AppState, control: &TmuxControl) -> anyhow::Result
         .context("tmux pane is no longer available")
 }
 
+/// Resolve a control's pane from a snapshot already taken for this tick. Same
+/// contract as [`control_pane`], without the per-control subprocess spawn.
+fn control_pane_from(
+    control: &TmuxControl,
+    panes: &tmux::PaneSnapshot,
+) -> anyhow::Result<tmux::TmuxPane> {
+    let pane_id = control
+        .pane_id
+        .as_deref()
+        .context("tmux pane is unavailable")?;
+    panes
+        .get(control.socket_path.as_deref(), pane_id)
+        .cloned()
+        .context("tmux pane is no longer available")
+}
+
 async fn invalidate_discovery(state: &AppState) {
     state.discovery.lock().await.updated_at = None;
 }
@@ -666,50 +689,66 @@ async fn tmux_control_worker(state: Arc<AppState>) {
         .checked_sub(Duration::from_secs(2))
         .unwrap_or_else(Instant::now);
     loop {
-        if let Ok(controls) = state.db.tmux_controls() {
-            if last_recovery_scan.elapsed() >= Duration::from_secs(1)
-                && controls.iter().any(|control| {
-                    control.enabled
-                        && control.status == "active"
-                        && (control.transcript_path.is_none()
-                            || control.native_session_id.is_none())
-                })
-            {
-                let _ = cached_agents(&state, true).await;
-                last_recovery_scan = Instant::now();
-            }
-            for mut control in controls.into_iter().filter(|control| control.enabled) {
-                if control.status == "active"
+        let enabled = state
+            .db
+            .tmux_controls()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|control| control.enabled)
+            .collect::<Vec<_>>();
+        if enabled.is_empty() {
+            // Nothing is supervised, so skip the pane snapshot entirely and stop
+            // waking several times a second just to re-read an empty table.
+            tokio::time::sleep(TMUX_WORKER_IDLE_INTERVAL).await;
+            continue;
+        }
+        if last_recovery_scan.elapsed() >= Duration::from_secs(1)
+            && enabled.iter().any(|control| {
+                control.status == "active"
                     && (control.transcript_path.is_none() || control.native_session_id.is_none())
-                {
-                    match recover_tmux_control_metadata(&state, &control).await {
-                        Ok(Some(recovered)) => control = recovered,
-                        Ok(None) => {}
-                        Err(error) => tracing::warn!(
-                            control_id = %control.id,
-                            run_id = ?control.run_id,
-                            %error,
-                            "tmux session metadata recovery is still pending"
-                        ),
-                    }
+            })
+        {
+            let _ = cached_agents(&state, true).await;
+            last_recovery_scan = Instant::now();
+        }
+        // One pane listing per distinct socket for the whole tick, shared by
+        // every control below instead of spawning `tmux` once per control.
+        let sockets = enabled
+            .iter()
+            .map(|control| control.socket_path.clone())
+            .collect::<Vec<_>>();
+        let panes = state.tmux.pane_snapshot(&sockets).await;
+        for mut control in enabled {
+            if control.status == "active"
+                && (control.transcript_path.is_none() || control.native_session_id.is_none())
+            {
+                match recover_tmux_control_metadata(&state, &control).await {
+                    Ok(Some(recovered)) => control = recovered,
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        control_id = %control.id,
+                        run_id = ?control.run_id,
+                        %error,
+                        "tmux session metadata recovery is still pending"
+                    ),
                 }
-                let result = if control.status == "waiting_idle" {
-                    process_tmux_move(&state, &control).await
-                } else if control.status == "active" {
-                    process_tmux_queue(&state, &control).await
-                } else {
-                    Ok(())
-                };
-                if let Err(error) = result {
-                    let _ = state.db.update_tmux_control_status(
-                        &control.id,
-                        "failed",
-                        Some(&error.to_string()),
-                    );
-                }
+            }
+            let result = if control.status == "waiting_idle" {
+                process_tmux_move(&state, &control).await
+            } else if control.status == "active" {
+                process_tmux_queue(&state, &control, &panes).await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = result {
+                let _ = state.db.update_tmux_control_status(
+                    &control.id,
+                    "failed",
+                    Some(&error.to_string()),
+                );
             }
         }
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        tokio::time::sleep(TMUX_WORKER_ACTIVE_INTERVAL).await;
     }
 }
 
@@ -837,6 +876,7 @@ async fn process_tmux_move(state: &AppState, control: &TmuxControl) -> anyhow::R
             &args,
             &control.id,
             None,
+            providers::keep_terminal_parent_shell(&control.provider),
         )
         .await?;
     state.db.update_tmux_control_location(
@@ -855,8 +895,12 @@ async fn process_tmux_move(state: &AppState, control: &TmuxControl) -> anyhow::R
     Ok(())
 }
 
-async fn process_tmux_queue(state: &AppState, control: &TmuxControl) -> anyhow::Result<()> {
-    let pane = match control_pane(state, control).await {
+async fn process_tmux_queue(
+    state: &AppState,
+    control: &TmuxControl,
+    panes: &tmux::PaneSnapshot,
+) -> anyhow::Result<()> {
+    let pane = match control_pane_from(control, panes) {
         Ok(pane) => pane,
         Err(error) => {
             state
@@ -1076,6 +1120,9 @@ mod cache_tests {
             updated_at: updated_at.into(),
             status: "idle".into(),
             pid: None,
+            managed_run_id: None,
+            model: None,
+            effort: None,
             input_available: false,
             input_transport: None,
             tmux_name: None,
@@ -1301,6 +1348,17 @@ async fn input(
         .await
         .map_err(api_error)?;
     Ok(Json(json!({"ok":true,"request_id":request.request_id})))
+}
+async fn provider_models(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let models = state
+        .supervisor
+        .provider_models(&id)
+        .await
+        .map_err(api_error)?;
+    Ok(Json(json!({"models":models})))
 }
 async fn start_queued(
     State(state): State<Arc<AppState>>,

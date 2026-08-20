@@ -76,6 +76,7 @@ impl TmuxManager {
         args: &[String],
         control_id: &str,
         environment: Option<&BTreeMap<String, String>>,
+        keep_parent_shell: bool,
     ) -> Result<TmuxLaunch> {
         anyhow::ensure!(self.available().await, "tmux is not installed on this host");
         let socket = self.owned_socket();
@@ -83,7 +84,11 @@ impl TmuxManager {
             tokio::fs::create_dir_all(parent).await?;
         }
         let name = unique_session_name(provider);
-        let shell_command = shell_command_with_environment(command, args, environment);
+        let shell_command = if keep_parent_shell {
+            parent_shell_command_with_environment(command, args, environment)
+        } else {
+            shell_command_with_environment(command, args, environment)
+        };
         let output = Command::new("tmux")
             .args([
                 "-S",
@@ -191,6 +196,26 @@ impl TmuxManager {
         Ok(())
     }
 
+    pub async fn capture_text(&self, pane: &TmuxPane) -> Result<String> {
+        let socket = pane.socket_path.as_deref().map(Path::new);
+        let output = tmux_command(socket)
+            .args(["capture-pane", "-p", "-S", "-100", "-t", &pane.pane_id])
+            .output()
+            .await
+            .context("capture tmux pane")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "tmux could not capture the pane: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    pub async fn send_key(&self, pane: &TmuxPane, key: &str) -> Result<()> {
+        let socket = pane.socket_path.as_deref().map(Path::new);
+        run_tmux(socket, &["send-keys", "-t", &pane.pane_id, key]).await
+    }
+
     pub async fn interrupt(&self, pane: &TmuxPane) -> Result<()> {
         let socket = pane.socket_path.as_deref().map(Path::new);
         run_tmux(socket, &["send-keys", "-t", &pane.pane_id, "C-c"]).await
@@ -208,6 +233,46 @@ impl TmuxManager {
                 .into_iter()
                 .find(|pane| pane.pane_id == pane_id),
         )
+    }
+
+    /// Snapshot every pane reachable on the given sockets, spawning one `tmux`
+    /// process per distinct socket rather than one per pane.
+    ///
+    /// The supervisor loop resolves several controls on every tick. Looking each
+    /// one up with [`Self::pane`] spawned a subprocess per control per tick,
+    /// which dominates idle cost once more than one session is supervised.
+    /// Sockets repeat heavily in practice — usually just the Codesk-owned socket
+    /// plus the user's default one — so batching collapses that to a constant.
+    pub async fn pane_snapshot(&self, sockets: &[Option<String>]) -> PaneSnapshot {
+        let mut distinct: Vec<Option<String>> = Vec::new();
+        for socket in sockets {
+            if !distinct.contains(socket) {
+                distinct.push(socket.clone());
+            }
+        }
+        let mut panes = BTreeMap::new();
+        for socket in distinct {
+            let listed = list_panes(socket.as_deref().map(Path::new), socket.is_some())
+                .await
+                .unwrap_or_default();
+            for pane in listed {
+                panes.insert((socket.clone(), pane.pane_id.clone()), pane);
+            }
+        }
+        PaneSnapshot { panes }
+    }
+}
+
+/// Panes observed during one supervisor tick, keyed by socket and pane id.
+#[derive(Debug, Default)]
+pub struct PaneSnapshot {
+    panes: BTreeMap<(Option<String>, String), TmuxPane>,
+}
+
+impl PaneSnapshot {
+    pub fn get(&self, socket_path: Option<&str>, pane_id: &str) -> Option<&TmuxPane> {
+        self.panes
+            .get(&(socket_path.map(str::to_string), pane_id.to_string()))
     }
 }
 
@@ -368,6 +433,34 @@ fn shell_command_with_environment(
     format!("env {assignments} {}", shell_command(command, args))
 }
 
+fn parent_shell_command_with_environment(
+    command: &str,
+    args: &[String],
+    environment: Option<&BTreeMap<String, String>>,
+) -> String {
+    let exports = environment
+        .filter(|values| !values.is_empty())
+        .map(|values| {
+            values
+                .iter()
+                .map(|(key, value)| format!("export {key}={}", shell_quote(value)))
+                .collect::<Vec<_>>()
+                .join("; ")
+        });
+    let script = match exports {
+        Some(exports) => format!("{exports}; \"$@\"; status=$?; exit \"$status\""),
+        None => "\"$@\"; status=$?; exit \"$status\"".to_string(),
+    };
+    let mut wrapped = vec![
+        "-c".to_string(),
+        script,
+        "codesk-terminal".to_string(),
+        command.to_string(),
+    ];
+    wrapped.extend(args.iter().cloned());
+    shell_command("/bin/sh", &wrapped)
+}
+
 fn shell_quote(value: &str) -> String {
     if !value.is_empty()
         && value
@@ -501,6 +594,20 @@ mod tests {
         assert_eq!(
             shell_command("codex", &["hello\n世界's".into()]),
             "codex 'hello\n世界'\\''s'"
+        );
+    }
+
+    #[test]
+    fn parent_shell_guard_prevents_exec_optimization() {
+        assert_eq!(
+            parent_shell_command_with_environment("kiro-cli", &["chat".into()], None),
+            "/bin/sh -c '\"$@\"; status=$?; exit \"$status\"' codesk-terminal kiro-cli chat"
+        );
+        let environment =
+            BTreeMap::from([("CODESK_PROJECT_PATH".into(), "/tmp/project path".into())]);
+        assert_eq!(
+            parent_shell_command_with_environment("kiro-cli", &["chat".into()], Some(&environment)),
+            "/bin/sh -c 'export CODESK_PROJECT_PATH='\\''/tmp/project path'\\''; \"$@\"; status=$?; exit \"$status\"' codesk-terminal kiro-cli chat"
         );
     }
 }

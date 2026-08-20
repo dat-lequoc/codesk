@@ -207,6 +207,113 @@ Take a screenshot showing the final conversation state and online host status. S
 - Deferred expensive tool-activity details until expanded.
 - Virtualized timelines containing more than 40 rows.
 
+## Codex run-attachment benchmark (2026-08-19)
+
+The idle-app procedure above deliberately excludes provider processes, so it
+never measured what an *attached* Codex run costs. That gap hid a per-run
+polling tax that users noticed as battery drain while Codex sessions were open.
+
+`npm run bench:codex` measures it directly. The benchmark drives the real daemon
+with a fake `codex app-server`, so it is deterministic, offline, needs no
+credentials, and can be run on any revision:
+
+```bash
+npm run bench:codex
+```
+
+It reports three things for one attached Codex run, summing CPU time across the
+daemon, its durable runner, and the app-server process:
+
+| Phase | What it isolates |
+| --- | --- |
+| `idle` | Per-run polling overhead with the turn completed and nothing happening |
+| `wake` | Worst-case delay from submitting input to seeing the resulting event |
+| `stream` | Per-event ingest cost for a 2,000-delta turn |
+
+Run it three times and compare the median. `BENCH_IDLE_SECONDS` and
+`BENCH_STREAM_EVENTS` override the workload.
+
+### Reference result
+
+Same hardware as the reference run above, debug build, median of three:
+
+| Metric | Baseline | Optimized | Change |
+| --- | ---: | ---: | ---: |
+| Idle CPU, one attached Codex run | 1.17% | 0.08% | 93% lower |
+| Idle context switches | 155/s | 8/s | 95% lower |
+| CPU per streamed event | 0.224 ms | 0.165 ms | 26% lower |
+| Input-to-event latency after full idle backoff | not recorded | 5.5 ms | new gate |
+| Streamed deltas received / unique / in order | not recorded | 2000 / 2000 / yes | new gate |
+
+Worst observed wake latency across runs was 186 ms, two active-interval ticks,
+against a 2 s backoff ceiling. The streaming figures are only comparable when
+both revisions are measured with the same benchmark revision; the progress poll
+was later made incremental, which lowers the absolute numbers for both sides.
+
+### Acceptance thresholds
+
+| Check | Threshold |
+| --- | ---: |
+| Idle CPU per attached Codex run | <= 0.3% |
+| Idle context switches per attached run | <= 25/s |
+| Input-to-event latency after idle backoff | <= 400 ms |
+| Streamed deltas received, unique, and gap-free | all three must hold |
+
+The last row is a correctness gate, not a performance one. Each delta in the
+benchmark carries its own index, so the pump's byte-offset arithmetic is checked
+directly: a dropped or double-counted line appears as a gap or a duplicate
+instead of as a plausible-looking event count. The benchmark exits non-zero when
+it fails.
+
+### Root causes found
+
+- Every attached run ran three independent pollers: stdout at 180 ms, stderr at
+  180 ms, and exit detection at 250 ms. That is roughly 15 timer wakeups per
+  second per run, sustained for as long as the run stayed open, whether or not
+  the harness had produced anything.
+- Each stdout/stderr tick re-queried the stream offset from SQLite, re-opened the
+  log file, seeked, read, and then queried the run row again to decide whether to
+  continue. A tick that found no new bytes still paid all of it.
+- The stream offset was committed to SQLite once per streamed line. Codex streams
+  token-level deltas, so a fast turn became hundreds of commits per second on top
+  of the event insert.
+- SQLite ran with WAL's default `synchronous=FULL`, so each of those commits
+  fsynced. Disk syncs at that rate keep the SSD from idling.
+- `read_line` at end-of-file returns a partial trailing line. The old tail parsed
+  that fragment and advanced the offset past it, so a line caught mid-write could
+  be lost.
+- The tmux control worker woke every 350 ms even with no controlled sessions, and
+  resolved each control's pane by spawning its own `tmux list-panes` process, so
+  subprocess spawns scaled with the number of supervised sessions.
+- `transcript_turn_active` re-opened and reverse-scanned the transcript for every
+  controlled session on every tick, including sessions that had not changed.
+- One observed-session queue poller in the UI kept polling at 1 Hz while the
+  window was hidden.
+
+### Optimizations implemented
+
+- Replaced the three per-run pollers with one pump task per run that drains both
+  log channels, watches for runner exit, and finalizes the run. It keeps both
+  readers open and both offsets in memory, so a quiet tick costs one `read`.
+- Made that pump adaptive: 90 ms while output is flowing — faster than the old
+  180 ms — backing off geometrically to 2 s once the runner goes quiet. Input
+  submission notifies the pump, so backing off never delays a turn the user
+  started. This is what the `wake` phase gates.
+- Persist a stream offset once per drain instead of once per line.
+- Set `synchronous=NORMAL`, which keeps WAL crash-safe against process death and
+  only risks the most recent commits on host power loss.
+- Stop at the last complete line and re-read the fragment on the next drain. Once
+  the runner has exited, report the remaining unterminated fragment instead of
+  discarding it, and drain both channels again so final events are not lost.
+- Check terminal run status on every tick rather than only on quiet ones, so a run
+  cancelled while its runner keeps writing still releases its pump.
+- The tmux worker now takes one pane snapshot per distinct socket per tick and
+  shares it across controls, and sleeps at 2 s while nothing is controlled.
+- Memoized `transcript_turn_active` on file length plus modification time.
+- Added the missing visibility guard to the observed-session queue poller.
+
+
+
 ## Power measurement caveat
 
 CPU, context switches, wakeups, and endpoint latency are reliable non-privileged regression signals, but they are not direct watt measurements. Apple's `powermetrics` requires administrator access:

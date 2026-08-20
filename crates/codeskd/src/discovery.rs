@@ -347,10 +347,8 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
                 .map(|session_id| (candidate.pid, (candidate.provider.to_string(), session_id)))
         })
         .collect::<HashMap<_, _>>();
-    let panes = TmuxManager::new(data_root.to_path_buf())
-        .panes()
-        .await
-        .unwrap_or_default();
+    let tmux = TmuxManager::new(data_root.to_path_buf());
+    let panes = tmux.panes().await.unwrap_or_default();
     let mut agents = Vec::new();
     for (root, members) in provider_process_roots(&candidates, &parents) {
         let pid = root.pid;
@@ -361,12 +359,12 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
                 .iter()
                 .find_map(|member| details.get(&member.pid).and_then(|value| value.0.clone()))
         });
-        let transcript_path = root_transcript.or_else(|| {
+        let mut transcript_path = root_transcript.or_else(|| {
             members
                 .iter()
                 .find_map(|member| details.get(&member.pid).and_then(|value| value.1.clone()))
         });
-        let native_session_id = direct_session_ids
+        let mut native_session_id = direct_session_ids
             .get(&pid)
             .map(|(_, session_id)| session_id.clone())
             .or_else(|| {
@@ -387,8 +385,18 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
             .as_deref()
             .and_then(|tty| panes.iter().find(|pane| pane.tty == tty));
         let mut tmux_controlled = false;
+        let mut model = None;
+        let mut effort = None;
         if let Some(pane) = pane {
-            let existing = pane
+            // A terminal-driven harness only reports its live model and effort on
+            // its own status line, so read it from the pane we already resolved.
+            if let Ok(screen) = tmux.capture_text(pane).await {
+                if let Some(status) = providers::parse_terminal_status(provider, &screen) {
+                    model = status.model;
+                    effort = status.effort;
+                }
+            }
+            let mut existing = pane
                 .control_id
                 .as_deref()
                 .and_then(|id| db.tmux_control(id).ok().flatten())
@@ -397,6 +405,27 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
                         .ok()
                         .flatten()
                 });
+            // A pane outlives the harness that used to occupy it, and tmux recycles
+            // pane ids, so a control row can still describe the conversation of a
+            // harness that has since been replaced. Identity recorded for another
+            // provider - or a transcript this provider would never write - must not
+            // be lent to the harness running there now.
+            if let Some(control) = existing.as_mut().filter(|control| {
+                control.provider != provider
+                    || control
+                        .transcript_path
+                        .as_deref()
+                        .is_some_and(|path| !transcript_matches(path, provider))
+            }) {
+                control.native_session_id = None;
+                control.transcript_path = None;
+                control.run_id = None;
+                let _ = db.clear_tmux_control_identity(&control.id);
+            }
+            if let Some(control) = existing.as_ref() {
+                native_session_id = native_session_id.or_else(|| control.native_session_id.clone());
+                transcript_path = transcript_path.or_else(|| control.transcript_path.clone());
+            }
             if pane.controlled || pane.owned || existing.is_some() {
                 let now = chrono::Utc::now().to_rfc3339();
                 let mut control = existing.unwrap_or_else(|| TmuxControl {
@@ -478,6 +507,8 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
                 )
             }),
             tmux_controlled,
+            model,
+            effort,
             tmux_owned: pane.is_some_and(|pane| pane.owned),
         });
     }

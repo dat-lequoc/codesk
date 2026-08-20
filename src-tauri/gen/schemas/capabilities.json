@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default Codesk desktop capability","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-set-badge-count","notification:default"]}}
+{"default":{"identifier":"default","description":"Default Codesk desktop capability","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-set-badge-count","notification:default","opener:default"]}}

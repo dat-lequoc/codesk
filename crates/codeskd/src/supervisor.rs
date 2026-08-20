@@ -1,13 +1,20 @@
-use std::{collections::BTreeMap, io::SeekFrom, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io::SeekFrom,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     process::Command,
-    sync::broadcast,
+    sync::{Notify, broadcast},
 };
 use uuid::Uuid;
 
@@ -22,12 +29,56 @@ use crate::{
     worktrees,
 };
 
+/// Cadence used while a runner is actively producing output.
+const PUMP_ACTIVE_INTERVAL: Duration = Duration::from_millis(90);
+/// Ceiling the pump backs off to once a runner goes quiet.
+const PUMP_IDLE_INTERVAL: Duration = Duration::from_millis(2_000);
+/// Cap on the unterminated remainder reported after a runner exits.
+const MAX_TAIL_FLUSH_BYTES: u64 = 64 * 1024;
+
+/// One runner log channel, with its reader and byte offset retained between
+/// drains so a quiet tick costs a single `read` rather than a fresh open, seek,
+/// and offset lookup.
+struct ChannelPump {
+    channel: &'static str,
+    path: PathBuf,
+    reader: Option<BufReader<tokio::fs::File>>,
+    offset: u64,
+}
+
+impl ChannelPump {
+    fn new(run_dir: &Path, channel: &'static str, offset: u64) -> Self {
+        Self {
+            channel,
+            path: run_dir.join(format!("{channel}.log")),
+            reader: None,
+            offset,
+        }
+    }
+}
+
+/// How an attached runner stopped.
+enum RunOutcome {
+    Exited {
+        status: &'static str,
+        signal_name: Option<&'static str>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        finished_at: String,
+    },
+    /// The runner's process group is gone but it never wrote exit metadata.
+    Orphaned,
+}
+
 #[derive(Clone)]
 pub struct Supervisor {
     pub db: Db,
     pub data_root: PathBuf,
     pub events: broadcast::Sender<Event>,
     pub tmux: TmuxManager,
+    /// One waker per attached run, so submitting input can pull its pump out of
+    /// idle backoff immediately instead of waiting for the next tick.
+    wakeups: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
 impl Supervisor {
@@ -38,6 +89,7 @@ impl Supervisor {
             tmux: TmuxManager::new(data_root.clone()),
             data_root,
             events,
+            wakeups: Arc::default(),
         }
     }
 
@@ -75,6 +127,20 @@ impl Supervisor {
     }
 
     pub async fn start(&self, request: StartRunRequest) -> Result<Run> {
+        if request.operation.as_deref() == Some("resume") {
+            if let Some(session_id) = request.resume_session_id.as_deref() {
+                let already_active = self.db.tmux_controls()?.into_iter().any(|control| {
+                    control.enabled
+                        && control.status == "active"
+                        && control.provider == request.provider
+                        && control.native_session_id.as_deref() == Some(session_id)
+                });
+                anyhow::ensure!(
+                    !already_active,
+                    "this provider session already has an active tmux writer; send input to the existing session"
+                );
+            }
+        }
         let project = self
             .db
             .project(&request.project_id)?
@@ -183,6 +249,7 @@ impl Supervisor {
                     &run.args,
                     &control_id,
                     Some(&environment),
+                    providers::keep_terminal_parent_shell(&run.provider),
                 )
                 .await
             {
@@ -252,9 +319,23 @@ impl Supervisor {
                 let tmux = self.tmux.clone();
                 let pane = launch.pane;
                 let prompt = execution_prompt.clone();
+                let provider = run.provider.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(1200)).await;
-                    let _ = tmux.send_prompt(&pane, &prompt).await;
+                    for _ in 0..120 {
+                        let current = tmux
+                            .pane(pane.socket_path.as_deref(), &pane.pane_id)
+                            .await
+                            .ok()
+                            .flatten();
+                        if let Some(current) = current {
+                            let screen = tmux.capture_text(&current).await.unwrap_or_default();
+                            if providers::terminal_ready(&provider, &screen) {
+                                let _ = tmux.send_prompt(&current, &prompt).await;
+                                return;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
                 });
             }
             return Ok(run);
@@ -349,113 +430,252 @@ impl Supervisor {
     }
 
     fn attach(&self, run: Run) {
-        self.tail(run.clone(), "stdout");
-        self.tail(run.clone(), "stderr");
         let this = self.clone();
         tokio::spawn(async move {
-            this.poll_completion(run).await;
+            this.pump(run).await;
         });
     }
 
-    fn tail(&self, run: Run, channel: &'static str) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            let path = this
-                .data_root
-                .join("runs")
-                .join(&run.id)
-                .join(format!("{channel}.log"));
-            loop {
-                let offset = this.db.stream_offset(&run.id, channel).unwrap_or(0);
-                if let Ok(mut file) = tokio::fs::OpenOptions::new().read(true).open(&path).await {
-                    if file.seek(SeekFrom::Start(offset)).await.is_ok() {
-                        let mut reader = BufReader::new(file);
-                        let mut line = String::new();
-                        loop {
-                            line.clear();
-                            match reader.read_line(&mut line).await {
-                                Ok(0) => break,
-                                Ok(_) => {
-                                    let position = reader.stream_position().await.unwrap_or(offset);
-                                    let text = line.trim_end_matches(['\r', '\n']);
-                                    if !text.is_empty() {
-                                        let (kind, provider_type, payload, raw, session) =
-                                            providers::normalize_line(&run.provider, channel, text);
-                                        if let Some(session) = session {
-                                            let _ = this.db.set_provider_session(&run.id, &session);
-                                        }
-                                        if let Some(status) = providers::status_from_event(
-                                            &run.provider,
-                                            raw.as_ref(),
-                                        ) {
-                                            let _ = this.db.update_run_status(&run.id, status);
-                                        }
-                                        let _ = this.emit(
-                                            &run.id,
-                                            &kind,
-                                            provider_type.as_deref(),
-                                            Some(channel),
-                                            payload,
-                                            raw,
-                                        );
-                                    }
-                                    let _ = this.db.set_stream_offset(&run.id, channel, position);
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                }
-                if is_terminal(this.db.run(&run.id).ok().flatten().as_ref()) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(180)).await;
-            }
-        });
-    }
-
-    async fn poll_completion(&self, run: Run) {
-        let exit_path = self.data_root.join("runs").join(&run.id).join("exit.json");
+    /// Drain the runner's stdout and stderr logs, watch for runner exit, and
+    /// finalize the run — all from one task on one adaptive timer.
+    ///
+    /// This replaces three independent pollers (stdout at 180ms, stderr at
+    /// 180ms, exit detection at 250ms) that each re-opened a file and re-queried
+    /// SQLite on every tick whether or not anything had happened. The merged
+    /// loop keeps both readers open, holds stream offsets in memory, and
+    /// persists an offset once per drain instead of once per line. While output
+    /// keeps arriving it polls at `PUMP_ACTIVE_INTERVAL`, which is faster than
+    /// the old cadence; once both channels go quiet it backs off geometrically
+    /// to `PUMP_IDLE_INTERVAL`. Submitting input wakes it immediately, so the
+    /// backoff never delays a turn the user just started.
+    async fn pump(&self, run: Run) {
+        let run_dir = self.data_root.join("runs").join(&run.id);
+        let wakeup = self.wakeup(&run.id);
+        let mut channels = [
+            ChannelPump::new(
+                &run_dir,
+                "stdout",
+                self.db.stream_offset(&run.id, "stdout").unwrap_or(0),
+            ),
+            ChannelPump::new(
+                &run_dir,
+                "stderr",
+                self.db.stream_offset(&run.id, "stderr").unwrap_or(0),
+            ),
+        ];
+        let exit_path = run_dir.join("exit.json");
+        let mut interval = PUMP_ACTIVE_INTERVAL;
         loop {
-            if let Ok(bytes) = tokio::fs::read(&exit_path).await {
-                if let Ok(result) = serde_json::from_slice::<RunnerExit>(&bytes) {
-                    let (status, signal_name) = match result.signal {
-                        Some(libc::SIGINT) => ("interrupted", Some("SIGINT")),
-                        Some(libc::SIGKILL) => ("killed", Some("SIGKILL")),
-                        Some(libc::SIGTERM) => ("interrupted", Some("SIGTERM")),
-                        Some(_) => ("failed", Some("SIGNAL")),
-                        None if result.exit_code == Some(0) => ("completed", None),
-                        None if result.exit_code == Some(130) => ("interrupted", Some("SIGINT")),
-                        None if result.exit_code == Some(143) => ("interrupted", Some("SIGTERM")),
-                        None => ("failed", None),
-                    };
-                    let _ = self.db.finish_run(
-                        &run.id,
-                        status,
-                        result.exit_code,
-                        signal_name,
-                        &result.finished_at,
-                    );
+            let mut progressed = false;
+            for channel in channels.iter_mut() {
+                progressed |= self.drain(&run, channel).await;
+            }
+            if let Some(outcome) = self.runner_outcome(&run, &exit_path).await {
+                // Consume whatever the runner wrote between the last drain and
+                // its exit before reporting the run as finished.
+                for channel in channels.iter_mut() {
+                    while self.drain(&run, channel).await {}
+                    self.flush_tail(&run, channel).await;
+                }
+                self.finish(&run, outcome);
+                break;
+            }
+            interval = if progressed {
+                PUMP_ACTIVE_INTERVAL
+            } else {
+                (interval * 2).min(PUMP_IDLE_INTERVAL)
+            };
+            // Checked on every tick, not only quiet ones: a run made terminal
+            // elsewhere while its runner keeps writing must still release the
+            // pump rather than being held open by its own output.
+            if is_terminal(self.db.run(&run.id).ok().flatten().as_ref()) {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = wakeup.notified() => interval = PUMP_ACTIVE_INTERVAL,
+            }
+        }
+        self.wakeups.lock().unwrap().remove(&run.id);
+        let _ = tokio::fs::remove_file(input_socket(&run.id)).await;
+    }
+
+    /// Consume every complete line currently available on one channel, keeping
+    /// the reader and byte offset across calls. Returns whether the runner had
+    /// written anything since the previous drain.
+    async fn drain(&self, run: &Run, channel: &mut ChannelPump) -> bool {
+        if channel.reader.is_none() {
+            let Ok(mut file) = tokio::fs::OpenOptions::new()
+                .read(true)
+                .open(&channel.path)
+                .await
+            else {
+                return false;
+            };
+            if file.seek(SeekFrom::Start(channel.offset)).await.is_err() {
+                return false;
+            }
+            channel.reader = Some(BufReader::new(file));
+        }
+        let Some(reader) = channel.reader.as_mut() else {
+            return false;
+        };
+        let mut line = String::new();
+        let mut consumed = false;
+        let mut mid_write = false;
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    if !line.ends_with('\n') {
+                        // The runner is mid-write. Reopen from the last complete
+                        // line on the next drain rather than parsing a fragment.
+                        channel.reader = None;
+                        mid_write = true;
+                        break;
+                    }
+                    channel.offset += line.len() as u64;
+                    consumed = true;
+                    let text = line.trim_end_matches(['\r', '\n']);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let (kind, provider_type, payload, raw, session) =
+                        providers::normalize_line(&run.provider, channel.channel, text);
+                    if let Some(session) = session {
+                        let _ = self.db.set_provider_session(&run.id, &session);
+                    }
+                    if let Some(status) = providers::status_from_event(&run.provider, raw.as_ref()) {
+                        let _ = self.db.update_run_status(&run.id, status);
+                    }
                     let _ = self.emit(
                         &run.id,
-                        &format!("run.{status}"),
-                        None,
-                        None,
-                        json!({"exit_code":result.exit_code,"signal":result.signal}),
-                        None,
+                        &kind,
+                        provider_type.as_deref(),
+                        Some(channel.channel),
+                        payload,
+                        raw,
                     );
+                }
+                Err(_) => {
+                    channel.reader = None;
                     break;
                 }
             }
-            if !run.process_group_id.is_some_and(process_alive) {
+        }
+        if consumed {
+            // One offset write per drain instead of one per streamed line.
+            let _ = self
+                .db
+                .set_stream_offset(&run.id, channel.channel, channel.offset);
+        }
+        consumed || mid_write
+    }
+
+    /// Emit a final line the runner left without a trailing newline.
+    ///
+    /// [`Self::drain`] deliberately stops at the last complete line, because
+    /// before the runner exits a fragment only means a write is in progress.
+    /// Once it has exited the fragment is all there will ever be — typically a
+    /// panic message on stderr — so it is reported rather than discarded.
+    async fn flush_tail(&self, run: &Run, channel: &mut ChannelPump) {
+        channel.reader = None;
+        let Ok(mut file) = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&channel.path)
+            .await
+        else {
+            return;
+        };
+        if file.seek(SeekFrom::Start(channel.offset)).await.is_err() {
+            return;
+        }
+        let mut rest = String::new();
+        if file
+            .take(MAX_TAIL_FLUSH_BYTES)
+            .read_to_string(&mut rest)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        channel.offset += rest.len() as u64;
+        let text = rest.trim_end_matches(['\r', '\n']);
+        if text.is_empty() {
+            return;
+        }
+        let (kind, provider_type, payload, raw, session) =
+            providers::normalize_line(&run.provider, channel.channel, text);
+        if let Some(session) = session {
+            let _ = self.db.set_provider_session(&run.id, &session);
+        }
+        let _ = self.emit(
+            &run.id,
+            &kind,
+            provider_type.as_deref(),
+            Some(channel.channel),
+            payload,
+            raw,
+        );
+        let _ = self
+            .db
+            .set_stream_offset(&run.id, channel.channel, channel.offset);
+    }
+
+    /// Detect that a runner has finished, preferring the metadata it writes on
+    /// exit and falling back to process-group liveness.
+    async fn runner_outcome(&self, run: &Run, exit_path: &Path) -> Option<RunOutcome> {
+        if let Ok(bytes) = tokio::fs::read(exit_path).await {
+            if let Ok(result) = serde_json::from_slice::<RunnerExit>(&bytes) {
+                let (status, signal_name) = match result.signal {
+                    Some(libc::SIGINT) => ("interrupted", Some("SIGINT")),
+                    Some(libc::SIGKILL) => ("killed", Some("SIGKILL")),
+                    Some(libc::SIGTERM) => ("interrupted", Some("SIGTERM")),
+                    Some(_) => ("failed", Some("SIGNAL")),
+                    None if result.exit_code == Some(0) => ("completed", None),
+                    None if result.exit_code == Some(130) => ("interrupted", Some("SIGINT")),
+                    None if result.exit_code == Some(143) => ("interrupted", Some("SIGTERM")),
+                    None => ("failed", None),
+                };
+                return Some(RunOutcome::Exited {
+                    status,
+                    signal_name,
+                    exit_code: result.exit_code,
+                    signal: result.signal,
+                    finished_at: result.finished_at,
+                });
+            }
+        }
+        (!run.process_group_id.is_some_and(process_alive)).then_some(RunOutcome::Orphaned)
+    }
+
+    fn finish(&self, run: &Run, outcome: RunOutcome) {
+        match outcome {
+            RunOutcome::Exited {
+                status,
+                signal_name,
+                exit_code,
+                signal,
+                finished_at,
+            } => {
+                let _ = self
+                    .db
+                    .finish_run(&run.id, status, exit_code, signal_name, &finished_at);
+                let _ = self.emit(
+                    &run.id,
+                    &format!("run.{status}"),
+                    None,
+                    None,
+                    json!({"exit_code":exit_code,"signal":signal}),
+                    None,
+                );
+            }
+            RunOutcome::Orphaned => {
                 if !is_terminal(self.db.run(&run.id).ok().flatten().as_ref()) {
-                    let _ = self.db.finish_run(
-                        &run.id,
-                        "orphaned",
-                        None,
-                        None,
-                        &Utc::now().to_rfc3339(),
-                    );
+                    let _ =
+                        self.db
+                            .finish_run(&run.id, "orphaned", None, None, &Utc::now().to_rfc3339());
                     let _ = self.emit(
                         &run.id,
                         "run.orphaned",
@@ -465,11 +685,90 @@ impl Supervisor {
                         None,
                     );
                 }
-                break;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        let _ = tokio::fs::remove_file(input_socket(&run.id)).await;
+    }
+
+    fn wakeup(&self, run_id: &str) -> Arc<Notify> {
+        self.wakeups
+            .lock()
+            .unwrap()
+            .entry(run_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Pull a run's pump out of idle backoff so input the user just submitted is
+    /// streamed back at the active cadence.
+    pub(crate) fn wake(&self, run_id: &str) {
+        if let Some(notify) = self.wakeups.lock().unwrap().get(run_id) {
+            notify.notify_one();
+        }
+    }
+
+    /// Read a terminal-driven harness's model catalog by opening its picker,
+    /// paging through it, and dismissing it again. Kiro shows only eight rows at
+    /// a time and exposes no non-interactive listing, so paging is the only way
+    /// to see the full catalog from a tmux-controlled session.
+    pub async fn provider_models(&self, run_id: &str) -> Result<Vec<Value>> {
+        let run = self.db.run(run_id)?.context("run not found")?;
+        anyhow::ensure!(
+            run.provider == "kiro",
+            "model discovery is only implemented for Kiro terminals"
+        );
+        let control = self
+            .db
+            .tmux_control_for_run(run_id)?
+            .context("this run is not attached to a tmux pane")?;
+        let pane = self.tmux_pane(&control).await?;
+        let screen = self.tmux.capture_text(&pane).await?;
+        anyhow::ensure!(
+            providers::terminal_ready(&run.provider, &screen),
+            "the harness is busy; wait for the current turn to finish"
+        );
+        self.tmux.send_prompt(&pane, "/model").await?;
+        let mut models: Vec<Value> = Vec::new();
+        let mut expected = None;
+        let mut unchanged = 0;
+        for _ in 0..80 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let screen = self.tmux.capture_text(&pane).await.unwrap_or_default();
+            let page = providers::parse_model_page(&run.provider, &screen);
+            let before = models.len();
+            for model in page.models {
+                let id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+                match models
+                    .iter_mut()
+                    .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+                {
+                    // Keep the row that carried the `[active]` marker.
+                    Some(existing) if model["active"] == Value::Bool(true) => *existing = model,
+                    Some(_) => {}
+                    None => models.push(model),
+                }
+            }
+            // The picker only scrolls once the cursor crosses the visible rows,
+            // so trust its own remainder count rather than an idle-page guess.
+            if expected.is_none() {
+                if let Some(more) = page.more {
+                    expected = Some(models.len() + more);
+                }
+            }
+            match expected {
+                Some(total) if models.len() >= total => break,
+                None if models.len() == before && !models.is_empty() => {
+                    unchanged += 1;
+                    if unchanged >= 3 {
+                        break;
+                    }
+                }
+                _ => unchanged = 0,
+            }
+            self.tmux.send_key(&pane, "Down").await?;
+        }
+        self.tmux.send_key(&pane, "Escape").await?;
+        anyhow::ensure!(!models.is_empty(), "the model picker returned no models");
+        Ok(models)
     }
 
     pub async fn input(
@@ -508,6 +807,57 @@ impl Supervisor {
             }
             let pane = self.tmux_pane(&control).await?;
             self.tmux.send_prompt(&pane, message).await?;
+            if let Some(close_key) = providers::terminal_overlay_command(&run.provider, message) {
+                // The harness paints this command in its own terminal UI and
+                // writes nothing to the transcript. Capture the panel, report it
+                // as a run event, then dismiss it so the pane stays steerable.
+                self.emit(
+                    run_id,
+                    "input.submitted",
+                    Some("steer"),
+                    None,
+                    json!({"message":message,"delivery":"steer"}),
+                    None,
+                )?;
+                let tmux = self.tmux.clone();
+                let provider = run.provider.clone();
+                let events = self.events.clone();
+                let db = self.db.clone();
+                let run_id = run_id.to_string();
+                let message = message.to_string();
+                tokio::spawn(async move {
+                    let mut usage = None;
+                    for _ in 0..40 {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        let screen = tmux.capture_text(&pane).await.unwrap_or_default();
+                        if let Some(parsed) = providers::parse_terminal_usage(&provider, &screen) {
+                            usage = Some(parsed);
+                            break;
+                        }
+                    }
+                    let _ = tmux.send_key(&pane, close_key).await;
+                    let payload = match usage {
+                        Some(usage) => usage,
+                        None => json!({
+                            "source":"terminal",
+                            "error":format!("{message} produced no readable terminal output"),
+                        }),
+                    };
+                    let event = db.append_event(
+                        &run_id,
+                        "usage.updated",
+                        Some("kiro.usage"),
+                        Some("tmux"),
+                        &payload,
+                        None,
+                        &Utc::now().to_rfc3339(),
+                    );
+                    if let Ok(event) = event {
+                        let _ = events.send(event);
+                    }
+                });
+                return Ok(());
+            }
             self.db
                 .update_tmux_queue_state(&control.id, "awaiting_start")?;
             self.emit(
@@ -679,6 +1029,9 @@ impl Supervisor {
         stream.write_all(message.as_bytes()).await?;
         stream.write_all(b"\n").await?;
         stream.shutdown().await?;
+        // The response to this input is what the user is waiting for, so bring
+        // the run's pump back to its active cadence immediately.
+        self.wake(run_id);
         Ok(())
     }
     pub async fn signal(&self, run_id: &str, signal: i32, name: &str, status: &str) -> Result<()> {

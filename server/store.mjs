@@ -7,7 +7,7 @@ const defaults = {
   hosts: [{ id: 'local', name: 'This Mac', type: 'local', daemonPort: 4243, status: 'checking', createdAt: new Date().toISOString() }],
   drafts: [],
   navigationByHost: {},
-  settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [] },
+  settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [], archivedRunKeys: [] },
 }
 
 export class Store {
@@ -39,6 +39,7 @@ export class Store {
     if (!Array.isArray(this.state.settings.pinnedSessions)) this.state.settings.pinnedSessions = []
     if (!Array.isArray(this.state.settings.archivedSessionKeys)) this.state.settings.archivedSessionKeys = []
     if (!Array.isArray(this.state.settings.archivedSessions)) this.state.settings.archivedSessions = []
+    if (!Array.isArray(this.state.settings.archivedRunKeys)) this.state.settings.archivedRunKeys = []
     if (draftsChanged) this.save()
   }
   save() { const temp = `${this.file}.tmp`; fs.writeFileSync(temp, JSON.stringify(this.state, null, 2)); fs.renameSync(temp, this.file) }
@@ -87,6 +88,7 @@ export class Store {
       const allowed = new Set(this.state.settings.archivedSessionKeys)
       this.state.settings.archivedSessions = this.state.settings.archivedSessions.filter((session) => allowed.has(`${session.hostId}:${session.id}`))
     }
+    if (Array.isArray(changes.archivedRunKeys)) this.state.settings.archivedRunKeys = [...new Set(changes.archivedRunKeys.filter((key) => typeof key === 'string'))]
     this.save()
     return this.state.settings
   }

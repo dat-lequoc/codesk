@@ -44,17 +44,43 @@ async function cua(tool, input, options = {}) {
   return options.parseJson === false ? result : { ...result, value: JSON.parse(result.stdout) }
 }
 
-async function ensureCuaDriver() {
+async function cuaDaemonRunning() {
   const status = await command('cua-driver', ['status'], { capture: true, allowFailure: true })
-  if (status.code !== 0 || !status.stdout.includes('daemon is running')) {
-    await command('cua-driver', ['serve'], { capture: true })
+  return status.code === 0 && status.stdout.includes('daemon is running')
+}
+
+async function startCuaDaemon() {
+  // `cua-driver serve` is the daemon itself and never exits, so awaiting it would
+  // hang the redeploy forever. Detach it and wait for `status` to confirm instead.
+  const child = spawn('cua-driver', ['serve'], { cwd: root, stdio: 'ignore', detached: true })
+  child.unref()
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await wait(250)
+    if (await cuaDaemonRunning()) return
   }
+  throw new Error('cua-driver serve did not report a running daemon within ten seconds.')
+}
+
+async function ensureCuaDriver() {
+  if (!(await cuaDaemonRunning())) await startCuaDaemon()
   const permissions = await command(
     'cua-driver',
     ['check_permissions', JSON.stringify({ prompt: false })],
     { capture: true },
   )
-  if (!permissions.stdout.includes('Accessibility: granted') || !permissions.stdout.includes('Screen Recording: granted')) {
+  // cua-driver reports permissions as JSON booleans; fall back to the older
+  // human-readable form so an upgrade in either direction keeps working.
+  let accessibility
+  let screenRecording
+  try {
+    const parsed = JSON.parse(permissions.stdout)
+    accessibility = parsed.accessibility === true
+    screenRecording = parsed.screen_recording === true
+  } catch {
+    accessibility = permissions.stdout.includes('Accessibility: granted')
+    screenRecording = permissions.stdout.includes('Screen Recording: granted')
+  }
+  if (!accessibility || !screenRecording) {
     throw new Error('CuaDriver needs Accessibility and Screen Recording permissions before Codesk can be restarted safely.')
   }
 }
@@ -65,25 +91,42 @@ function mainWindow(app) {
     .sort((left, right) => right.bounds.width * right.bounds.height - left.bounds.width * left.bounds.height)[0]
 }
 
+function isRunning(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+
+async function installedAppPids() {
+  const result = await command(
+    'pgrep',
+    ['-f', `${installedApp}/Contents/MacOS/`],
+    { capture: true, allowFailure: true },
+  )
+  return result.stdout.split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger)
+}
+
 async function stopInstalledApp() {
+  // Nothing to replace safely around: never relaunch the old bundle just to quit it.
+  if ((await installedAppPids()).length === 0) return
   const app = (await cua('launch_app', { bundle_id: bundleId })).value
   const window = mainWindow(app)
   if (!window) throw new Error('Codesk launched without an inspectable window; refusing to replace a possibly running app.')
   await cua('get_window_state', { pid: app.pid, window_id: window.window_id })
-  await cua('hotkey', { pid: app.pid, keys: ['cmd', 'q'] }, { parseJson: false })
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const snapshot = await cua(
-      'get_window_state',
-      { pid: app.pid, window_id: window.window_id },
-      { allowFailure: true },
-    )
-    if (snapshot.code !== 0) {
+  await cua('hotkey', { pid: app.pid, window_id: window.window_id, keys: ['cmd', 'q'] }, { parseJson: false })
+  // cua-driver reports stale windows through a refusal payload and still exits 0,
+  // so process liveness is the only reliable signal that the app really quit.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!isRunning(app.pid)) {
       await wait(500)
       return
     }
     await wait(100)
   }
-  throw new Error('Codesk did not quit within five seconds; the installed app was not replaced.')
+  throw new Error('Codesk did not quit within ten seconds; the installed app was not replaced.')
 }
 
 async function listenerPids(port) {
@@ -167,8 +210,15 @@ async function waitForGateway(timeoutMs = 20000) {
 }
 
 async function launchAndVerify() {
-  const app = (await cua('launch_app', { bundle_id: bundleId })).value
-  const window = mainWindow(app)
+  // A freshly launched app is enumerable before WindowServer publishes its window.
+  let app
+  let window
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    app = (await cua('launch_app', { bundle_id: bundleId })).value
+    window = mainWindow(app)
+    if (window) break
+    await wait(250)
+  }
   if (!window) throw new Error('The rebuilt Codesk app launched without a window.')
   await waitForGateway()
   const screenshot = path.join(os.tmpdir(), `codesk-redeploy-${Date.now()}.png`)
