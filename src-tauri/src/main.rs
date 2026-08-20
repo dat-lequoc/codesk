@@ -36,7 +36,10 @@ fn main() {
                 // Another app instance owns this gateway. Register as an
                 // additional owner so it survives until the last window closes,
                 // and so quitting that other instance does not orphan our daemon.
-                post_gateway("/api/owners", &format!("{{\"pid\":{}}}", std::process::id()));
+                post_gateway(
+                    "/api/owners",
+                    &format!("{{\"pid\":{}}}", std::process::id()),
+                );
             } else if gateway.exists() {
                 let log_dir = app.path().app_log_dir()?;
                 fs::create_dir_all(&log_dir)?;
@@ -68,7 +71,10 @@ fn main() {
             // Sending our pid releases only our ownership, so a second running
             // instance keeps its gateway.
             if matches!(event, tauri::RunEvent::Exit) {
-                post_gateway("/api/shutdown", &format!("{{\"pid\":{}}}", std::process::id()));
+                post_gateway(
+                    "/api/shutdown",
+                    &format!("{{\"pid\":{}}}", std::process::id()),
+                );
             }
         });
 }
