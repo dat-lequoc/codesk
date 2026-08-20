@@ -12,7 +12,7 @@ import {
 import type { ActivityEntry, ActivityLedgerItem } from '../../lib/activity'
 import type { RunEvent, SessionMessage } from '../../types'
 import { MarkdownContent } from '../thread/Markdown'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 const tabButton =
   'h-8 border-b-2 border-transparent px-2 text-[10.5px] text-muted hover:text-fg-soft'
 const tabActive = 'border-azure-400 text-fg'
@@ -104,7 +104,12 @@ export function ActivityInspectorPanel({
   onClose: () => void
 }) {
   const [tab, setTab] = useState<'details' | 'raw'>('details')
-  useEffect(() => setTab('details'), [entry.id])
+  // Inspecting a different entry starts back on the details tab.
+  const [tabEntryId, setTabEntryId] = useState(entry.id)
+  if (tabEntryId !== entry.id) {
+    setTabEntryId(entry.id)
+    setTab('details')
+  }
   const input = activityText(entry.input)
   const output = activityText(entry.output)
   const raw = activityText(entry.raw)

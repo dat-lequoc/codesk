@@ -12,6 +12,7 @@ import {
   Server,
 } from 'lucide-react'
 import { api } from '../../api'
+import { useLatest } from '../../hooks/useLatest'
 import { AppDialog } from '../../components/ui/app-dialog'
 import { Button } from '../../components/ui/button'
 import { StatusDot } from '../../components/ui/status-dot'
@@ -81,7 +82,13 @@ export function ProjectDialog({
       setBusy('')
     }
   }
-  useEffect(() => {
+  // Switching hosts throws away everything about the previous filesystem before
+  // the new listing lands, so the picker never shows one host's folders under
+  // another host's name.
+  const browseRef = useLatest(browse)
+  const [browsingHostId, setBrowsingHostId] = useState(hostId)
+  if (browsingHostId !== hostId) {
+    setBrowsingHostId(hostId)
     setEntries([])
     setInput('')
     setSelectedPath('')
@@ -89,11 +96,16 @@ export function ProjectDialog({
     setParentPath(null)
     setHomePath('')
     setHighlighted(0)
-    if (hostId) void browse('')
-  }, [hostId])
+  }
   useEffect(() => {
+    if (hostId) void browseRef.current('')
+  }, [browseRef, hostId])
+  // Retyping the filter puts the highlight back on the best match.
+  const [highlightedFor, setHighlightedFor] = useState(input)
+  if (highlightedFor !== input) {
+    setHighlightedFor(input)
     setHighlighted(0)
-  }, [input])
+  }
   useEffect(() => {
     document.querySelector('.folder-entry.highlighted')?.scrollIntoView({ block: 'nearest' })
   }, [highlighted])

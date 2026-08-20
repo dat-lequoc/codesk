@@ -4,6 +4,7 @@ import type {
   DraftSession,
   Host,
   Project,
+  Provider,
   ProviderSession,
   Run,
   RunEvent,
@@ -91,6 +92,20 @@ export const makeRun = (overrides: Partial<Run> = {}): Run => ({
   startedAt: new Date(1_700_000_000_000).toISOString(),
   ...overrides,
   id: overrides.id ?? nextId('run'),
+})
+
+export const makeProvider = (overrides: Partial<Provider> = {}): Provider => ({
+  id: 'codex',
+  name: 'Codex',
+  color: '#8ecf9c',
+  available: true,
+  executable: '/usr/local/bin/codex',
+  structured_output: true,
+  live_input: true,
+  resume: true,
+  fork: true,
+  native_interrupt: true,
+  ...overrides,
 })
 
 export const makeDraft = (overrides: Partial<DraftSession> = {}): DraftSession => ({

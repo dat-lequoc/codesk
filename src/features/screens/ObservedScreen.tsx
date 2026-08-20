@@ -21,6 +21,7 @@ import { MoreHorizontal } from 'lucide-react'
 import { ListPlus, Plus, RefreshCw, Send, Terminal } from 'lucide-react'
 import { api } from '../../api'
 import { Spinner } from '../../components/ui/spinner'
+import { useLatest } from '../../hooks/useLatest'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
 import { providerIcon, providerName } from '../../providerRegistry'
 import type {
@@ -55,6 +56,12 @@ export function ObservedScreen({
   const [controlBusy, setControlBusy] = useState(false)
   const [moving, setMoving] = useState(false)
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
+  const hasQueued = queued.length > 0
+  const hostId = host?.id
+  const hostStatus = host?.status
+  // `onStarted` is a fresh arrow on every parent render; the queue poller must
+  // not resubscribe for it.
+  const onStartedRef = useLatest(onStarted)
   const controlled = Boolean(agent.tmux_controlled && agent.tmux_pane_id)
   const canContinue = Boolean(project && agent.native_session_id && controlled)
   const submit = async (delivery: 'steer' | 'queue' = 'steer') => {
@@ -95,18 +102,17 @@ export function ObservedScreen({
     }
   }
   useEffect(() => {
-    if (!host || !agent.pid || !controlled || queued.length === 0 || host.status !== 'online')
-      return
+    if (!hostId || !agent.pid || !controlled || !hasQueued || hostStatus !== 'online') return
     let stopped = false
     let timer = 0
     const poll = async () => {
       try {
-        const items = await api.externalSessionQueue(host.id, agent.pid)
+        const items = await api.externalSessionQueue(hostId, agent.pid)
         if (stopped) return
         const started = items.find((item) => item.status === 'started' && item.run)
         if (started?.run) {
-          void api.removeExternalQueued(host.id, agent.pid, started.id).catch(() => {})
-          onStarted(started.run)
+          void api.removeExternalQueued(hostId, agent.pid, started.id).catch(() => {})
+          onStartedRef.current(started.run)
           return
         }
         setQueued(items)
@@ -124,7 +130,7 @@ export function ObservedScreen({
       clearTimeout(timer)
       document.removeEventListener('visibilitychange', visibility)
     }
-  }, [host?.id, host?.status, agent.pid, queued.length > 0, controlled])
+  }, [hostId, hostStatus, agent.pid, hasQueued, controlled, onStartedRef])
   return (
     <div className={threadScreen}>
       <header className={threadHeader}>
@@ -259,6 +265,7 @@ export function ObservedScreen({
             <small className={composerHint}>{agent.tmux_session_name}</small>
             <button
               className={cn(sendButton, sendButtonSmall)}
+              aria-label="Send message"
               disabled={!message.trim() || busy || host?.status !== 'online'}
             >
               {busy ? <RefreshCw className="animate-spin" size={15} /> : <Send size={17} />}

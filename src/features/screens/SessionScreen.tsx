@@ -1,3 +1,4 @@
+import { useLatest } from '../../hooks/useLatest'
 import { cn } from '../../lib/cn'
 import { threadColumn } from '../thread/thread-column'
 import { threadStatus, turnBoundary, turnRule } from '../thread/thread-styles'
@@ -119,6 +120,8 @@ export function SessionScreen({
   const [controlBusy, setControlBusy] = useState<'adopt' | 'move' | null>(null)
   const [moving, setMoving] = useState(false)
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
+  const hasQueued = queued.length > 0
+  const onStartedRef = useLatest(onStarted)
   const submitting = useRef(false)
   const composerInput = useRef<HTMLTextAreaElement>(null)
   const [commandIndex, setCommandIndex] = useState(0)
@@ -290,22 +293,12 @@ export function SessionScreen({
       void submitMessage()
     }
   }
-  useEffect(() => {
-    submitting.current = false
-    adoptedRun.current = null
-    setBusy(false)
-    setControlBusy(null)
-    setMoving(false)
-    setQueued([])
-    setSelectedActivityId(null)
-    filePreview.close()
-  }, [session.hostId, session.id])
-  useEffect(() => {
+  // Typing past a slash command drops the highlight back to the first match.
+  const [commandIndexFor, setCommandIndexFor] = useState(message)
+  if (commandIndexFor !== message) {
+    setCommandIndexFor(message)
     setCommandIndex(0)
-  }, [message])
-  useEffect(() => {
-    if (selectedActivityId && !selectedActivity) setSelectedActivityId(null)
-  }, [selectedActivityId, selectedActivity])
+  }
   useEffect(() => {
     if (!session.pid || !canUseAttachedSession || host?.status !== 'online') return
     let cancelled = false
@@ -317,7 +310,7 @@ export function SessionScreen({
         if (started?.run && adoptedRun.current !== started.run.id) {
           adoptedRun.current = started.run.id
           void api.removeExternalQueued(session.hostId, session.pid!, started.id).catch(() => {})
-          onStarted(started.run)
+          onStartedRef.current(started.run)
           return
         }
         setQueued(items)
@@ -326,9 +319,9 @@ export function SessionScreen({
     return () => {
       cancelled = true
     }
-  }, [session.hostId, session.pid, host?.status, canUseAttachedSession])
+  }, [session.hostId, session.pid, host?.status, canUseAttachedSession, onStartedRef])
   useEffect(() => {
-    if (!queuePid || queued.length === 0 || host?.status !== 'online') return
+    if (!queuePid || !hasQueued || host?.status !== 'online') return
     let stopped = false
     let timer = 0
     const poll = async () => {
@@ -340,7 +333,7 @@ export function SessionScreen({
         if (started?.run && adoptedRun.current !== started.run.id) {
           adoptedRun.current = started.run.id
           void api.removeExternalQueued(session.hostId, queuePid, started.id).catch(() => {})
-          onStarted(started.run)
+          onStartedRef.current(started.run)
           return
         }
         setQueued(items)
@@ -358,7 +351,7 @@ export function SessionScreen({
       clearTimeout(timer)
       document.removeEventListener('visibilitychange', visibility)
     }
-  }, [session.hostId, queuePid, host?.status, queued.length > 0])
+  }, [session.hostId, queuePid, host?.status, hasQueued, onStartedRef])
   useEffect(() => {
     if (following.current)
       requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }))
@@ -429,7 +422,7 @@ export function SessionScreen({
                 isHistoricalActivity(item) ? (
                   <HistoricalActivityGroup
                     messages={item.messages}
-                    selectedId={selectedActivityId}
+                    selectedId={selectedActivity?.id ?? null}
                     onSelect={selectActivity}
                   />
                 ) : item.kind === 'turn_completed' ? (
@@ -656,6 +649,7 @@ export function SessionScreen({
               </small>
               <button
                 className={cn(sendButton, sendButtonSmall)}
+                aria-label="Send message"
                 disabled={!message.trim() || busy}
                 title={
                   canUseAttachedSession ? 'Steer now (Tab queues instead)' : 'Continue conversation'

@@ -2,20 +2,21 @@ import { describe, expect, it } from 'vitest'
 
 import {
   bareRepositoryUrlPattern,
+  type MarkdownNode,
   markdownPlugins,
   remarkBareRepositoryLinks,
   trimBareUrl,
 } from './markdown'
 
 /** Minimal mdast text node. */
-const text = (value: string) => ({ type: 'text', value })
+const text = (value: string): MarkdownNode => ({ type: 'text', value })
 /** Run the plugin over a root containing one paragraph of children. */
-const run = (children: unknown[]) => {
-  const tree = { type: 'root', children: [{ type: 'paragraph', children }] }
+const run = (children: MarkdownNode[]) => {
+  const tree: MarkdownNode = { type: 'root', children: [{ type: 'paragraph', children }] }
   remarkBareRepositoryLinks()(tree)
-  return (tree.children[0] as { children: Array<Record<string, unknown>> }).children
+  return tree.children![0].children!
 }
-const linksIn = (children: Array<Record<string, unknown>>) =>
+const linksIn = (children: MarkdownNode[]) =>
   children.filter((child) => child.type === 'link').map((child) => child.url)
 
 describe('trimBareUrl', () => {
@@ -103,10 +104,12 @@ describe('remarkBareRepositoryLinks', () => {
   })
 
   it('does not linkify inside a code block', () => {
-    const tree = { type: 'root', children: [{ type: 'code', children: [text('github.com/a/b')] }] }
+    const tree: MarkdownNode = {
+      type: 'root',
+      children: [{ type: 'code', children: [text('github.com/a/b')] }],
+    }
     remarkBareRepositoryLinks()(tree)
-    const block = tree.children[0] as { children: Array<Record<string, unknown>> }
-    expect(linksIn(block.children)).toEqual([])
+    expect(linksIn(tree.children![0].children!)).toEqual([])
   })
 
   it('leaves a paragraph with no URLs completely alone', () => {
@@ -116,8 +119,7 @@ describe('remarkBareRepositoryLinks', () => {
 
   it('recurses into nested nodes such as emphasis', () => {
     const children = run([{ type: 'emphasis', children: [text('github.com/a/b')] }])
-    const emphasis = children[0] as { children: Array<Record<string, unknown>> }
-    expect(linksIn(emphasis.children)).toEqual(['https://github.com/a/b'])
+    expect(linksIn(children[0].children!)).toEqual(['https://github.com/a/b'])
   })
 
   it('is repeatable — the shared regex does not leak lastIndex between runs', () => {

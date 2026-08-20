@@ -17,8 +17,17 @@ export const trimBareUrl = (value: string) => {
   return result
 }
 
-export const remarkBareRepositoryLinks = () => (tree: any) => {
-  const walk = (parent: any) => {
+/// The slice of mdast this plugin touches. Typing it structurally keeps the
+/// tree honest without pulling in `@types/mdast` for four fields.
+export type MarkdownNode = {
+  type: string
+  value?: string
+  url?: string
+  children?: MarkdownNode[]
+}
+
+export const remarkBareRepositoryLinks = () => (tree: MarkdownNode) => {
+  const walk = (parent: MarkdownNode) => {
     if (
       !Array.isArray(parent.children) ||
       ['link', 'linkReference', 'code', 'inlineCode'].includes(parent.type)
@@ -31,7 +40,7 @@ export const remarkBareRepositoryLinks = () => (tree: any) => {
         continue
       }
       bareRepositoryUrlPattern.lastIndex = 0
-      const replacement: any[] = []
+      const replacement: MarkdownNode[] = []
       let cursor = 0
       let match: RegExpExecArray | null
       while ((match = bareRepositoryUrlPattern.exec(child.value))) {

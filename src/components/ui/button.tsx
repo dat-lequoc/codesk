@@ -31,5 +31,3 @@ export type ButtonProps = React.ComponentProps<'button'> & VariantProps<typeof b
 export function Button({ className, variant, size, ...props }: ButtonProps) {
   return <button className={cn(button({ variant, size }), className)} {...props} />
 }
-
-export { button as buttonVariants }

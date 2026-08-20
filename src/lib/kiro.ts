@@ -37,9 +37,9 @@ export const kiroEffortLevels = ['low', 'medium', 'high', 'xhigh', 'max']
 
 export const kiroModelCatalog = new Map<string, Array<{ id: string; description: string }>>()
 
-export const recordValue = (value: unknown): Record<string, any> | undefined =>
+export const recordValue = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, any>)
+    ? (value as Record<string, unknown>)
     : undefined
 
 export const kiroCommandContext = (events: RunEvent[]): KiroCommandContext => {

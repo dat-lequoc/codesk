@@ -3,7 +3,7 @@
 import { api } from '../api'
 import { linkedFilePath } from '../lib/links'
 import type { FileContent } from '../types'
-import { createContext, useEffect, useState } from 'react'
+import { createContext, useState } from 'react'
 /** Lets nested markdown links open the file preview panel. */
 export const FilePreviewContext = createContext<((href: string) => void) | null>(null)
 
@@ -11,9 +11,15 @@ export type FilePreviewState = { requestedPath: string; file?: FileContent; erro
 
 export function useFilePreview(hostId: string, cwd: string) {
   const [preview, setPreview] = useState<FilePreviewState | null>(null)
-  useEffect(() => {
+  // A preview resolved against one host and working directory means nothing in
+  // another, so it is dropped when either changes. Adjusting during render
+  // rather than in an effect means the stale file never paints.
+  const target = `${hostId}\u0000${cwd}`
+  const [previewTarget, setPreviewTarget] = useState(target)
+  if (previewTarget !== target) {
+    setPreviewTarget(target)
     setPreview(null)
-  }, [hostId, cwd])
+  }
   const open = (href: string) => {
     const path = linkedFilePath(href, cwd)
     setPreview({ requestedPath: path })

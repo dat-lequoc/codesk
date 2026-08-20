@@ -33,15 +33,6 @@ export default tseslint.config(
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
       '@typescript-eslint/no-explicit-any': 'warn',
-
-      // Known backlog, surfaced when this config was introduced: 16 effects that
-      // call setState synchronously (cascading renders) and 4 ref-access
-      // violations. They are real, predate the Tailwind migration, and each one
-      // needs its own behavioural fix — so they are warnings rather than a red
-      // CI on day one. Burn them down, then raise these back to "error".
-      'react-hooks/set-state-in-effect': 'warn',
-      'react-hooks/refs': 'warn',
-      'react-hooks/immutability': 'warn',
     },
   },
 )

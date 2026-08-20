@@ -64,38 +64,50 @@ export function StartScreen({
   const [gitContext, setGitContext] = useState<GitContext | null>(null)
   const submitting = useRef(false)
   const started = useRef(false)
-  const providers = project ? state.providersByHost[project.hostId] || [] : []
+  const projectHostId = project?.hostId
+  const projectId = project?.id
+  const hostStatus = host?.status
+  const providersByHost = state.providersByHost
   const harnesses = useMemo(
     () =>
-      providers
+      (projectHostId ? providersByHost[projectHostId] || [] : [])
         .filter((item) => item.id !== 'shell')
         .sort((left, right) => harnessOrder.indexOf(left.id) - harnessOrder.indexOf(right.id)),
-    [providers],
+    [projectHostId, providersByHost],
   )
   const selectedHarness = harnesses.find((item) => item.id === provider)
+  // Never sit on a harness the host cannot run. Converges in one extra render:
+  // once `provider` names an available harness the condition is false.
+  const firstAvailableHarness = harnesses.find((item) => item.available)
+  if (!selectedHarness?.available && firstAvailableHarness && firstAvailableHarness.id !== provider)
+    setProvider(firstAvailableHarness.id)
+  const draftId = draft?.id
   useEffect(() => {
-    if (selectedHarness?.available) return
-    const first = harnesses.find((item) => item.available)
-    if (first) setProvider(first.id)
-  }, [harnesses, selectedHarness?.available])
-  useEffect(() => {
-    if (!draft || started.current) return
+    if (!draftId || started.current) return
     const timer = window.setTimeout(() => {
       void api
-        .updateDraft(draft.id, { prompt, provider, workspaceMode: workspace })
+        .updateDraft(draftId, { prompt, provider, workspaceMode: workspace })
         .catch((cause) => {
           if (!submitting.current && !started.current)
             onError(cause instanceof Error ? cause.message : String(cause))
         })
     }, 250)
     return () => clearTimeout(timer)
-  }, [draft?.id, prompt, provider, workspace, onError])
+  }, [draftId, prompt, provider, workspace, onError])
+  // The git context belongs to one project on one host; drop it as soon as
+  // either changes so the header never shows the previous checkout's branch
+  // while the new one is still in flight.
+  const gitContextKey = `${projectHostId || ''}\u0000${projectId || ''}\u0000${hostStatus || ''}`
+  const [gitContextFor, setGitContextFor] = useState(gitContextKey)
+  if (gitContextFor !== gitContextKey) {
+    setGitContextFor(gitContextKey)
+    setGitContext(null)
+  }
   useEffect(() => {
     let cancelled = false
-    setGitContext(null)
-    if (project && host?.status === 'online')
+    if (projectHostId && projectId !== undefined && hostStatus === 'online')
       api
-        .projectContext(project.hostId, project.id)
+        .projectContext(projectHostId, projectId)
         .then((value) => {
           if (!cancelled) setGitContext(value)
         })
@@ -103,12 +115,12 @@ export function StartScreen({
     return () => {
       cancelled = true
     }
-  }, [project?.hostId, project?.id, host?.status])
-  useEffect(() => {
-    if (gitContext && !gitContext.available && workspace === 'managed_worktree')
-      setWorkspace('current_checkout')
-  }, [gitContext?.available, workspace])
+  }, [projectHostId, projectId, hostStatus])
   const canUseWorktree = gitContext?.available === true
+  // A checkout that turns out not to be a git repository cannot host a managed
+  // worktree, so fall back rather than offering a start that would fail.
+  if (gitContext && !canUseWorktree && workspace === 'managed_worktree')
+    setWorkspace('current_checkout')
   const checkoutLabel = host?.type === 'ssh' ? 'Remote checkout' : 'Local'
   const canSubmit = Boolean(
     project &&
@@ -371,6 +383,7 @@ export function StartScreen({
             </small>
             <button
               className={sendButton}
+              aria-label="Start chat"
               disabled={busy || !canSubmit}
               title={
                 host?.status !== 'online'

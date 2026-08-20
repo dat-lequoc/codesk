@@ -122,6 +122,8 @@ export function RunScreen({
     if (following.current)
       requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }))
   }, [events.length])
+  const projectHostId = project?.hostId
+  const projectId = project?.id
   useEffect(() => {
     let cancelled = false
     if (run.worktreeId)
@@ -131,9 +133,9 @@ export function RunScreen({
           if (!cancelled) setWorkspaceLabel(status.worktree.branch || 'Managed worktree')
         })
         .catch(() => {})
-    else if (project && host?.status === 'online')
+    else if (projectHostId && projectId && host?.status === 'online')
       api
-        .projectContext(project.hostId, project.id)
+        .projectContext(projectHostId, projectId)
         .then((context) => {
           if (!cancelled) setWorkspaceLabel(context.branch || 'Current checkout')
         })
@@ -141,7 +143,7 @@ export function RunScreen({
     return () => {
       cancelled = true
     }
-  }, [run.hostId, run.worktreeId, project?.id, host?.status])
+  }, [run.hostId, run.worktreeId, projectHostId, projectId, host?.status])
   const turnRunning = run.status === 'running'
   const ui = providerUi(run.provider)
   const tmuxRun = run.inputTransport === 'tmux'
@@ -228,18 +230,12 @@ export function RunScreen({
       )
       .map((event) => String(event.payload.request_id ?? event.payload.rpc_id)),
   )
-  useEffect(() => {
-    submitting.current = false
-    setSending(false)
-    setSelectedActivityId(null)
-    filePreview.close()
-  }, [run.id])
-  useEffect(() => {
+  // Typing past a slash command drops the highlight back to the first match.
+  const [commandIndexFor, setCommandIndexFor] = useState(message)
+  if (commandIndexFor !== message) {
+    setCommandIndexFor(message)
     setCommandIndex(0)
-  }, [message])
-  useEffect(() => {
-    if (selectedActivityId && !selectedActivity) setSelectedActivityId(null)
-  }, [selectedActivityId, selectedActivity])
+  }
   const openFile = (href: string) => {
     setSelectedActivityId(null)
     filePreview.open(href)
@@ -392,7 +388,7 @@ export function RunScreen({
               isActivityGroup(item) ? (
                 <ToolActivityGroup
                   events={item.events}
-                  selectedId={selectedActivityId}
+                  selectedId={selectedActivity?.id ?? null}
                   onSelect={selectActivity}
                 />
               ) : (
@@ -681,6 +677,7 @@ export function RunScreen({
             )}
             <button
               className={sendButton}
+              aria-label="Send message"
               disabled={
                 sending ||
                 !message.trim() ||

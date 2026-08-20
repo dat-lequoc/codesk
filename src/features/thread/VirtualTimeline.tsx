@@ -18,6 +18,10 @@ export function VirtualTimeline<T>({
   before?: React.ReactNode
 }) {
   const enabled = items.length > 40
+  // TanStack Virtual hands back fresh closures on every call, so React Compiler
+  // declines to memoize this component rather than risk serving stale rows.
+  // That is the right trade here and there is nothing to fix at this site.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: items.length,
     enabled,
