@@ -99,10 +99,17 @@ cargo build -p codeskd
 npm run dev
 ```
 
-Run the test suite:
+Run the frontend test suite:
 
 ```bash
-npm test
+npm test          # vitest
+npm run check     # tsc --noEmit && eslint src
+```
+
+Run the daemon and gateway integration suites:
+
+```bash
+npm run test:backend
 ```
 
 To rebuild, safely replace, and relaunch the locally installed app:

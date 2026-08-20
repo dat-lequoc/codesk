@@ -115,7 +115,7 @@ This prevents the UI from offering controls that only appear to work.
 
 The implemented adapter boundary is static and deliberately smaller than a runtime plugin ABI. `crates/codeskd/src/providers/mod.rs` owns the registry and contract; `codex.rs`, `kiro.rs`, `opencode.rs`, `dsh.rs`, `agy.rs`, `pi.rs`, `claude.rs`, and `shell.rs` own provider descriptors plus execution, input, discovery, and session routing. Protocol transports are separate under `crates/codeskd/src/transports/`: stdio, shared ACP, Codex app-server, and DSH Web. Provider event codecs are shared only when the wire protocol is shared.
 
-The desktop mirrors this with `src/providerRegistry.tsx`, which owns provider names, ordering, icon/fallback rendering, colors, and interaction quirks. Execution capability fields returned by `codeskd` remain authoritative; UI registry values are compatibility fallbacks for older remote daemons that do not yet return newer additive fields.
+The desktop mirrors this with `src/lib/providers.ts`, which owns provider names, ordering, colors, and interaction quirks, and `src/components/ProviderIcon.tsx`, which owns icon and fallback rendering. Execution capability fields returned by `codeskd` remain authoritative; UI registry values are compatibility fallbacks for older remote daemons that do not yet return newer additive fields.
 
 Adding a provider therefore follows one bounded path:
 

@@ -55,14 +55,16 @@ ask for permission, and do not stop at "you'll need to redeploy".
 
 ## Styling
 
-New frontend work uses Tailwind utilities, not new rules in `src/styles.css`.
-Preflight is deliberately off, and Tailwind utilities sit in a cascade layer that
-loses to the unlayered rules in that stylesheet, so:
+The frontend is Tailwind v4 with Preflight on. There is no hand-written
+stylesheet: `src/index.css` holds the `@theme` tokens, the base resets, and the
+handful of component classes that utilities cannot express (`.scroll-thin`,
+`.prose-codesk`). Style with utilities and theme tokens, never a new CSS rule.
 
-- Migrate an element by deleting its CSS rule, never by stacking utilities on it.
-- Never mix a hand-written class and utilities on the same element.
-- `border` needs `border-solid` beside it, because without Preflight the default
-  border style is `none`.
-
-See [docs/styling-migration.md](../../docs/styling-migration.md) for the phased
-plan and the CSS audit command.
+- Colours come from the semantic aliases — `bg-canvas`, `bg-surface`,
+  `text-fg`, `text-muted`, `border-line` — not raw ramp steps, so a theme change
+  lands in one place.
+- Shared UI lives in `src/components/ui/`, built on Radix primitives. Reach for
+  `AppDialog` rather than a hand-rolled overlay: it brings the portal, focus
+  trap, Escape and backdrop dismissal with it.
+- `cn()` from `src/lib/cn.ts` merges class names; a caller's class must be able
+  to beat a component default.
