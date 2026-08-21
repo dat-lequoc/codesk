@@ -196,6 +196,10 @@ async fn main() -> anyhow::Result<()> {
             post(disable_external_tmux),
         )
         .route(
+            "/v1/external-sessions/{pid}/tmux/log",
+            get(external_tmux_log),
+        )
+        .route(
             "/v1/projects/{id}/worktrees",
             get(list_worktrees).post(create_worktree),
         )
@@ -429,11 +433,12 @@ async fn input_external_session(
             ));
         }
     }
-    let project_id = request
-        .project_id
-        .as_deref()
-        .ok_or_else(|| api_error("project_id is required to control an external session"))?;
-    validate_external_project(&state, &agent, project_id).map_err(api_error)?;
+    // Steering only writes to the tmux pane, so it works without a registered
+    // project; queueing creates a run later and still needs one.
+    let project_id = request.project_id.as_deref();
+    if let Some(project_id) = project_id {
+        validate_external_project(&state, &agent, project_id).map_err(api_error)?;
+    }
     let control = state
         .db
         .tmux_control_for_pid(pid)
@@ -459,6 +464,8 @@ async fn input_external_session(
             .map_err(api_error)?;
         return Ok(Json(json!({"ok":true,"delivery":"steer"})));
     }
+    let project_id = project_id
+        .ok_or_else(|| api_error("project_id is required to queue the next turn"))?;
     let queued = ExternalQueuedInput {
         id: Uuid::new_v4().to_string(),
         pid,
@@ -552,7 +559,7 @@ async fn adopt_external_tmux(
         .db
         .upsert_tmux_control(&TmuxControl {
             id: id.clone(),
-            project_id: Some(request.project_id),
+            project_id: request.project_id,
             run_id: None,
             provider: agent.provider,
             native_session_id: agent.native_session_id,
@@ -602,7 +609,7 @@ async fn move_external_to_tmux(
         .db
         .upsert_tmux_control(&TmuxControl {
             id: id.clone(),
-            project_id: Some(request.project_id),
+            project_id: request.project_id,
             run_id: None,
             provider: agent.provider,
             native_session_id: agent.native_session_id,
@@ -653,6 +660,49 @@ async fn disable_external_tmux(
     Ok(Json(json!({"ok":true,"control_id":control.id})))
 }
 
+#[derive(Debug, Deserialize)]
+struct TmuxLogQuery {
+    lines: Option<u32>,
+}
+
+/// Read-only peek at what an observed tmux session is printing. Works for any
+/// discovered process attached to a pane — no project or enabled control
+/// required, since capture-pane cannot disturb the session.
+async fn external_tmux_log(
+    State(state): State<Arc<AppState>>,
+    Path(pid): Path<u32>,
+    Query(query): Query<TmuxLogQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent = external_agent(&state, pid).await.map_err(api_error)?;
+    let pane_id = agent
+        .tmux_pane_id
+        .as_deref()
+        .ok_or_else(|| api_error("this process is not attached to a tmux pane"))?;
+    let pane = state
+        .tmux
+        .panes()
+        .await
+        .map_err(api_error)?
+        .into_iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .ok_or_else(|| api_error("the tmux pane is no longer available"))?;
+    let lines = query.lines.unwrap_or(200).clamp(10, 2000);
+    let text = state
+        .tmux
+        .capture_text_tail(&pane, lines)
+        .await
+        .map_err(api_error)?;
+    Ok(Json(json!({
+        "ok": true,
+        "pid": pid,
+        "pane_id": pane.pane_id,
+        "session_name": pane.session_name,
+        "lines": lines,
+        "text": text,
+        "captured_at": chrono::Utc::now().to_rfc3339(),
+    })))
+}
+
 async fn external_agent(state: &AppState, pid: u32) -> anyhow::Result<model::DiscoveredAgent> {
     let agent = cached_agents(state, true)
         .await?
@@ -690,7 +740,9 @@ fn validate_tmux_request(
     agent: &model::DiscoveredAgent,
     request: &TmuxControlRequest,
 ) -> anyhow::Result<()> {
-    validate_external_project(state, agent, &request.project_id)?;
+    if let Some(project_id) = request.project_id.as_deref() {
+        validate_external_project(state, agent, project_id)?;
+    }
     if let Some(session_id) = request.session_id.as_deref() {
         anyhow::ensure!(
             agent.native_session_id.as_deref() == Some(session_id),

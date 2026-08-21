@@ -1,9 +1,10 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { observedAgents } from '../../lib/app-state'
 import { sessionKey } from '../../lib/keys'
+import { hiddenAgentKey } from '../../lib/observed'
 import {
   makeAgent,
   makeHost,
@@ -34,6 +35,8 @@ const setup = (state: AppState, overrides: Record<string, unknown> = {}) => {
     onTogglePin: vi.fn().mockResolvedValue(undefined),
     onToggleArchive: vi.fn().mockResolvedValue(undefined),
     onToggleArchiveRun: vi.fn().mockResolvedValue(undefined),
+    onHideAgent: vi.fn().mockResolvedValue(undefined),
+    onControlAgent: vi.fn().mockResolvedValue(undefined),
     onRefreshProject: vi.fn().mockResolvedValue(undefined),
     onShowMore: vi.fn().mockResolvedValue(true),
     onNewRun: vi.fn(),
@@ -296,34 +299,117 @@ describe('Sidebar — agents outside projects', () => {
       },
     })
 
-  it('lists a folder that is not a registered project', () => {
+  const expandDetached = async () => {
+    await userEvent.click(screen.getByRole('button', { name: /Outside your projects/ }))
+  }
+
+  it('lists a folder that is not a registered project, collapsed until opened', async () => {
     setup(detached())
     expect(screen.getByLabelText('Agents outside your projects')).toBeInTheDocument()
-    expect(screen.getByText('elsewhere')).toBeInTheDocument()
+    expect(screen.queryByText('Codex · elsewhere')).not.toBeInTheDocument()
+    await expandDetached()
+    expect(screen.getByText('Codex · elsewhere')).toBeInTheDocument()
   })
 
   it('registers the folder as a project', async () => {
     const { onRegisterFolder } = setup(detached())
+    await expandDetached()
     await userEvent.click(screen.getByLabelText('Add /home/dev/elsewhere as a project'))
     await waitFor(() =>
       expect(onRegisterFolder).toHaveBeenCalledWith('host-a', '/home/dev/elsewhere'),
     )
   })
 
-  it('cannot register an agent that reported no working directory', () => {
+  it('cannot register an agent that reported no working directory', async () => {
     const state = baseState({
       discoveredAgentsByHost: {
         'host-a': [makeAgent({ pid: 99, process_group_id: 99, cwd: null })],
       },
     })
     setup(state)
+    await expandDetached()
     expect(screen.getByLabelText('No working directory to add')).toBeDisabled()
   })
 
   it('selects an observed agent', async () => {
     const { onSelectAgent } = setup(detached())
-    await userEvent.click(screen.getByText('elsewhere'))
+    await expandDetached()
+    await userEvent.click(screen.getByText('Codex · elsewhere'))
     expect(onSelectAgent).toHaveBeenCalled()
+  })
+})
+
+describe('Sidebar — observed sessions', () => {
+  it('never lists observed agents inside project rows', async () => {
+    const agent = makeAgent({
+      provider: 'kiro',
+      pid: 44002,
+      process_group_id: 44002,
+      cwd: '/home/dev/codesk',
+      command: 'kiro-cli chat',
+    })
+    setup(baseState({ discoveredAgentsByHost: { 'host-a': [agent] } }))
+    await userEvent.click(screen.getByRole('button', { name: 'Expand codesk' }))
+    expect(screen.queryByText('Kiro · codesk')).not.toBeInTheDocument()
+    expect(screen.queryByText(/pid 44002/)).not.toBeInTheDocument()
+    // In a project folder, so it does not belong to "Outside your projects" either.
+    expect(screen.queryByLabelText('Agents outside your projects')).not.toBeInTheDocument()
+  })
+
+  it('hides and interrupts a detached agent via the menu', async () => {
+    const agent = makeAgent({
+      provider: 'kiro',
+      pid: 44002,
+      process_group_id: 44002,
+      cwd: '/home/dev/elsewhere',
+      command: 'kiro-cli chat',
+    })
+    const { onHideAgent, onControlAgent } = setup(
+      baseState({ discoveredAgentsByHost: { 'host-a': [agent] } }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /Outside your projects/ }))
+    expect(screen.getByText('Kiro · elsewhere')).toBeInTheDocument()
+    fireEvent.contextMenu(screen.getByText('Kiro · elsewhere'))
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Hide' }))
+    expect(onHideAgent).toHaveBeenCalledWith('host-a', agent)
+    fireEvent.contextMenu(screen.getByText('Kiro · elsewhere'))
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Interrupt' }))
+    expect(onControlAgent).toHaveBeenCalledWith('host-a', agent, 'interrupt')
+  })
+
+  it('excludes a hidden agent and offers to show it again', async () => {
+    const agent = makeAgent({
+      provider: 'kiro',
+      pid: 44002,
+      process_group_id: 44002,
+      cwd: '/home/dev/elsewhere',
+      command: 'kiro-cli chat',
+    })
+    const state = baseState({ discoveredAgentsByHost: { 'host-a': [agent] } })
+    state.settings.hiddenAgentKeys = [hiddenAgentKey('host-a', agent)]
+    setup(state)
+    await userEvent.click(screen.getByRole('button', { name: /Outside your projects/ }))
+    expect(screen.queryByText('Kiro · elsewhere')).not.toBeInTheDocument()
+    expect(screen.getByText('Show hidden (1)')).toBeInTheDocument()
+  })
+
+  it('groups detached agents under their host and marks remotes', async () => {
+    const remote = makeHost({ id: 'host-b', name: 'quocd2', type: 'ssh', status: 'online' })
+    const localAgent = makeAgent({ pid: 71, process_group_id: 71, cwd: '/home/dev/scratch' })
+    const remoteAgent = makeAgent({ pid: 77, process_group_id: 77, cwd: '/srv/elsewhere' })
+    setup(
+      baseState({
+        hosts: [host, remote],
+        discoveredAgentsByHost: { 'host-a': [localAgent], 'host-b': [remoteAgent] },
+      }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /Outside your projects/ }))
+    const section = screen.getByLabelText('Agents outside your projects')
+    expect(within(section).getByText('This Mac')).toBeInTheDocument()
+    expect(within(section).getByText('quocd2')).toBeInTheDocument()
+    expect(within(section).getByText('· remote')).toBeInTheDocument()
+    expect(within(section).getByText('Codex · scratch')).toBeInTheDocument()
+    expect(within(section).getByText('Codex · elsewhere')).toBeInTheDocument()
   })
 })
 

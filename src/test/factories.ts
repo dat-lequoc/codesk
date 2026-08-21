@@ -145,6 +145,7 @@ export const makeState = (overrides: Partial<AppState> = {}): AppState => ({
     archivedSessionKeys: [],
     archivedSessions: [],
     archivedRunKeys: [],
+    hiddenAgentKeys: [],
   },
   ...overrides,
 })

@@ -104,7 +104,7 @@ export const api = {
     ),
   externalAgentInput: (
     hostId: string,
-    projectId: string,
+    projectId: string | null | undefined,
     pid: number,
     sessionId: string | null | undefined,
     message: string,
@@ -117,6 +117,16 @@ export const api = {
         body: JSON.stringify({ message, delivery, session_id: sessionId, project_id: projectId }),
       },
     ),
+  externalAgentTmuxLog: (hostId: string, pid: number, lines = 200) =>
+    request<{
+      ok: boolean
+      pid: number
+      pane_id: string
+      session_name: string
+      lines: number
+      text: string
+      captured_at: string
+    }>(`/api/external-sessions/${hostId}/${pid}/tmux/log?lines=${lines}`),
   externalSessionQueue: (hostId: string, pid: number) =>
     request<ExternalQueuedInput[]>(`/api/external-sessions/${hostId}/${pid}/queue`),
   removeExternalQueued: (hostId: string, pid: number, queueId: string) =>
@@ -152,7 +162,7 @@ export const api = {
     }),
   adoptExternalAgentTmux: (
     hostId: string,
-    projectId: string,
+    projectId: string | null | undefined,
     pid: number,
     sessionId?: string | null,
   ) =>
@@ -162,7 +172,7 @@ export const api = {
     }),
   moveExternalAgentToTmux: (
     hostId: string,
-    projectId: string,
+    projectId: string | null | undefined,
     pid: number,
     sessionId?: string | null,
   ) =>

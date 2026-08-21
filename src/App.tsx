@@ -10,7 +10,7 @@ import { Sidebar } from './features/sidebar/Sidebar'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { api } from './api'
-import type { AppState, Project, ProviderSession, Run } from './types'
+import type { AppState, DiscoveredAgent, Project, ProviderSession, Run } from './types'
 import { useLatest } from './hooks/useLatest'
 import { empty, observedAgents } from './lib/app-state'
 import {
@@ -20,6 +20,7 @@ import {
   sessionKey,
   sessionNotificationKey,
 } from './lib/keys'
+import { hiddenAgentKey } from './lib/observed'
 import { prepareNotifications } from './lib/notifications'
 import { useAppStatePolling } from './hooks/useAppStatePolling'
 import { useExternalTranscriptWatcher } from './hooks/useExternalTranscriptWatcher'
@@ -304,6 +305,35 @@ export function App() {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
+  const toggleHideAgent = async (hostId: string, agent: DiscoveredAgent) => {
+    const key = hiddenAgentKey(hostId, agent)
+    const hidden = state.settings.hiddenAgentKeys
+    const isHidden = hidden.includes(key)
+    const hiddenAgentKeys = isHidden ? hidden.filter((item) => item !== key) : [...hidden, key]
+    const prior = state.settings
+    setState((current) => ({ ...current, settings: { ...current.settings, hiddenAgentKeys } }))
+    if (!isHidden && selectedAgentKey === `${hostId}:${agent.id}`) setSelectedAgentKey(null)
+    try {
+      const saved = await api.updateSettings({ hiddenAgentKeys })
+      setState((current) => ({ ...current, settings: saved }))
+    } catch (cause) {
+      setState((current) => ({ ...current, settings: prior }))
+      if (!isHidden && selectedAgentKey === `${hostId}:${agent.id}`)
+        setSelectedAgentKey(`${hostId}:${agent.id}`)
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+  const controlAgent = async (
+    hostId: string,
+    agent: DiscoveredAgent,
+    action: 'interrupt' | 'terminate',
+  ) => {
+    try {
+      await api.controlDiscoveredAgent(hostId, agent.pid, action)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
   const archiveProjectSessions = async (nextProject: Project) => {
     const projectSessions = allSessions.filter(
       (item) =>
@@ -404,6 +434,8 @@ export function App() {
         onTogglePin={togglePin}
         onToggleArchive={toggleArchive}
         onToggleArchiveRun={toggleArchiveRun}
+        onHideAgent={toggleHideAgent}
+        onControlAgent={controlAgent}
         onRefreshProject={async (project) => {
           try {
             const key = projectKey(project)

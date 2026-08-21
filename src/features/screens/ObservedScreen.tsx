@@ -18,13 +18,13 @@ import {
 } from './screen-styles'
 import type { KeyboardEvent } from 'react'
 import { MoreHorizontal } from 'lucide-react'
-import { ListPlus, Plus, RefreshCw, Send, Terminal } from 'lucide-react'
+import { ListPlus, Plus, RefreshCw, ScrollText, Send, Terminal } from 'lucide-react'
 import { api } from '../../api'
-import { Spinner } from '../../components/ui/spinner'
 import { useLatest } from '../../hooks/useLatest'
 import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
 import { providerName } from '../../lib/providers'
+import { observedAgentTitle } from '../../lib/observed'
 import { ProviderIcon } from '../../components/ProviderIcon'
 import type {
   DiscoveredAgent,
@@ -36,7 +36,7 @@ import type {
 } from '../../types'
 import { ComposerFooter, ComposerFrame, ComposerInput } from '../composer/Composer'
 import { TmuxDetails } from '../environment/Environment'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 export function ObservedScreen({
   host,
   project,
@@ -58,6 +58,10 @@ export function ObservedScreen({
   const [controlBusy, setControlBusy] = useState(false)
   const [moving, setMoving] = useState(false)
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
+  const [logOpen, setLogOpen] = useState(false)
+  const [log, setLog] = useState<{ text: string; capturedAt: string } | null>(null)
+  const [logError, setLogError] = useState('')
+  const logRef = useRef<HTMLPreElement>(null)
   const hasQueued = queued.length > 0
   const hostId = host?.id
   const hostStatus = host?.status
@@ -65,15 +69,44 @@ export function ObservedScreen({
   // not resubscribe for it.
   const onStartedRef = useLatest(onStarted)
   const controlled = Boolean(agent.tmux_controlled && agent.tmux_pane_id)
-  const canContinue = Boolean(project && agent.native_session_id && controlled)
+  // Steering only needs an adopted tmux pane; queueing the next turn still
+  // needs a project (queue items become runs).
+  const canContinue = Boolean(agent.native_session_id && controlled)
+  const canQueue = Boolean(project && canContinue)
+  const hasPane = Boolean(agent.tmux_pane_id)
+  useEffect(() => {
+    if (!logOpen || !hostId || hostStatus !== 'online' || !hasPane) return
+    let cancelled = false
+    const load = async () => {
+      try {
+        const result = await api.externalAgentTmuxLog(hostId, agent.pid)
+        if (cancelled) return
+        setLog({ text: result.text.replace(/\s+$/, ''), capturedAt: result.captured_at })
+        setLogError('')
+      } catch (cause) {
+        if (!cancelled) setLogError(cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+    void load()
+    const timer = window.setInterval(() => void load(), 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [logOpen, hostId, hostStatus, hasPane, agent.pid])
+  useEffect(() => {
+    const element = logRef.current
+    if (element) element.scrollTop = element.scrollHeight
+  }, [log])
   const submit = async (delivery: 'steer' | 'queue' = 'steer') => {
     const prompt = message.trim()
-    if (!prompt || busy || host?.status !== 'online' || !project || !canContinue) return
+    if (!prompt || busy || host?.status !== 'online' || !canContinue) return
+    if (delivery === 'queue' && !canQueue) return
     setBusy(true)
     try {
       const result = await api.externalAgentInput(
         host.id,
-        project.id,
+        project?.id ?? null,
         agent.pid,
         agent.native_session_id,
         prompt,
@@ -93,7 +126,7 @@ export function ObservedScreen({
     }
   }
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Tab' && controlled) {
+    if (event.key === 'Tab' && canQueue) {
       event.preventDefault()
       void submit('queue')
       return
@@ -119,10 +152,7 @@ export function ObservedScreen({
       <header className={threadHeader}>
         <ProviderIcon provider={agent.provider} />
         <strong className={threadHeaderTitle}>{providerName(agent.provider)} session</strong>
-        <span className={observedBadge}>
-          <Spinner size={11} />
-          Observed
-        </span>
+        <span className={observedBadge}>Observed</span>
         <span className="flex-1" />
         <button className={headerButton} aria-label="Thread actions">
           <MoreHorizontal size={18} />
@@ -131,63 +161,115 @@ export function ObservedScreen({
       <div className="mx-auto w-[min(720px,calc(100%-100px))] py-24">
         <div className="text-center [&>svg]:mx-auto [&>svg]:size-9 [&>svg]:text-fg-soft">
           <ProviderIcon provider={agent.provider} />
-          <h1 className="mt-4 mb-2 text-2xl font-medium">
-            {providerName(agent.provider)} is running
-          </h1>
+          <h1 className="mt-4 mb-2 text-2xl font-medium">{observedAgentTitle(agent)}</h1>
           <p className="mx-auto max-w-[490px] text-[13px] leading-relaxed text-muted">
-            {controlled
-              ? 'Codesk can steer this tmux session directly and queue the next turn.'
-              : agent.tmux_session_name
-                ? 'Codesk found this tmux session. Enable control to send input safely.'
-                : 'Move this terminal session to tmux after its active turn becomes idle.'}
+            External process, not started by Codesk. Show the log to see what it is doing, or take
+            control to steer it from here.
           </p>
+          {controlled && (
+            <p className="mx-auto mt-2 max-w-[490px] text-[13px] leading-relaxed text-muted">
+              Control is on: Codesk can steer this tmux session directly and queue the next turn.
+            </p>
+          )}
         </div>
-        <div className="mx-auto mt-4 w-[min(650px,100%)] rounded-lg border border-line-strong bg-ink-700 px-3 py-2.5">
-          <TmuxDetails name={agent.tmux_session_name} command={agent.tmux_access_command} />
-        </div>
-        {project && agent.native_session_id && !controlled && (
-          <button
-            className="mx-auto mt-3 flex h-8 items-center gap-[7px] rounded-md border border-grass-600/70 bg-grass-600/25 px-3 text-[11px] text-grass-400 disabled:cursor-default disabled:opacity-55"
-            type="button"
-            disabled={controlBusy || moving}
-            onClick={async () => {
-              if (!host) return
-              setControlBusy(true)
-              try {
-                if (agent.tmux_session_name)
-                  await api.adoptExternalAgentTmux(
-                    host.id,
-                    project.id,
-                    agent.pid,
-                    agent.native_session_id,
-                  )
-                else {
-                  await api.moveExternalAgentToTmux(
-                    host.id,
-                    project.id,
-                    agent.pid,
-                    agent.native_session_id,
-                  )
-                  setMoving(true)
+        <dl className="mx-auto mt-4 w-[min(650px,100%)] rounded-lg border border-line-strong bg-ink-700 px-3 py-2.5 text-left text-[12px]">
+          <div className="flex gap-3 py-1">
+            <dt className="w-[72px] shrink-0 text-dim">Folder</dt>
+            <dd className="min-w-0 truncate text-fg-soft" title={agent.cwd || undefined}>
+              {agent.cwd || 'unknown'}
+            </dd>
+          </div>
+          <div className="flex gap-3 py-1">
+            <dt className="w-[72px] shrink-0 text-dim">PID</dt>
+            <dd className="text-fg-soft">{agent.pid}</dd>
+          </div>
+          <div className="flex gap-3 py-1">
+            <dt className="w-[72px] shrink-0 text-dim">Command</dt>
+            <dd className="min-w-0 break-all text-fg-soft">{agent.command}</dd>
+          </div>
+        </dl>
+        {(agent.tmux_session_name || agent.tmux_access_command) && (
+          <div className="mx-auto mt-2 w-[min(650px,100%)] rounded-lg border border-line-strong bg-ink-700 px-3 py-2.5">
+            <TmuxDetails name={agent.tmux_session_name} command={agent.tmux_access_command} />
+          </div>
+        )}
+        <div className="mt-3 flex items-center justify-center gap-2">
+          {agent.native_session_id && !controlled && (
+            <button
+              className="flex h-8 items-center gap-[7px] rounded-md border border-grass-600/70 bg-grass-600/25 px-3 text-[11px] text-grass-400 disabled:cursor-default disabled:opacity-55"
+              type="button"
+              disabled={controlBusy || moving}
+              onClick={async () => {
+                if (!host) return
+                setControlBusy(true)
+                try {
+                  if (agent.tmux_session_name)
+                    await api.adoptExternalAgentTmux(
+                      host.id,
+                      project?.id ?? null,
+                      agent.pid,
+                      agent.native_session_id,
+                    )
+                  else {
+                    await api.moveExternalAgentToTmux(
+                      host.id,
+                      project?.id ?? null,
+                      agent.pid,
+                      agent.native_session_id,
+                    )
+                    setMoving(true)
+                  }
+                } catch (cause) {
+                  onError(cause instanceof Error ? cause.message : String(cause))
+                } finally {
+                  setControlBusy(false)
                 }
-              } catch (cause) {
-                onError(cause instanceof Error ? cause.message : String(cause))
-              } finally {
-                setControlBusy(false)
-              }
-            }}
-          >
-            {controlBusy ? (
-              <RefreshCw className="animate-spin" size={14} />
+              }}
+            >
+              {controlBusy ? (
+                <RefreshCw className="animate-spin" size={14} />
+              ) : (
+                <Terminal size={14} />
+              )}
+              {agent.tmux_session_name
+                ? 'Take control'
+                : moving
+                  ? 'Waiting for idle'
+                  : 'Move to tmux'}
+            </button>
+          )}
+          {hasPane && (
+            <button
+              className="flex h-8 items-center gap-[7px] rounded-md border border-line-strong bg-ink-700 px-3 text-[11px] text-fg-soft hover:bg-ink-600"
+              type="button"
+              aria-expanded={logOpen}
+              onClick={() => setLogOpen((value) => !value)}
+            >
+              <ScrollText size={14} />
+              {logOpen ? 'Hide log' : 'Show log'}
+            </button>
+          )}
+        </div>
+        {logOpen && hasPane && (
+          <div className="mx-auto mt-3 w-[min(650px,100%)] overflow-hidden rounded-lg border border-line-strong bg-ink-800">
+            <header className="flex items-center gap-2 border-b border-line-strong px-3 py-1.5 text-[10.5px] text-dim">
+              <ScrollText size={12} />
+              <span className="flex-1">
+                {agent.tmux_session_name || 'tmux'} · live capture, refreshes every 5s
+              </span>
+              {log && <span>{new Date(log.capturedAt).toLocaleTimeString()}</span>}
+            </header>
+            {logError ? (
+              <p className="px-3 py-2 text-[11.5px] text-scarlet-400">{logError}</p>
             ) : (
-              <Terminal size={14} />
+              <pre
+                ref={logRef}
+                className="max-h-[320px] overflow-auto px-3 py-2 text-left font-mono text-[10.5px] leading-[1.5] whitespace-pre-wrap text-fg-soft"
+              >
+                {log ? log.text || '(the pane is empty)' : 'Capturing…'}
+              </pre>
             )}
-            {agent.tmux_session_name
-              ? 'Enable control'
-              : moving
-                ? 'Waiting for idle'
-                : 'Move to tmux'}
-          </button>
+          </div>
         )}
       </div>
       {canContinue && (
@@ -226,7 +308,9 @@ export function ObservedScreen({
             value={message}
             onChange={(event) => setMessage(event.target.value)}
             onKeyDown={keyDown}
-            placeholder="Steer this session · Tab queues after this turn"
+            placeholder={
+              canQueue ? 'Steer this session · Tab queues after this turn' : 'Steer this session'
+            }
           />
           <ComposerFooter className={composerBar}>
             <button
@@ -240,10 +324,12 @@ export function ObservedScreen({
               <Send size={13} />
               Enter · Steer
             </span>
-            <span className={cn(deliveryMode, deliveryModeQueue)}>
-              <ListPlus size={13} />
-              Tab · Queue
-            </span>
+            {canQueue && (
+              <span className={cn(deliveryMode, deliveryModeQueue)}>
+                <ListPlus size={13} />
+                Tab · Queue
+              </span>
+            )}
             <span className="flex-1" />
             <small className={composerHint}>{agent.tmux_session_name}</small>
             <button

@@ -17,6 +17,7 @@ export const empty: AppState = {
     archivedSessionKeys: [],
     archivedSessions: [],
     archivedRunKeys: [],
+    hiddenAgentKeys: [],
   },
 }
 
@@ -92,5 +93,6 @@ export const normalizeState = (value: AppState) => ({
     archivedSessionKeys: value.settings?.archivedSessionKeys || [],
     archivedSessions: value.settings?.archivedSessions || [],
     archivedRunKeys: value.settings?.archivedRunKeys || [],
+    hiddenAgentKeys: value.settings?.hiddenAgentKeys || [],
   },
 })

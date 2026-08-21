@@ -194,6 +194,7 @@ describe('normalizeState', () => {
     const settings = normalizeState(value).settings
     expect(settings.pinnedSessionKeys).toEqual([])
     expect(settings.archivedRunKeys).toEqual([])
+    expect(settings.hiddenAgentKeys).toEqual([])
     expect(settings.notifications).toBe(true)
   })
 

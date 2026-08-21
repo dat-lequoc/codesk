@@ -10,7 +10,7 @@ const sshOptions = ['-o','BatchMode=yes','-o','ExitOnForwardFailure=yes','-o','C
 // The oldest codeskd this gateway knows how to drive. A remote host can keep
 // running a daemon installed by an older Codesk indefinitely; without this
 // check it stays "online" while requests fail in confusing ways.
-const MIN_DAEMON_VERSION = '0.2.0'
+const MIN_DAEMON_VERSION = '0.2.2'
 function versionLt(left, right) {
   const parse = (value) => String(value).split('.').map((part) => Number.parseInt(part, 10) || 0)
   const a = parse(left); const b = parse(right)
@@ -279,24 +279,28 @@ export class Gateway {
   async bootstrapRemote(hostId, { artifactUrl, localBinaryPath, reconnect = true } = {}) {
     const host=this.host(hostId); if(!host||host.type!=='ssh') throw new Error('SSH host not found')
     const inspection = await this.inspectRemote(hostId)
-    if (inspection.daemon) {
-      // Binary is there but nothing is listening: (re)start the service.
-      await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(`set -eu; ${shellQuote(inspection.daemon)} install ${Number(host.daemonPort||4243)}`)],{timeout:60000,maxBuffer:1024*1024})
-      if (reconnect) this.reconnect(hostId)
-      return { ok:true, alreadyInstalled:true, inspection }
-    }
     artifactUrl ||= releaseArtifactUrl(inspection)
     if (artifactUrl) return this.installRemote(hostId, artifactUrl, { reconnect })
     const binary = localBinaryPath && fs.existsSync(localBinaryPath) && matchesLocalPlatform(inspection)
       ? localBinaryPath
       : localArtifactFor(inspection) || await this.seedFromPeer(inspection)
-    if (!binary) throw new Error(`codeskd is missing on ${host.name} and no ${inspection.os}/${inspection.arch} daemon artifact is available. Set CODESK_DAEMON_RELEASE_BASE_URL, drop a binary at dist/codeskd-${inspection.os}-${inspection.arch}, or connect another ${inspection.os}/${inspection.arch} host that already runs codeskd.`)
-    const remoteTemp = `/tmp/codeskd-${Date.now()}`
-    await execFileAsync('scp',[...sshOptions,binary,`${host.sshAlias}:${remoteTemp}`],{timeout:120000,maxBuffer:1024*1024})
-    const command=`set -eu; chmod +x ${shellQuote(remoteTemp)}; ${shellQuote(remoteTemp)} install ${Number(host.daemonPort||4243)}; rm -f ${shellQuote(remoteTemp)}`
-    const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(command)],{timeout:60000,maxBuffer:1024*1024})
-    if (reconnect) this.reconnect(hostId)
-    return {ok:true,stdout,stderr,inspection,binary}
+    if (binary) {
+      // Copy even when a daemon is already installed: otherwise an outdated
+      // remote stays on its old binary forever (`codeskd install` only
+      // restarts whatever is already in ~/.local/bin).
+      const remoteTemp = `/tmp/codeskd-${Date.now()}`
+      await execFileAsync('scp',[...sshOptions,binary,`${host.sshAlias}:${remoteTemp}`],{timeout:120000,maxBuffer:1024*1024})
+      const command=`set -eu; chmod +x ${shellQuote(remoteTemp)}; ${shellQuote(remoteTemp)} install ${Number(host.daemonPort||4243)}; rm -f ${shellQuote(remoteTemp)}`
+      const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(command)],{timeout:60000,maxBuffer:1024*1024})
+      if (reconnect) this.reconnect(hostId)
+      return {ok:true,stdout,stderr,inspection,binary,upgraded:Boolean(inspection.daemon)}
+    }
+    if (inspection.daemon) {
+      await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(`set -eu; ${shellQuote(inspection.daemon)} install ${Number(host.daemonPort||4243)}`)],{timeout:60000,maxBuffer:1024*1024})
+      if (reconnect) this.reconnect(hostId)
+      return { ok:true, alreadyInstalled:true, inspection }
+    }
+    throw new Error(`codeskd is missing on ${host.name} and no ${inspection.os}/${inspection.arch} daemon artifact is available. Set CODESK_DAEMON_RELEASE_BASE_URL, drop a binary at dist/codeskd-${inspection.os}-${inspection.arch}, or connect another ${inspection.os}/${inspection.arch} host that already runs codeskd.`)
   }
 
   // Copies codeskd from an already-provisioned host of the same os/arch. This
@@ -435,7 +439,12 @@ function localArtifactFor(inspection){
   const candidates=[artifactPath(inspection),path.resolve(process.cwd(),'dist',`codeskd-${inspection.os}-${inspection.arch}`)]
   if(inspection.os==='Linux')candidates.push(path.resolve(process.cwd(),`target/${inspection.arch}-unknown-linux-musl/release/codeskd`),path.resolve(process.cwd(),`target/${inspection.arch}-unknown-linux-gnu/release/codeskd`))
   if(matchesLocalPlatform(inspection))candidates.push(path.resolve(process.cwd(),'target/release/codeskd'),path.resolve(process.cwd(),'target/debug/codeskd'))
-  return candidates.find((candidate)=>fs.existsSync(candidate))||''
+  // Newest wins: the artifacts cache would otherwise shadow a freshly built
+  // target/ binary forever and keep re-installing an outdated daemon.
+  return candidates
+    .filter((candidate)=>fs.existsSync(candidate))
+    .map((candidate)=>({candidate,mtime:fs.statSync(candidate).mtimeMs}))
+    .sort((left,right)=>right.mtime-left.mtime)[0]?.candidate||''
 }
 // Release assets are named after each platform's native `uname -m`:
 // codeskd-Darwin-arm64 and codeskd-Linux-aarch64. Normalizing both spellings

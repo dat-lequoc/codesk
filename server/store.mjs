@@ -8,7 +8,7 @@ const defaults = {
   hosts: [{ id: 'local', name: localHostName, type: 'local', daemonPort: 4243, status: 'checking', createdAt: new Date().toISOString() }],
   drafts: [],
   navigationByHost: {},
-  settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [], archivedRunKeys: [] },
+  settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [], archivedRunKeys: [], hiddenAgentKeys: [] },
 }
 
 export class Store {
@@ -57,6 +57,7 @@ export class Store {
     if (!Array.isArray(this.state.settings.archivedSessionKeys)) this.state.settings.archivedSessionKeys = []
     if (!Array.isArray(this.state.settings.archivedSessions)) this.state.settings.archivedSessions = []
     if (!Array.isArray(this.state.settings.archivedRunKeys)) this.state.settings.archivedRunKeys = []
+    if (!Array.isArray(this.state.settings.hiddenAgentKeys)) this.state.settings.hiddenAgentKeys = []
     if (draftsChanged) this.save()
   }
   /// Persist soon, not now. Every mutation used to rewrite the full document
@@ -123,6 +124,7 @@ export class Store {
       this.state.settings.archivedSessions = this.state.settings.archivedSessions.filter((session) => allowed.has(`${session.hostId}:${session.id}`))
     }
     if (Array.isArray(changes.archivedRunKeys)) this.state.settings.archivedRunKeys = [...new Set(changes.archivedRunKeys.filter((key) => typeof key === 'string'))]
+    if (Array.isArray(changes.hiddenAgentKeys)) this.state.settings.hiddenAgentKeys = [...new Set(changes.hiddenAgentKeys.filter((key) => typeof key === 'string'))]
     this.save()
     return this.state.settings
   }

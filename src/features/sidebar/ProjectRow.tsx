@@ -1,13 +1,20 @@
 import { memo } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { ChevronDown, ChevronRight, FolderGit2, MoreHorizontal, Pencil, RefreshCw } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderGit2,
+  MoreHorizontal,
+  Pencil,
+  RefreshCw,
+} from 'lucide-react'
 import { Spinner } from '../../components/ui/spinner'
 import { StatusDot } from '../../components/ui/status-dot'
 import { cn } from '../../lib/cn'
 import { draftTitle, relative } from '../../lib/format'
 import { sessionKey } from '../../lib/keys'
 import { hasHiddenItems } from '../../sessionBudget'
-import type { DiscoveredAgent, DraftSession, Project, ProviderSession, Run } from '../../types'
+import type { DraftSession, Project, ProviderSession, Run } from '../../types'
 import { hostTone, recentStatus, rowMeta, rowTitle, sessionRow, unreadDot } from './row-styles'
 import { RunRow } from './RunRow'
 import { SessionRow } from './SessionRow'
@@ -19,7 +26,6 @@ export const ProjectRow = memo(function ProjectRow({
   needle,
   selectedId,
   selectedSessionKey,
-  selectedAgentKey,
   selectedDraftId,
   projectOnlySelected,
   menuOpen,
@@ -32,7 +38,6 @@ export const ProjectRow = memo(function ProjectRow({
   onSelectDraft,
   onSelectSession,
   onSelectRun,
-  onSelectAgent,
   onTogglePin,
   onArchiveSession,
   onArchiveRun,
@@ -44,7 +49,6 @@ export const ProjectRow = memo(function ProjectRow({
   needle: string
   selectedId: string | null
   selectedSessionKey: string | null
-  selectedAgentKey: string | null
   selectedDraftId: string | null
   projectOnlySelected: boolean
   menuOpen: boolean
@@ -57,7 +61,6 @@ export const ProjectRow = memo(function ProjectRow({
   onSelectDraft: (draft: DraftSession) => void
   onSelectSession: (session: ProviderSession) => void
   onSelectRun: (run: Run) => void
-  onSelectAgent: (hostId: string, agent: DiscoveredAgent, project?: Project) => void
   onTogglePin: (session: ProviderSession) => Promise<void>
   onArchiveSession: (project: Project, session: ProviderSession) => void
   onArchiveRun: (project: Project, run: Run) => void
@@ -77,7 +80,6 @@ export const ProjectRow = memo(function ProjectRow({
     visibleProjectDrafts,
     visibleProjectSessions,
     visibleProjectRuns,
-    visibleProjectAgents,
     runningSessions,
     runningCount,
   } = row
@@ -220,26 +222,6 @@ export const ProjectRow = memo(function ProjectRow({
               onSelect={onSelectRun}
               onArchive={(next) => onArchiveRun(project, next)}
             />
-          ))}
-          {visibleProjectAgents.map(({ hostId, agent }) => (
-            <button
-              key={`${hostId}:${agent.id}`}
-              className={cn(
-                sessionRow,
-                'pr-1.5',
-                `${hostId}:${agent.id}` === selectedAgentKey && 'bg-ink-600',
-              )}
-              onClick={() => onSelectAgent(hostId, agent, project)}
-            >
-              <span className={cn(recentStatus, 'text-amber-signal-500')}>
-                <Spinner />
-              </span>
-              <span className={rowTitle}>
-                <SidebarHarness provider={agent.provider} />
-                <span className="min-w-0 truncate">Observed session</span>
-              </span>
-              <small className={rowMeta}>observed</small>
-            </button>
           ))}
           {!needle && hasHiddenItems(totalProjectItems, itemLimit) && (
             <button

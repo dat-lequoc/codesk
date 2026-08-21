@@ -163,7 +163,9 @@ pub struct ExternalInputRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct TmuxControlRequest {
-    pub project_id: String,
+    /// Optional: control can be enabled for sessions running outside any
+    /// registered project; queueing new turns still requires a project.
+    pub project_id: Option<String>,
     pub session_id: Option<String>,
 }
 

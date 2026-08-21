@@ -10,7 +10,6 @@ import {
   sessionKey,
   sessionNotificationKey,
 } from '../../lib/keys'
-import { providerName } from '../../lib/providers'
 import { itemBudget } from '../../sessionBudget'
 import type { DraftSession, Host, Project, ProviderSession, Run } from '../../types'
 
@@ -29,16 +28,16 @@ export type ProjectRowModel = {
   visibleProjectDrafts: DraftSession[]
   visibleProjectSessions: ProviderSession[]
   visibleProjectRuns: Run[]
-  visibleProjectAgents: ObservedAgentEntry[]
   runningSessions: ProviderSession[]
   runningCount: number
 }
 
 /**
- * Builds the per-project row model for the sidebar: which drafts, sessions,
- * runs and observed agents are visible under each project after search
- * filtering and the item budget, plus the unread/running rollups the project
- * header shows. Pure data — the components render it.
+ * Builds the per-project row model for the sidebar: which drafts, sessions
+ * and runs are visible under each project after search filtering and the item
+ * budget, plus the unread/running rollups the project header shows. Pure data
+ * — the components render it. Discovered external agents are deliberately not
+ * listed here: they surface only in the "Outside your projects" section.
  */
 export function useProjectRows({
   projects,
@@ -46,7 +45,6 @@ export function useProjectRows({
   drafts,
   sessions,
   runs,
-  agents,
   unreadKeys,
   archivedSessionKeys,
   archivedRunKeys,
@@ -60,7 +58,6 @@ export function useProjectRows({
   drafts: DraftSession[]
   sessions: ProviderSession[]
   runs: Run[]
-  agents: ObservedAgentEntry[]
   unreadKeys: Set<string>
   archivedSessionKeys: string[]
   archivedRunKeys: string[]
@@ -84,9 +81,7 @@ export function useProjectRows({
   const hasUnreadSession = useCallback(
     (session: ProviderSession) =>
       unreadKeys.has(sessionNotificationKey(session)) ||
-      unreadRunSessionKeys.has(
-        `${session.hostId}:${session.provider}:${session.nativeSessionId}`,
-      ),
+      unreadRunSessionKeys.has(`${session.hostId}:${session.provider}:${session.nativeSessionId}`),
     [unreadKeys, unreadRunSessionKeys],
   )
   const hasUnreadRun = useCallback(
@@ -124,14 +119,6 @@ export function useProjectRows({
       )
       const projectUnread =
         allProjectSessions.some(hasUnreadSession) || allProjectRuns.some(hasUnreadRun)
-      const allProjectAgents = agents.filter(
-        (item) =>
-          item.project &&
-          projectKey(item.project) === key &&
-          !providerProjectSessions.some(
-            (session) => session.provider === item.agent.provider && session.status === 'running',
-          ),
-      )
       const projectMatches = `${project.name} ${project.path} ${host?.name || ''}`
         .toLowerCase()
         .includes(needle)
@@ -153,24 +140,16 @@ export function useProjectRows({
           : allProjectRuns.filter((run) =>
               `${run.title} ${run.prompt} ${run.provider}`.toLowerCase().includes(needle),
             )
-      const projectAgents =
-        !needle || projectMatches
-          ? allProjectAgents
-          : allProjectAgents.filter(({ agent }) =>
-              `${providerName(agent.provider)} ${agent.cwd || ''}`.toLowerCase().includes(needle),
-            )
       if (
         needle &&
         !projectMatches &&
         !projectDrafts.length &&
         !matchingSessions.length &&
-        !projectRuns.length &&
-        !projectAgents.length
+        !projectRuns.length
       )
         continue
       const open = needle ? true : expanded.has(key)
-      const totalProjectItems =
-        projectDrafts.length + matchingSessions.length + projectRuns.length + projectAgents.length
+      const totalProjectItems = projectDrafts.length + matchingSessions.length + projectRuns.length
       const itemLimit = needle ? totalProjectItems : projectItemLimit(key)
       const unreadProjectSessions = matchingSessions.filter(hasUnreadSession)
       const unreadProjectRuns = projectRuns.filter(hasUnreadRun)
@@ -202,8 +181,6 @@ export function useProjectRows({
       const visibleReadSessions = readProjectSessions.slice(0, slotsRemaining)
       slotsRemaining -= visibleReadSessions.length
       const visibleReadRuns = readProjectRuns.slice(0, slotsRemaining)
-      slotsRemaining -= visibleReadRuns.length
-      const visibleProjectAgents = projectAgents.slice(0, slotsRemaining)
       const visibleProjectSessions = [
         ...visibleUnreadSessions,
         ...visibleRunningSessions,
@@ -224,14 +201,12 @@ export function useProjectRows({
         visibleProjectDrafts,
         visibleProjectSessions,
         visibleProjectRuns,
-        visibleProjectAgents,
         runningSessions,
         runningCount,
       })
     }
     return models
   }, [
-    agents,
     archivedRunKeys,
     archivedSessionKeys,
     drafts,

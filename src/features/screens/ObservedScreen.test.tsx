@@ -13,6 +13,7 @@ vi.mock('../../api', () => ({
     removeExternalQueued: vi.fn(),
     adoptExternalAgentTmux: vi.fn(),
     moveExternalAgentToTmux: vi.fn(),
+    externalAgentTmuxLog: vi.fn(),
   },
 }))
 
@@ -36,11 +37,14 @@ const steerable = (overrides: Partial<DiscoveredAgent> = {}) =>
     ...overrides,
   })
 
-const mount = (agent: DiscoveredAgent, overrides: { host?: typeof host } = {}) =>
+const mount = (
+  agent: DiscoveredAgent,
+  overrides: { host?: typeof host; project?: typeof project } = {},
+) =>
   render(
     <ObservedScreen
       host={'host' in overrides ? overrides.host : host}
-      project={project}
+      project={'project' in overrides ? overrides.project : project}
       agent={agent}
       onStarted={onStarted}
       onError={onError}
@@ -58,7 +62,11 @@ describe('ObservedScreen', () => {
   it('marks the agent as observed rather than owned', () => {
     mount(steerable())
     expect(screen.getByText('Observed')).toBeInTheDocument()
-    expect(screen.getByText('Codex is running')).toBeInTheDocument()
+    expect(screen.getByText('Codex · codesk')).toBeInTheDocument()
+    expect(screen.getByText(/External process, not started by Codesk/)).toBeInTheDocument()
+    expect(screen.getByText('4242')).toBeInTheDocument()
+    expect(screen.getByText('/home/dev/codesk')).toBeInTheDocument()
+    expect(screen.getByText('codex')).toBeInTheDocument()
   })
 
   it('steers a controlled agent', async () => {
@@ -112,7 +120,7 @@ describe('ObservedScreen', () => {
   it('offers no composer until Codesk controls the session', () => {
     mount(steerable({ tmux_controlled: false, tmux_pane_id: undefined }))
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Enable control/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Take control/ })).toBeInTheDocument()
   })
 
   it('offers to move a bare terminal agent into tmux', async () => {
@@ -133,7 +141,7 @@ describe('ObservedScreen', () => {
 
   it('adopts an agent that is already in tmux', async () => {
     mount(steerable({ tmux_controlled: false, tmux_pane_id: undefined }))
-    await userEvent.click(screen.getByRole('button', { name: /Enable control/ }))
+    await userEvent.click(screen.getByRole('button', { name: /Take control/ }))
     await waitFor(() =>
       expect(api.adoptExternalAgentTmux).toHaveBeenCalledWith(
         'host-local',
@@ -144,10 +152,65 @@ describe('ObservedScreen', () => {
     )
   })
 
+  it('takes control of a session outside any project', async () => {
+    mount(steerable({ tmux_controlled: false, tmux_pane_id: undefined, cwd: '/tmp/elsewhere' }), {
+      project: undefined,
+    })
+    await userEvent.click(screen.getByRole('button', { name: /Take control/ }))
+    await waitFor(() =>
+      expect(api.adoptExternalAgentTmux).toHaveBeenCalledWith('host-local', null, 4242, 'native-a'),
+    )
+  })
+
+  it('steers without a project but does not offer queueing', async () => {
+    vi.mocked(api.externalAgentInput).mockResolvedValue({ ok: true, delivery: 'steer' })
+    mount(steerable({ cwd: '/tmp/elsewhere' }), { project: undefined })
+    expect(screen.queryByText('Tab · Queue')).not.toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox'), 'keep going')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() =>
+      expect(api.externalAgentInput).toHaveBeenCalledWith(
+        'host-local',
+        null,
+        4242,
+        'native-a',
+        'keep going',
+        'steer',
+      ),
+    )
+  })
+
+  it('shows the live tmux log on demand', async () => {
+    vi.mocked(api.externalAgentTmuxLog).mockResolvedValue({
+      ok: true,
+      pid: 4242,
+      pane_id: '%1',
+      session_name: 'codesk-a',
+      lines: 200,
+      text: 'agy is thinking about the plan\n',
+      captured_at: new Date().toISOString(),
+    })
+    mount(steerable())
+    await userEvent.click(screen.getByRole('button', { name: /Show log/ }))
+    expect(await screen.findByText(/agy is thinking about the plan/)).toBeInTheDocument()
+    expect(api.externalAgentTmuxLog).toHaveBeenCalledWith('host-local', 4242)
+    await userEvent.click(screen.getByRole('button', { name: /Hide log/ }))
+    expect(screen.queryByText(/agy is thinking about the plan/)).not.toBeInTheDocument()
+  })
+
+  it('reports when the pane cannot be captured', async () => {
+    vi.mocked(api.externalAgentTmuxLog).mockRejectedValue(
+      new Error('the tmux pane is no longer available'),
+    )
+    mount(steerable())
+    await userEvent.click(screen.getByRole('button', { name: /Show log/ }))
+    expect(await screen.findByText('the tmux pane is no longer available')).toBeInTheDocument()
+  })
+
   it('reports a failure to take control', async () => {
     vi.mocked(api.adoptExternalAgentTmux).mockRejectedValue(new Error('no such pane'))
     mount(steerable({ tmux_controlled: false, tmux_pane_id: undefined }))
-    await userEvent.click(screen.getByRole('button', { name: /Enable control/ }))
+    await userEvent.click(screen.getByRole('button', { name: /Take control/ }))
     await waitFor(() => expect(onError).toHaveBeenCalledWith('no such pane'))
   })
 

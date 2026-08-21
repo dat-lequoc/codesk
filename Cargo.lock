@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "codesk-desktop"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "objc2",
  "objc2-app-kit",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "codeskd"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",

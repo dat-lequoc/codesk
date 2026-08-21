@@ -140,6 +140,9 @@ export type AppState = {
     /// snapshot because the daemon keeps reporting them, unlike historical
     /// provider sessions which can drop out of the index.
     archivedRunKeys: string[]
+    /// Discovered external processes the user hid from the sidebar, keyed
+    /// `hostId:pid:command-hash`. Same persistence pattern as archived runs.
+    hiddenAgentKeys: string[]
   }
   discoveredAgentsByHost?: Record<string, DiscoveredAgent[]>
 }

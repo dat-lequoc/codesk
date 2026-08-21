@@ -1,6 +1,6 @@
 [package]
 name = "codesk-desktop"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 description = "Codesk desktop control plane for coding agents"
 license = "MIT"

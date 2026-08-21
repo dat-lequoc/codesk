@@ -308,6 +308,11 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
             value => Some(value.to_string()),
         };
         let command = fields[4..].join(" ");
+        // `tmux … pi` classifies as the inner provider because the wrapper
+        // argv still contains the harness name. The wrapper is not the agent.
+        if is_tmux_launch_wrapper(&command) {
+            continue;
+        }
         let provider = classify_agent(&command);
         let Some(provider) = provider else { continue };
         let managed_run_id = managed
@@ -384,6 +389,11 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
             .tty
             .as_deref()
             .and_then(|tty| panes.iter().find(|pane| pane.tty == tty));
+        // Linux reports a vanished cwd as `path (deleted)`. There is nothing
+        // left to attach to or register as a project.
+        if cwd.as_deref().is_some_and(is_deleted_cwd) {
+            continue;
+        }
         let mut tmux_controlled = false;
         let mut model = None;
         let mut effort = None;
@@ -706,6 +716,16 @@ fn command_session_id(command: &str, provider: &str) -> Option<String> {
     providers::get(provider).and_then(|adapter| adapter.command_session_id(command))
 }
 
+fn is_tmux_launch_wrapper(command: &str) -> bool {
+    let first = command.split_whitespace().next().unwrap_or("");
+    let basename = first.rsplit('/').next().unwrap_or(first);
+    basename == "tmux"
+}
+
+fn is_deleted_cwd(cwd: &str) -> bool {
+    cwd.ends_with(" (deleted)")
+}
+
 fn classify_agent(command: &str) -> Option<&'static str> {
     providers::all()
         .into_iter()
@@ -810,6 +830,27 @@ mod tests {
             classify_agent("node /opt/homebrew/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web"),
             Some("dsh")
         );
+    }
+
+    #[test]
+    fn skips_tmux_binaries_that_only_launch_an_agent() {
+        assert!(is_tmux_launch_wrapper(
+            "tmux -S /tmp/tmux-0/default new-session -d -s pi pi --model opus"
+        ));
+        assert!(is_tmux_launch_wrapper(
+            "/usr/bin/tmux new-session kiro-cli chat"
+        ));
+        assert!(!is_tmux_launch_wrapper("pi --model opus"));
+        assert!(!is_tmux_launch_wrapper("/usr/local/bin/kiro-cli chat"));
+        // A harness invoked *from* a tmux session still has its own argv.
+        assert!(!is_tmux_launch_wrapper("kiro-cli chat"));
+    }
+
+    #[test]
+    fn skips_working_directories_linux_marks_deleted() {
+        assert!(is_deleted_cwd("/root/.docker/my-plugins (deleted)"));
+        assert!(!is_deleted_cwd("/root/.docker/my-plugins"));
+        assert!(!is_deleted_cwd("/"));
     }
 
     #[test]
