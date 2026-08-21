@@ -131,13 +131,13 @@ Provider IDs and stored session/run records remain stable. New capability fields
 
 ### 3.1 Local
 
-- `codeskd` listens on a Unix domain socket.
+- `codeskd` listens on a loopback TCP port (default 4243).
 - The desktop application starts it on demand or connects to an existing per-user service.
-- Socket filesystem permissions restrict access to the current user.
+- Loopback binding restricts access to processes on the same machine.
 
 ### 3.2 Remote MVP
 
-- `codeskd` listens only on a Unix socket or loopback TCP port on the VPS.
+- `codeskd` listens only on a loopback TCP port on the VPS.
 - The client uses the user's OpenSSH alias and host-key policy.
 - The client creates a local forward to the daemon endpoint.
 - SSH `ControlMaster`/`ControlPersist`, keepalives, bounded exponential backoff, and jitter reduce reconnect latency.

@@ -1,0 +1,40 @@
+# Codesk energy after overhaul — Fri Aug 21 20:50:50 CEST 2026
+
+Processes:
+  PID      TIME  %CPU COMM
+36402   0:01.15   0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop
+36452   0:00.55   0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway
+36458   0:00.85   0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd
+
+60s CPU sample (12 x 5s):
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.5 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.4 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.1 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.3 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.6 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.6 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.6 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.1 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36402 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36452 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36458 0.6 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+
+Cumulative after sample:
+  PID      TIME ELAPSED COMM
+36402   0:01.24   02:52 /Applications/Codesk.app/Contents/MacOS/codesk-desktop
+36452   0:00.72   02:51 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway
+36458   0:01.13   02:51 /Applications/Codesk.app/Contents/Resources/bin/codeskd
+
+## Comparison with energy-baseline-2026-08-21.txt
+- Baseline: codeskd spiked to 78.5% (and 87.8% observed) in periodic bursts
+  from the 60s discovery TTL (full ps/lsof/tmux scans) plus per-event SQLite
+  MAX() transactions, on a DEBUG daemon binary.
+- After: highest sample across all three processes in 60s is 0.6%; no bursts.
+  Cumulative codeskd CPU: 1.13s over 2m51s including app startup, versus a
+  baseline average dominated by multi-second spike windows.
+- Contributing changes: release-profile daemon in the bundle, stale-while-
+  scanning discovery cache, event-append without MAX() scans, cheaper tmux
+  captures with backoff, gateway runs-only refresh + debounced store writes,
+  and the UI skipping renders for unchanged snapshots and pausing pollers
+  while hidden.

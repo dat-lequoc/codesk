@@ -4,7 +4,7 @@ Thanks for helping improve Codesk. Small, focused pull requests are easiest to r
 
 ## Development setup
 
-Install Node.js, a stable Rust toolchain, and the agent CLIs you want to exercise. Then run:
+Install Node.js 22 or newer, a stable Rust toolchain, and the agent CLIs you want to exercise. Then run:
 
 ```bash
 npm install

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "npm run build && npm run build:gateway && cargo build -p codeskd",
+    "beforeBuildCommand": "npm run build && npm run build:gateway && npm run build:daemon",
     "frontendDist": "../dist"
   },
   "app": {
@@ -22,7 +22,9 @@
         "transparent": false
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'"
+    }
   },
   "bundle": {
     "active": true,
@@ -36,7 +38,7 @@
     ],
     "resources": {
       "binaries/codesk-gateway": "bin/codesk-gateway",
-      "../target/debug/codeskd": "bin/codeskd"
+      "binaries/codeskd": "bin/codeskd"
     }
   }
 }

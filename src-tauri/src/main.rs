@@ -31,34 +31,49 @@ fn main() {
                     }
                 }
             }
-            let already_running = std::net::TcpStream::connect("127.0.0.1:4242").is_ok();
-            if already_running {
-                // Another app instance owns this gateway. Register as an
-                // additional owner so it survives until the last window closes,
-                // and so quitting that other instance does not orphan our daemon.
-                post_gateway(
-                    "/api/owners",
-                    &format!("{{\"pid\":{}}}", std::process::id()),
-                );
-            } else if gateway.exists() {
-                let log_dir = app.path().app_log_dir()?;
-                fs::create_dir_all(&log_dir)?;
-                let stdout = fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_dir.join("gateway.log"))?;
-                let stderr = stdout.try_clone()?;
-                Command::new(&gateway)
-                    .env("CODESK_DAEMON_BINARY", &daemon)
-                    .env("CODESK_CLIENT_DATA_DIR", &client_data)
-                    .env("PORT", "4242")
-                    // The gateway and the codeskd it spawns are ours: they must
-                    // exit when this process does. See ARCHITECTURE.md §6.5.
-                    .env("CODESK_OWNER_PID", std::process::id().to_string())
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::from(stdout))
-                    .stderr(Stdio::from(stderr))
-                    .spawn()?;
+            // A bare TCP connect is not enough to adopt the listener: any other
+            // program bound to 4242 would be mistaken for our gateway, the app
+            // would skip spawning its own, and the UI would talk to a stranger.
+            let listener = gateway_health("127.0.0.1:4242");
+            match listener {
+                GatewayProbe::Codesk => {
+                    // Another app instance owns this gateway. Register as an
+                    // additional owner so it survives until the last window
+                    // closes, and so quitting that other instance does not
+                    // orphan our daemon.
+                    post_gateway(
+                        "/api/owners",
+                        &format!("{{\"pid\":{}}}", std::process::id()),
+                    );
+                }
+                GatewayProbe::Foreign => {
+                    eprintln!(
+                        "Port 4242 is in use by something that is not a Codesk gateway; the UI cannot connect until it is freed."
+                    );
+                }
+                GatewayProbe::Vacant => {
+                    if gateway.exists() {
+                        let log_dir = app.path().app_log_dir()?;
+                        fs::create_dir_all(&log_dir)?;
+                        let stdout = fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(log_dir.join("gateway.log"))?;
+                        let stderr = stdout.try_clone()?;
+                        Command::new(&gateway)
+                            .env("CODESK_DAEMON_BINARY", &daemon)
+                            .env("CODESK_CLIENT_DATA_DIR", &client_data)
+                            .env("PORT", "4242")
+                            // The gateway and the codeskd it spawns are ours:
+                            // they must exit when this process does. See
+                            // ARCHITECTURE.md §6.5.
+                            .env("CODESK_OWNER_PID", std::process::id().to_string())
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::from(stdout))
+                            .stderr(Stdio::from(stderr))
+                            .spawn()?;
+                    }
+                }
             }
             Ok(())
         })
@@ -125,6 +140,46 @@ fn set_macos_app_icon() {
 
 #[cfg(not(target_os = "macos"))]
 fn set_macos_app_icon() {}
+
+enum GatewayProbe {
+    /// A Codesk gateway answered /api/health.
+    Codesk,
+    /// Something is listening but it is not our gateway.
+    Foreign,
+    /// Nothing is listening.
+    Vacant,
+}
+
+fn gateway_health(address: &str) -> GatewayProbe {
+    use std::io::{Read, Write};
+    let Ok(parsed) = address.parse() else {
+        return GatewayProbe::Vacant;
+    };
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&parsed, std::time::Duration::from_millis(400))
+    else {
+        return GatewayProbe::Vacant;
+    };
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(1500)));
+    if stream
+        .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return GatewayProbe::Foreign;
+    }
+    let mut body = String::new();
+    let _ = stream.read_to_string(&mut body);
+    // Accept the explicit service marker plus the pre-marker health shape so a
+    // new shell still recognizes an older running gateway.
+    if body.contains("\"service\":\"codesk-gateway\"")
+        || (body.contains("\"ok\":true") && body.contains("\"version\""))
+    {
+        GatewayProbe::Codesk
+    } else {
+        GatewayProbe::Foreign
+    }
+}
 
 fn reqwest_health_version(address: &str) -> Option<String> {
     use std::io::{Read, Write};

@@ -3,6 +3,7 @@ dist/
 .codesk/
 target/
 src-tauri/binaries/codesk-gateway
+src-tauri/binaries/codeskd
 .DS_Store
 *.log
 

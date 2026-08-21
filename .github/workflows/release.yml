@@ -31,8 +31,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p codeskd --target ${{ matrix.target }}
       - run: cp target/${{ matrix.target }}/release/codeskd ${{ matrix.asset }}
       - uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset }}
+
+  # Unsigned desktop bundle. Signing/notarization needs Apple credentials in
+  # repo secrets; until then the DMG ships as-is and Gatekeeper requires a
+  # right-click open on first launch.
+  desktop:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run desktop:build
+      - run: |
+          dmg=$(ls target/release/bundle/dmg/*.dmg)
+          cp "$dmg" "Codesk-Darwin-${{ matrix.arch }}.dmg"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: Codesk-Darwin-${{ matrix.arch }}.dmg

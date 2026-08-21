@@ -240,11 +240,13 @@ async function launchAndVerify() {
 
 if (process.platform !== 'darwin') throw new Error('desktop:redeploy currently supports macOS only.')
 
+// tauri build produces a release bundle by default and only accepts an
+// explicit `--debug` opt-out; passing `--release` is an error.
 await command('npm', [
   'run',
   'desktop:build',
   '--',
-  ...(release ? ['--release'] : ['--debug']),
+  ...(release ? [] : ['--debug']),
   '--bundles',
   'app',
 ])
