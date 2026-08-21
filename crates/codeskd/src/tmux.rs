@@ -197,9 +197,17 @@ impl TmuxManager {
     }
 
     pub async fn capture_text(&self, pane: &TmuxPane) -> Result<String> {
+        self.capture_text_tail(pane, 100).await
+    }
+
+    /// Capture only the last `lines` of scrollback. Status-line checks need a
+    /// screenful at most, and every extra line is bytes tmux serializes on a
+    /// hot polling path.
+    pub async fn capture_text_tail(&self, pane: &TmuxPane, lines: u32) -> Result<String> {
         let socket = pane.socket_path.as_deref().map(Path::new);
+        let start = format!("-{lines}");
         let output = tmux_command(socket)
-            .args(["capture-pane", "-p", "-S", "-100", "-t", &pane.pane_id])
+            .args(["capture-pane", "-p", "-S", &start, "-t", &pane.pane_id])
             .output()
             .await
             .context("capture tmux pane")?;

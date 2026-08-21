@@ -390,7 +390,9 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
         if let Some(pane) = pane {
             // A terminal-driven harness only reports its live model and effort on
             // its own status line, so read it from the pane we already resolved.
-            if let Ok(screen) = tmux.capture_text(pane).await {
+            // The status line lives on the visible screen; a short tail keeps
+            // this per-pane capture cheap during discovery scans.
+            if let Ok(screen) = tmux.capture_text_tail(pane, 40).await {
                 if let Some(status) = providers::parse_terminal_status(provider, &screen) {
                     model = status.model;
                     effort = status.effort;

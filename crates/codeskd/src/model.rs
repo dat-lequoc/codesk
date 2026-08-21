@@ -195,7 +195,7 @@ pub struct EventsQuery {
     pub after: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AdapterCapability {
     pub id: String,
     pub name: String,

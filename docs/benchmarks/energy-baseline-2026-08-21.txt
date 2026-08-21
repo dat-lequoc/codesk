@@ -1,0 +1,36 @@
+# Codesk energy baseline — Fri Aug 21 19:36:01 CEST 2026
+
+App uptime: 01:13:30
+
+Cumulative CPU time:
+  PID      TIME  %CPU COMM
+36123   0:04.22   0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop
+36158   0:04.88   0.7 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway
+36161   0:37.60   0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd
+
+60s CPU sample (12 x 5s):
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.7 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.7 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.1 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.4 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.1 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.0 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 1.0 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 78.5 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.3 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.3 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+36123 0.2 /Applications/Codesk.app/Contents/MacOS/codesk-desktop; 36158 0.2 /Applications/Codesk.app/Contents/Resources/bin/codesk-gateway; 36161 0.0 /Applications/Codesk.app/Contents/Resources/bin/codeskd; 
+
+tmux/ps/lsof children spotted during sample window:
+children samples (60x1s):
+
+## Analysis
+- Idle CPU is ~0% for all three processes most of the time.
+- codeskd spikes to 78.5% (and 87.8% observed just before sampling) in periodic
+  bursts — consistent with the 60s discovery cache TTL running full
+  ps -axo / lsof / tmux capture-pane scans, plus the tmux worker tick.
+- Cumulative codeskd CPU: 37.6s over 1h13m uptime; the bursts dominate the
+  macOS energy-impact attribution.
+- Child processes are too short-lived for 1s ps sampling; spawn counting
+  needs the in-daemon counter added in Phase 8.
