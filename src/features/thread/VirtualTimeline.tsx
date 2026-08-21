@@ -17,7 +17,10 @@ export function VirtualTimeline<T>({
   renderItem: (item: T) => React.ReactNode
   before?: React.ReactNode
 }) {
-  const enabled = items.length > 40
+  // Virtualize early: below the threshold every streamed token re-renders all
+  // rows, and markdown rows are the most expensive thing in the app. The
+  // threshold only exists so short threads keep native layout for measurement.
+  const enabled = items.length > 12
   // TanStack Virtual hands back fresh closures on every call, so React Compiler
   // declines to memoize this component rather than risk serving stale rows.
   // That is the right trade here and there is nothing to fix at this site.

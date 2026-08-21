@@ -22,6 +22,9 @@ export const gatewayOrigin =
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${gatewayOrigin}${path}`, {
+    // A hung gateway must not leave the UI waiting forever; callers with
+    // longer operations pass their own signal.
+    signal: AbortSignal.timeout(30_000),
     ...options,
     headers: { 'content-type': 'application/json', ...options?.headers },
   })

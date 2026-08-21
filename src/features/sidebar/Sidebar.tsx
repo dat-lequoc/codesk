@@ -2,13 +2,8 @@ import {
   Archive,
   Bell,
   ChevronDown,
-  ChevronRight,
-  Circle,
   Clock3,
-  FolderGit2,
   GitBranch,
-  MoreHorizontal,
-  Pencil,
   Pin,
   PinOff,
   Plug,
@@ -29,77 +24,34 @@ import {
   DropdownMenuTrigger,
 } from '../../components/ui/dropdown-menu'
 import { Spinner } from '../../components/ui/spinner'
-import { StatusDot, type StatusTone } from '../../components/ui/status-dot'
 import { useLatest } from '../../hooks/useLatest'
 import { cn } from '../../lib/cn'
 import { DETACHED_FOLDER_PREVIEW, logoUrl, observedAgents } from '../../lib/app-state'
-import { active } from '../../lib/events'
-import { draftTitle, relative } from '../../lib/format'
-import {
-  normalizedFolder,
-  projectKey,
-  recentFirst,
-  runNotificationKeys,
-  runRowKey,
-  sessionKey,
-  sessionNotificationKey,
-} from '../../lib/keys'
+import { normalizedFolder, projectKey, sessionKey } from '../../lib/keys'
 import { loadExpandedProjects, saveStringSet } from '../../lib/storage'
 import { providerName } from '../../lib/providers'
-import { ProviderIcon } from '../../components/ProviderIcon'
-import {
-  budgetAfterArchive,
-  budgetAfterShowMore,
-  hasHiddenItems,
-  itemBudget,
-} from '../../sessionBudget'
+import { budgetAfterArchive, budgetAfterShowMore, itemBudget } from '../../sessionBudget'
 import type {
   AppState,
   DiscoveredAgent,
   DraftSession,
   Project,
-  Provider,
   ProviderSession,
   Run,
 } from '../../types'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-/* Shared row styles. Values mirror the computed styles of the stylesheet this
-   replaced, so density is unchanged; the names now say what each row is. */
+import { ProjectRow } from './ProjectRow'
+import { recentStatus, rowAffordance, rowTitle, unreadDot } from './row-styles'
+import { SidebarHarness } from './SidebarHarness'
+import { useProjectRows } from './useProjectRows'
+
+export { SidebarHarness } from './SidebarHarness'
+
 const sideAction =
   'flex h-[34px] w-full items-center gap-[9px] rounded-[7px] px-[7px] text-[13px] text-fg-soft hover:bg-ink-650'
 const sideHeading = 'flex h-8 items-end gap-1 px-[7px] pb-1.5 text-[11.5px] text-dim'
 const iconButton = 'grid place-items-center text-muted hover:text-fg'
-const rowTitle = 'flex min-w-0 flex-1 items-center gap-1 overflow-hidden whitespace-nowrap'
-const rowMeta = 'max-w-[44px] shrink-0 truncate text-[9px] text-muted'
-const recentStatus = 'grid w-[11px] shrink-0 place-items-center [&>svg]:max-w-[10px]'
-const unreadDot =
-  'block size-2 shrink-0 rounded-full bg-scarlet-500 shadow-[0_0_0_2px_#ff3b3033,0_0_7px_#ff3b30aa]'
-/* Hover/focus reveals the trailing controls, so the row pads out to make room. */
-const rowAffordance =
-  'absolute top-[3px] grid size-[21px] place-items-center rounded-sm bg-ink-600 text-muted opacity-0 transition-opacity hover:bg-ink-500 hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100'
-const sessionRow =
-  'flex h-7 min-w-0 flex-1 items-center gap-1 rounded-md py-0 pl-0.5 text-left text-[12.5px] text-fg-soft transition-[padding] pr-1.5 group-hover:pr-[47px] group-focus-within:pr-[47px] hover:bg-ink-700'
-
-const hostTone = (status?: string): StatusTone =>
-  status === 'online'
-    ? 'online'
-    : status === 'connecting' || status === 'checking'
-      ? 'connecting'
-      : 'offline'
-
-export function SidebarHarness({ provider }: { provider: Provider['id'] }) {
-  const label = providerName(provider)
-  return (
-    <span
-      className="grid size-3.5 shrink-0 place-items-center text-muted [&>svg]:size-3"
-      title={label}
-      aria-label={label}
-    >
-      <ProviderIcon provider={provider} />
-    </span>
-  )
-}
 
 export function Sidebar({
   state,
@@ -182,20 +134,24 @@ export function Sidebar({
   const queryRef = useLatest(query)
   const onNewRunRef = useLatest(onNewRun)
   const needle = query.trim().toLowerCase()
-  const hasUnreadSession = (session: ProviderSession) =>
-    unreadKeys.has(sessionNotificationKey(session)) ||
-    runs.some(
-      (run) =>
-        run.hostId === session.hostId &&
-        run.provider === session.provider &&
-        run.sessionId === session.nativeSessionId &&
-        runNotificationKeys(run).some((key) => unreadKeys.has(key)),
-    )
-  const hasUnreadRun = (run: Run) => runNotificationKeys(run).some((key) => unreadKeys.has(key))
+  const { rows, hasUnreadSession, hasUnreadRun } = useProjectRows({
+    projects: state.projects,
+    hosts: state.hosts,
+    drafts: state.drafts,
+    sessions,
+    runs,
+    agents,
+    unreadKeys,
+    archivedSessionKeys: state.settings.archivedSessionKeys,
+    archivedRunKeys: state.settings.archivedRunKeys,
+    needle,
+    expanded,
+    projectItemLimits,
+    selectedId,
+  })
   const unreadCount = unreadKeys.size
   const pinnedKeys = state.settings.pinnedSessionKeys
   const archivedKeys = new Set(state.settings.archivedSessionKeys)
-  const archivedRunKeys = new Set(state.settings.archivedRunKeys)
   const pinnedSessions = pinnedKeys
     .map((key) => sessions.find((session) => sessionKey(session) === key))
     .filter((session): session is ProviderSession => Boolean(session))
@@ -280,14 +236,17 @@ export function Sidebar({
     window.addEventListener('resize', resize)
     return () => window.removeEventListener('resize', resize)
   }, [projectMenu])
-  const toggle = (key: string) =>
-    setExpanded((current) => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      saveStringSet('codesk.expanded-projects:v1', next)
-      return next
-    })
+  const toggle = useCallback(
+    (key: string) =>
+      setExpanded((current) => {
+        const next = new Set(current)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        saveStringSet('codesk.expanded-projects:v1', next)
+        return next
+      }),
+    [],
+  )
   /// A harness only becomes a conversation once its working directory is a
   /// registered project, so agents found anywhere else would otherwise be
   /// discovered and then silently dropped from navigation.
@@ -298,63 +257,71 @@ export function Sidebar({
     if (!expanded.has(key)) toggle(key)
     onSelectDraft(await api.createDraft({ hostId: project.hostId, projectId: project.id }))
   }
-  const openProjectMenu = (
-    event: ReactMouseEvent<HTMLElement>,
-    project: Project,
-    canArchive: boolean,
-  ) => {
-    event.preventDefault()
-    event.stopPropagation()
-    const rect = event.currentTarget.getBoundingClientRect()
-    const width = 226
-    const height = 126
-    setProjectMenu({
-      project,
-      canArchive,
-      left: Math.max(10, Math.min(window.innerWidth - width - 10, rect.right - width)),
-      top: Math.max(10, Math.min(window.innerHeight - height - 10, rect.bottom + 5)),
-    })
-  }
-  // How many items a project may list. Zero is a real budget the user can reach
-  // by archiving, so a stored zero must not be mistaken for a missing entry.
-  const projectItemLimit = (key: string) => itemBudget(projectItemLimits, key)
-  const expandSessions = async (project: Project) => {
-    const key = projectKey(project)
-    const grown = budgetAfterShowMore(projectItemLimits, key)
-    if (await onShowMore(project, itemBudget(grown, key))) setProjectItemLimits(grown)
-  }
+  const openProjectMenu = useCallback(
+    (event: ReactMouseEvent<HTMLElement>, project: Project, canArchive: boolean) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const rect = event.currentTarget.getBoundingClientRect()
+      const width = 226
+      const height = 126
+      setProjectMenu({
+        project,
+        canArchive,
+        left: Math.max(10, Math.min(window.innerWidth - width - 10, rect.right - width)),
+        top: Math.max(10, Math.min(window.innerHeight - height - 10, rect.bottom + 5)),
+      })
+    },
+    [],
+  )
+  const expandSessions = useCallback(
+    async (project: Project) => {
+      const key = projectKey(project)
+      const grown = budgetAfterShowMore(projectItemLimits, key)
+      if (await onShowMore(project, itemBudget(grown, key))) setProjectItemLimits(grown)
+    },
+    [onShowMore, projectItemLimits],
+  )
   // Archiving a listed conversation should shrink the list. Holding the budget
   // fixed would promote the next hidden conversation into the freed slot, so the
   // count never drops and archiving feels like it did nothing. Shrink the budget
   // with it and let Show more be the only thing that grows it again.
-  const archiveSession = async (project: Project, session: ProviderSession) => {
-    setProjectItemLimits((current) => budgetAfterArchive(current, projectKey(project)))
-    await onToggleArchive(session)
-  }
-  const archiveRun = async (project: Project, run: Run) => {
-    setProjectItemLimits((current) => budgetAfterArchive(current, projectKey(project)))
-    await onToggleArchiveRun(run)
-  }
-  const refreshProject = async (project: Project) => {
-    const key = projectKey(project)
-    if (refreshingProjects.has(key)) return
-    setRefreshingProjects((current) => new Set(current).add(key))
-    setExpanded((current) => {
-      if (current.has(key)) return current
-      const next = new Set(current).add(key)
-      saveStringSet('codesk.expanded-projects:v1', next)
-      return next
-    })
-    try {
-      await onRefreshProject(project)
-    } finally {
-      setRefreshingProjects((current) => {
-        const next = new Set(current)
-        next.delete(key)
+  const archiveSession = useCallback(
+    async (project: Project, session: ProviderSession) => {
+      setProjectItemLimits((current) => budgetAfterArchive(current, projectKey(project)))
+      await onToggleArchive(session)
+    },
+    [onToggleArchive],
+  )
+  const archiveRun = useCallback(
+    async (project: Project, run: Run) => {
+      setProjectItemLimits((current) => budgetAfterArchive(current, projectKey(project)))
+      await onToggleArchiveRun(run)
+    },
+    [onToggleArchiveRun],
+  )
+  const refreshProject = useCallback(
+    async (project: Project) => {
+      const key = projectKey(project)
+      if (refreshingProjects.has(key)) return
+      setRefreshingProjects((current) => new Set(current).add(key))
+      setExpanded((current) => {
+        if (current.has(key)) return current
+        const next = new Set(current).add(key)
+        saveStringSet('codesk.expanded-projects:v1', next)
         return next
       })
-    }
-  }
+      try {
+        await onRefreshProject(project)
+      } finally {
+        setRefreshingProjects((current) => {
+          const next = new Set(current)
+          next.delete(key)
+          return next
+        })
+      }
+    },
+    [onRefreshProject, refreshingProjects],
+  )
   const updateQuery = (value: string) => {
     if (!query && value && !searchScrollCaptured.current) {
       preSearchScroll.current = scroller.current?.scrollTop || 0
@@ -398,397 +365,6 @@ export function Sidebar({
           .includes(needle),
     )
     .sort((left, right) => left.folder.localeCompare(right.folder))
-  const projectRows = state.projects.map((project) => {
-    const key = projectKey(project)
-    const host = state.hosts.find((item) => item.id === project.hostId)
-    const refreshing = refreshingProjects.has(key)
-    const allProjectDrafts = state.drafts.filter(
-      (draft) =>
-        draft.projectId === project.id && draft.hostId === project.hostId && draft.prompt?.trim(),
-    )
-    const providerProjectSessions = sessions.filter(
-      (session) => session.projectId === project.id && session.hostId === project.hostId,
-    )
-    const allProjectSessions = providerProjectSessions
-      .filter((session) => !archivedKeys.has(sessionKey(session)))
-      .sort(recentFirst)
-    const allProjectRuns = runs.filter(
-      (run) =>
-        run.projectId === project.id &&
-        run.hostId === project.hostId &&
-        !archivedRunKeys.has(runRowKey(run)) &&
-        (run.id === selectedId ||
-          !providerProjectSessions.some((session) => session.nativeSessionId === run.sessionId)),
-    )
-    const projectUnread =
-      allProjectSessions.some(hasUnreadSession) || allProjectRuns.some(hasUnreadRun)
-    const allProjectAgents = agents.filter(
-      (item) =>
-        item.project &&
-        projectKey(item.project) === key &&
-        !providerProjectSessions.some(
-          (session) => session.provider === item.agent.provider && session.status === 'running',
-        ),
-    )
-    const projectMatches = `${project.name} ${project.path} ${host?.name || ''}`
-      .toLowerCase()
-      .includes(needle)
-    const projectDrafts =
-      !needle || projectMatches
-        ? allProjectDrafts
-        : allProjectDrafts.filter((draft) =>
-            `${draftTitle(draft)} draft`.toLowerCase().includes(needle),
-          )
-    const matchingSessions =
-      !needle || projectMatches
-        ? allProjectSessions
-        : allProjectSessions.filter((session) =>
-            `${session.title} ${session.provider}`.toLowerCase().includes(needle),
-          )
-    const projectRuns =
-      !needle || projectMatches
-        ? allProjectRuns
-        : allProjectRuns.filter((run) =>
-            `${run.title} ${run.prompt} ${run.provider}`.toLowerCase().includes(needle),
-          )
-    const projectAgents =
-      !needle || projectMatches
-        ? allProjectAgents
-        : allProjectAgents.filter(({ agent }) =>
-            `${providerName(agent.provider)} ${agent.cwd || ''}`.toLowerCase().includes(needle),
-          )
-    if (
-      needle &&
-      !projectMatches &&
-      !projectDrafts.length &&
-      !matchingSessions.length &&
-      !projectRuns.length &&
-      !projectAgents.length
-    )
-      return null
-    const open = needle ? true : expanded.has(key)
-    const totalProjectItems =
-      projectDrafts.length + matchingSessions.length + projectRuns.length + projectAgents.length
-    const itemLimit = needle ? totalProjectItems : projectItemLimit(key)
-    const unreadProjectSessions = matchingSessions.filter(hasUnreadSession)
-    const unreadProjectRuns = projectRuns.filter(hasUnreadRun)
-    // A running conversation keeps a slot ahead of quiet history, so the count
-    // in the project header always has a row to point at.
-    const runningProjectSessions = matchingSessions.filter(
-      (session) => session.status === 'running' && !hasUnreadSession(session),
-    )
-    const activeProjectRuns = projectRuns.filter(
-      (run) => active.has(run.status) && !hasUnreadRun(run),
-    )
-    const readProjectSessions = matchingSessions.filter(
-      (session) => !hasUnreadSession(session) && session.status !== 'running',
-    )
-    const readProjectRuns = projectRuns.filter(
-      (run) => !hasUnreadRun(run) && !active.has(run.status),
-    )
-    let slotsRemaining = itemLimit
-    const visibleUnreadSessions = unreadProjectSessions.slice(0, slotsRemaining)
-    slotsRemaining -= visibleUnreadSessions.length
-    const visibleUnreadRuns = unreadProjectRuns.slice(0, slotsRemaining)
-    slotsRemaining -= visibleUnreadRuns.length
-    const visibleRunningSessions = runningProjectSessions.slice(0, slotsRemaining)
-    slotsRemaining -= visibleRunningSessions.length
-    const visibleActiveRuns = activeProjectRuns.slice(0, slotsRemaining)
-    slotsRemaining -= visibleActiveRuns.length
-    const visibleProjectDrafts = projectDrafts.slice(0, slotsRemaining)
-    slotsRemaining -= visibleProjectDrafts.length
-    const visibleReadSessions = readProjectSessions.slice(0, slotsRemaining)
-    slotsRemaining -= visibleReadSessions.length
-    const visibleReadRuns = readProjectRuns.slice(0, slotsRemaining)
-    slotsRemaining -= visibleReadRuns.length
-    const visibleProjectAgents = projectAgents.slice(0, slotsRemaining)
-    const visibleProjectSessions = [
-      ...visibleUnreadSessions,
-      ...visibleRunningSessions,
-      ...visibleReadSessions,
-    ]
-    const visibleProjectRuns = [...visibleUnreadRuns, ...visibleActiveRuns, ...visibleReadRuns]
-    const runningSessions = matchingSessions.filter((session) => session.status === 'running')
-    const runningCount = runningSessions.length
-    const projectOnlySelected =
-      selectedProjectKey === key &&
-      !selectedId &&
-      !selectedSessionKey &&
-      !selectedAgentKey &&
-      !selectedDraftId
-    return (
-      <div
-        className={cn(
-          'group/project [contain-intrinsic-size:auto_31px] [content-visibility:auto]',
-          host?.status !== 'online' && 'opacity-[0.72]',
-        )}
-        key={key}
-        role="treeitem"
-        aria-expanded={open}
-        aria-selected={projectOnlySelected}
-      >
-        <div
-          className={cn(
-            'flex h-[31px] items-center gap-1 rounded-[7px] pr-[5px] pl-px text-fg-soft hover:bg-ink-700',
-            projectOnlySelected && 'bg-ink-600',
-            projectMenu?.project.id === project.id &&
-              projectMenu.project.hostId === project.hostId &&
-              'bg-ink-600',
-          )}
-          onContextMenu={(event) => openProjectMenu(event, project, allProjectSessions.length > 0)}
-        >
-          <button
-            className="grid h-[27px] w-4 shrink-0 place-items-center text-dim hover:text-fg-soft"
-            aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`}
-            onClick={() => toggle(key)}
-          >
-            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          </button>
-          <button
-            className="flex h-full min-w-0 flex-1 items-center gap-[5px] text-left"
-            onClick={() => onSelectProject(project)}
-          >
-            <FolderGit2 size={14} className="shrink-0 text-fg-soft" />
-            <strong className="min-w-0 flex-1 truncate text-[13.5px] leading-none font-medium tracking-[-0.08px]">
-              {project.name}
-            </strong>
-          </button>
-          {projectUnread && (
-            <i
-              className={cn(unreadDot, 'mx-px')}
-              title="Unread agent update"
-              aria-label="Unread agent update"
-            />
-          )}
-          {runningCount > 0 && (
-            <button
-              type="button"
-              className="flex h-4 min-w-[22px] shrink-0 items-center justify-center gap-[3px] rounded-full bg-grass-950 px-[5px] text-[8.5px] font-semibold text-grass-400 hover:bg-grass-600/35"
-              title={
-                runningCount === 1
-                  ? `Running: ${runningSessions[0].title}`
-                  : `${runningCount} running conversations`
-              }
-              aria-label={
-                runningCount === 1
-                  ? `Open running conversation ${runningSessions[0].title}`
-                  : `Show ${runningCount} running conversations in ${project.name}`
-              }
-              onClick={(event) => {
-                event.stopPropagation()
-                if (!open) toggle(key)
-                if (runningCount === 1) onSelectSession(runningSessions[0])
-              }}
-            >
-              <Spinner size={9} />
-              {runningCount}
-            </button>
-          )}
-          <button
-            className={cn(
-              'grid size-[21px] shrink-0 place-items-center rounded-sm text-muted opacity-0 hover:bg-ink-500 hover:text-fg focus-visible:opacity-100 group-hover/project:opacity-100',
-              'disabled:cursor-default disabled:text-ink-400',
-              refreshing && 'text-grass-400 opacity-100',
-            )}
-            aria-label={`Refresh sessions for ${project.name}`}
-            title={`Refresh sessions for ${project.name}`}
-            disabled={refreshing || host?.status !== 'online'}
-            onClick={(event) => {
-              event.stopPropagation()
-              void refreshProject(project)
-            }}
-          >
-            <RefreshCw className={cn(refreshing && 'animate-spin')} size={13} />
-          </button>
-          <button
-            className="grid size-[21px] shrink-0 place-items-center rounded-sm text-muted opacity-0 hover:bg-ink-500 hover:text-fg focus-visible:opacity-100 group-hover/project:opacity-100 aria-expanded:opacity-100"
-            aria-label={`Project actions for ${project.name}`}
-            aria-controls="project-actions-menu"
-            aria-expanded={
-              projectMenu?.project.id === project.id &&
-              projectMenu.project.hostId === project.hostId
-            }
-            title={`Project actions for ${project.name}`}
-            onClick={(event) => openProjectMenu(event, project, allProjectSessions.length > 0)}
-          >
-            <MoreHorizontal size={14} />
-          </button>
-          <span className="max-w-[66px] shrink-0 truncate text-[9.5px] leading-none text-muted">
-            {host?.name || project.hostId}
-          </span>
-          <StatusDot tone={hostTone(host?.status)} title={host?.status || 'offline'} />
-        </div>
-        {open && (
-          <div className="pt-px pb-[3px] pl-[15px]" role="group">
-            {visibleProjectDrafts.map((draft) => (
-              <button
-                key={draft.id}
-                className={cn(sessionRow, 'pr-1.5', draft.id === selectedDraftId && 'bg-ink-600')}
-                onClick={() => onSelectDraft(draft)}
-              >
-                <span className={cn(recentStatus, 'text-dim')}>
-                  <Pencil size={10} />
-                </span>
-                <span className={rowTitle}>
-                  <SidebarHarness provider={draft.provider} />
-                  <span className="min-w-0 truncate">{draftTitle(draft)}</span>
-                </span>
-                <small className={rowMeta}>{relative(draft.updatedAt)}</small>
-              </button>
-            ))}
-            {visibleProjectSessions.map((session) => {
-              const sessionId = sessionKey(session)
-              const pinned = pinnedKeys.includes(sessionId)
-              const unread = hasUnreadSession(session)
-              return (
-                <div className="group relative flex min-h-7 min-w-0" key={sessionId}>
-                  <button
-                    data-session-key={sessionId}
-                    className={cn(
-                      sessionRow,
-                      session.status === 'running' && 'bg-grass-950/70 hover:bg-grass-950',
-                      sessionId === selectedSessionKey && 'bg-ink-600',
-                    )}
-                    title={`${providerName(session.provider)} · ${session.title}`}
-                    onClick={() => onSelectSession(session)}
-                    onContextMenu={(event) => {
-                      event.preventDefault()
-                      void onTogglePin(session)
-                    }}
-                  >
-                    <span
-                      className={cn(
-                        recentStatus,
-                        session.status === 'running' ? 'text-grass-400' : 'text-scarlet-500',
-                      )}
-                    >
-                      {session.status === 'running' ? (
-                        <Spinner />
-                      ) : session.status === 'stopped' ? (
-                        <Circle
-                          className="drop-shadow-[0_0_3px_#e54848]"
-                          size={7}
-                          fill="currentColor"
-                        />
-                      ) : null}
-                    </span>
-                    <span className={rowTitle}>
-                      <SidebarHarness provider={session.provider} />
-                      <span className="min-w-0 truncate">{session.title}</span>
-                    </span>
-                    {unread ? (
-                      <i
-                        className={cn(unreadDot, 'ml-0.5')}
-                        title="Finished — unread agent update"
-                        aria-label="Finished, unread agent update"
-                      />
-                    ) : (
-                      <small className={rowMeta}>{relative(session.updatedAt)}</small>
-                    )}
-                  </button>
-                  <button
-                    className={cn(rowAffordance, 'right-[25px] hover:text-amber-signal-400')}
-                    title="Archive conversation"
-                    onClick={() => void archiveSession(project, session)}
-                  >
-                    <Archive size={12} />
-                  </button>
-                  <button
-                    className={cn(rowAffordance, 'right-[3px]', pinned && 'opacity-100')}
-                    title={pinned ? 'Unpin conversation' : 'Pin conversation'}
-                    onClick={() => void onTogglePin(session)}
-                  >
-                    {pinned ? <PinOff size={12} /> : <Pin size={12} />}
-                  </button>
-                </div>
-              )
-            })}
-            {visibleProjectRuns.map((run) => {
-              const unread = hasUnreadRun(run)
-              return (
-                <div
-                  className="group relative flex min-h-7 min-w-0"
-                  key={`${run.hostId}:${run.id}`}
-                >
-                  <button
-                    className={cn(sessionRow, run.id === selectedId && 'bg-ink-600')}
-                    title={`${providerName(run.provider)} · ${run.title}`}
-                    onClick={() => onSelectRun(run)}
-                  >
-                    <span
-                      className={cn(
-                        recentStatus,
-                        active.has(run.status) ? 'text-grass-400' : 'text-muted',
-                      )}
-                    >
-                      {active.has(run.status) ? (
-                        <Spinner />
-                      ) : (
-                        <Circle size={7} fill="currentColor" />
-                      )}
-                    </span>
-                    <span className={rowTitle}>
-                      <SidebarHarness provider={run.provider} />
-                      <span className="min-w-0 truncate">{run.title}</span>
-                    </span>
-                    {unread ? (
-                      <i
-                        className={cn(unreadDot, 'ml-0.5')}
-                        title="Finished — unread agent update"
-                        aria-label="Finished, unread agent update"
-                      />
-                    ) : (
-                      <small className={rowMeta}>{relative(run.createdAt)}</small>
-                    )}
-                  </button>
-                  <button
-                    className={cn(rowAffordance, 'right-[3px] hover:text-amber-signal-400')}
-                    title="Archive run"
-                    onClick={() => void archiveRun(project, run)}
-                  >
-                    <Archive size={12} />
-                  </button>
-                </div>
-              )
-            })}
-            {visibleProjectAgents.map(({ hostId, agent }) => (
-              <button
-                key={`${hostId}:${agent.id}`}
-                className={cn(
-                  sessionRow,
-                  'pr-1.5',
-                  `${hostId}:${agent.id}` === selectedAgentKey && 'bg-ink-600',
-                )}
-                onClick={() => onSelectAgent(hostId, agent, project)}
-              >
-                <span className={cn(recentStatus, 'text-amber-signal-500')}>
-                  <Spinner />
-                </span>
-                <span className={rowTitle}>
-                  <SidebarHarness provider={agent.provider} />
-                  <span className="min-w-0 truncate">Observed session</span>
-                </span>
-                <small className={rowMeta}>observed</small>
-              </button>
-            ))}
-            {!needle && hasHiddenItems(totalProjectItems, itemLimit) && (
-              <button
-                className="h-[25px] w-full pr-1.5 pl-[29px] text-left text-[10.5px] text-muted hover:text-fg-soft"
-                onClick={() => void expandSessions(project)}
-              >
-                Show more
-              </button>
-            )}
-            {totalProjectItems === 0 && (
-              <div className="flex h-[25px] items-center pl-[29px] text-[9.5px] text-dim">
-                No chats
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    )
-  })
   return (
     <aside className="flex min-h-0 flex-col border-r border-ink-650 bg-sidebar pt-[13px] pr-0 pb-[9px] pl-2">
       <div className="flex h-[38px] items-center gap-[7px] pr-2 pl-1.5">
@@ -803,10 +379,13 @@ export function Sidebar({
         <button className={iconButton} title="Search conversations" onClick={openSearch}>
           <Search size={17} />
         </button>
+        {/* The badge is live status; opening archives is the closest thing to
+            a notification list until a dedicated center exists. */}
         <button
           className={cn(iconButton, 'relative')}
           title={unreadCount ? `${unreadCount} unread agent updates` : 'Notifications'}
           aria-label={unreadCount ? `${unreadCount} unread agent updates` : 'Notifications'}
+          onClick={onArchives}
         >
           <Bell size={17} />
           {unreadCount > 0 && (
@@ -820,15 +399,17 @@ export function Sidebar({
         <Plus size={17} />
         New chat
       </button>
-      <button className={sideAction}>
+      {/* Disabled until implemented: a clickable control that does nothing
+          reads as broken rather than upcoming. */}
+      <button className={sideAction} title="Coming soon" disabled>
         <GitBranch size={17} />
         Pull requests
       </button>
-      <button className={sideAction}>
+      <button className={sideAction} title="Coming soon" disabled>
         <Clock3 size={17} />
         Scheduled
       </button>
-      <button className={sideAction}>
+      <button className={sideAction} title="Coming soon" disabled>
         <Plug size={17} />
         Plugins
       </button>
@@ -1046,8 +627,45 @@ export function Sidebar({
             </button>
           </div>
           <div className="min-w-0 pr-0.5" role="tree">
-            {projectRows}
-            {needle && projectRows.every((row) => row === null) && (
+            {rows.map((row) => (
+              <ProjectRow
+                key={row.key}
+                row={row}
+                needle={needle}
+                selectedId={selectedId}
+                selectedSessionKey={selectedSessionKey}
+                selectedAgentKey={selectedAgentKey}
+                selectedDraftId={selectedDraftId}
+                projectOnlySelected={
+                  selectedProjectKey === row.key &&
+                  !selectedId &&
+                  !selectedSessionKey &&
+                  !selectedAgentKey &&
+                  !selectedDraftId
+                }
+                menuOpen={
+                  projectMenu?.project.id === row.project.id &&
+                  projectMenu.project.hostId === row.project.hostId
+                }
+                refreshing={refreshingProjects.has(row.key)}
+                pinnedKeys={pinnedKeys}
+                hasUnreadSession={hasUnreadSession}
+                hasUnreadRun={hasUnreadRun}
+                onToggle={toggle}
+                onSelectProject={onSelectProject}
+                onSelectDraft={onSelectDraft}
+                onSelectSession={onSelectSession}
+                onSelectRun={onSelectRun}
+                onSelectAgent={onSelectAgent}
+                onTogglePin={onTogglePin}
+                onArchiveSession={archiveSession}
+                onArchiveRun={archiveRun}
+                onOpenMenu={openProjectMenu}
+                onRefresh={refreshProject}
+                onShowMore={expandSessions}
+              />
+            ))}
+            {needle && rows.length === 0 && (
               <div className="px-4 py-6 text-center text-[11px] leading-relaxed text-dim">
                 No matching projects or conversations
               </div>

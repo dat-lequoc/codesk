@@ -1,4 +1,5 @@
 import { useLatest } from '../../hooks/useLatest'
+import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
 import { cn } from '../../lib/cn'
 import { threadColumn } from '../thread/thread-column'
 import { threadStatus, turnBoundary, turnRule } from '../thread/thread-styles'
@@ -94,6 +95,7 @@ import type { FormEvent } from 'react'
 export function SessionScreen({
   session,
   messages,
+  messagesLoaded = false,
   runEvents,
   project,
   host,
@@ -103,6 +105,9 @@ export function SessionScreen({
 }: {
   session: ProviderSession
   messages: SessionMessage[]
+  /// Whether the first fetch for this conversation has completed; separates
+  /// "still loading" from "loaded and genuinely empty".
+  messagesLoaded?: boolean
   runEvents: RunEvent[]
   project?: Project
   host?: Host
@@ -321,42 +326,29 @@ export function SessionScreen({
       cancelled = true
     }
   }, [session.hostId, session.pid, host?.status, canUseAttachedSession, onStartedRef])
-  useEffect(() => {
-    if (!queuePid || !hasQueued || host?.status !== 'online') return
-    let stopped = false
-    let timer = 0
-    const poll = async () => {
-      if (stopped || document.hidden) return
-      try {
-        const items = await api.externalSessionQueue(session.hostId, queuePid)
-        if (stopped) return
-        const started = items.find((item) => item.status === 'started' && item.run)
-        if (started?.run && adoptedRun.current !== started.run.id) {
-          adoptedRun.current = started.run.id
-          void api.removeExternalQueued(session.hostId, queuePid, started.id).catch(() => {})
-          onStartedRef.current(started.run)
-          return
-        }
-        setQueued(items)
-      } catch {}
-      if (!stopped && !document.hidden) timer = window.setTimeout(poll, 1000)
-    }
-    const visibility = () => {
-      clearTimeout(timer)
-      if (!document.hidden) void poll()
-    }
-    document.addEventListener('visibilitychange', visibility)
-    timer = window.setTimeout(poll, 1000)
-    return () => {
-      stopped = true
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', visibility)
-    }
-  }, [session.hostId, queuePid, host?.status, hasQueued, onStartedRef])
+  // Adopting the same started run twice would fork the selection; the ref
+  // remembers what was already handed to onStarted across poll cycles.
+  const handleQueueStarted = useLatest((run: Run) => {
+    if (adoptedRun.current === run.id) return false
+    adoptedRun.current = run.id
+    onStartedRef.current(run)
+    return true
+  })
+  useExternalQueuePoller({
+    hostId: session.hostId,
+    pid: queuePid,
+    enabled: hasQueued && host?.status === 'online',
+    handleStarted: handleQueueStarted,
+    setQueued,
+  })
+  // Streaming updates the last message in place without changing the count, so
+  // follow-bottom keys on the tail's identity and content, not just length.
+  const lastMessage = messages.at(-1)
+  const followKey = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.text?.length ?? 0}`
   useEffect(() => {
     if (following.current)
       requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }))
-  }, [messages.length])
+  }, [followKey])
   useEffect(() => {
     const element = scroll.current
     if (!element || typeof ResizeObserver === 'undefined') return
@@ -418,7 +410,7 @@ export function SessionScreen({
             <VirtualTimeline
               items={timeline}
               scrollRef={scroll}
-              itemKey={(item) => (isHistoricalActivity(item) ? item.id : item.id)}
+              itemKey={(item) => item.id}
               renderItem={(item) =>
                 isHistoricalActivity(item) ? (
                   <HistoricalActivityGroup
@@ -450,6 +442,15 @@ export function SessionScreen({
                   <p className="m-0 text-[11px] leading-relaxed">
                     The project and conversation remain in navigation. Messages will load when the
                     host reconnects.
+                  </p>
+                </div>
+              ) : messagesLoaded ? (
+                <div className={emptyState}>
+                  <strong className="mt-3 mb-1.5 block text-sm text-fg-soft">
+                    No messages yet
+                  </strong>
+                  <p className="m-0 text-[11px] leading-relaxed">
+                    This conversation has no transcript entries. Send a prompt below to start one.
                   </p>
                 </div>
               ) : (

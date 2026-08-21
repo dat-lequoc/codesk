@@ -74,12 +74,14 @@ import {
   ComposerInput,
   SlashCommandMenu,
 } from '../composer/Composer'
+import { ConfirmDialog } from '../dialogs/ConfirmDialog'
+import type { AppDialogRequest } from '../dialogs/ConfirmDialog'
 import { FilePreviewPanel } from '../dialogs/FilePreviewPanel'
 import { EnvironmentPopover, EnvironmentRow, TmuxDetails } from '../environment/Environment'
 import { ConversationMessage } from '../thread/Markdown'
 import { ThreadEvent } from '../thread/ThreadEvent'
 import { VirtualTimeline } from '../thread/VirtualTimeline'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 export function RunScreen({
   run,
@@ -111,6 +113,7 @@ export function RunScreen({
     run.worktreeId ? 'Managed worktree' : 'Current checkout',
   )
   const [worktreeBusy, setWorktreeBusy] = useState(false)
+  const [dialog, setDialog] = useState<AppDialogRequest | null>(null)
   const scroll = useRef<HTMLDivElement>(null)
   const following = useRef(true)
   const lastEscape = useRef(0)
@@ -179,22 +182,67 @@ export function RunScreen({
   const queue = () => {
     void sendPrompt('queue')
   }
-  const branchEvents = currentBranchEvents(events)
-  const hasUserEvents = branchEvents.some((event) => event.kind === 'user.message')
-  const displayEvents = coalesceStreamEvents(branchEvents)
-  const displayItems = timelineItems(displayEvents)
-  const activityEntries = displayItems.flatMap((item) =>
-    isActivityGroup(item)
-      ? liveActivityItems(item.events).flatMap((activity) =>
-          activity.type === 'entry' ? [activity.entry] : [],
-        )
-      : [],
-  )
+  // The whole timeline derivation chain is a function of `events` alone.
+  // Recomputing it on every keystroke or unrelated state change re-coalesced
+  // and re-grouped the full journal, so it only runs when events change.
+  const derived = useMemo(() => {
+    const branchEvents = currentBranchEvents(events)
+    const displayEvents = coalesceStreamEvents(branchEvents)
+    const displayItems = timelineItems(displayEvents)
+    const backtrackable = branchEvents.filter(
+      (event, index, all) =>
+        event.kind === 'user.message' &&
+        typeof event.payload.turn_id === 'string' &&
+        typeof event.payload.text === 'string' &&
+        all.findIndex(
+          (candidate) =>
+            candidate.kind === 'user.message' &&
+            candidate.payload.turn_id === event.payload.turn_id,
+        ) === index,
+    )
+    return {
+      branchEvents,
+      displayEvents,
+      displayItems,
+      hasUserEvents: branchEvents.some((event) => event.kind === 'user.message'),
+      activityEntries: displayItems.flatMap((item) =>
+        isActivityGroup(item)
+          ? liveActivityItems(item.events).flatMap((activity) =>
+              activity.type === 'entry' ? [activity.entry] : [],
+            )
+          : [],
+      ),
+      durations: turnDurations(displayEvents),
+      queued: pendingQueue(branchEvents),
+      backtrackable,
+      backtrackableEventIds: new Set(backtrackable.map((event) => event.event_id)),
+      resolvedRequests: new Set(
+        branchEvents
+          .filter(
+            (event) =>
+              (event.provider_event_type === 'codex.serverRequest/resolved' ||
+                event.kind === 'provider.response.submitted' ||
+                event.kind === 'provider.response') &&
+              (event.payload.request_id !== undefined || event.payload.rpc_id !== undefined),
+          )
+          .map((event) => String(event.payload.request_id ?? event.payload.rpc_id)),
+      ),
+    }
+  }, [events])
+  const {
+    branchEvents,
+    displayItems,
+    hasUserEvents,
+    activityEntries,
+    durations,
+    queued,
+    backtrackable,
+    backtrackableEventIds,
+    resolvedRequests,
+  } = derived
   const selectedActivity = selectedActivityId
     ? activityEntries.find((entry) => entry.id === selectedActivityId) || null
     : null
-  const durations = turnDurations(displayEvents)
-  const queued = pendingQueue(branchEvents)
   const commandContext = useMemo(() => kiroCommandContext(branchEvents), [branchEvents])
   const commandSuggestions = useMemo(
     () =>
@@ -208,28 +256,6 @@ export function RunScreen({
     setMessage(suggestion.value)
     requestAnimationFrame(() => composerInput.current?.focus())
   }
-  const backtrackable = branchEvents.filter(
-    (event, index, all) =>
-      event.kind === 'user.message' &&
-      typeof event.payload.turn_id === 'string' &&
-      typeof event.payload.text === 'string' &&
-      all.findIndex(
-        (candidate) =>
-          candidate.kind === 'user.message' && candidate.payload.turn_id === event.payload.turn_id,
-      ) === index,
-  )
-  const backtrackableEventIds = new Set(backtrackable.map((event) => event.event_id))
-  const resolvedRequests = new Set(
-    branchEvents
-      .filter(
-        (event) =>
-          (event.provider_event_type === 'codex.serverRequest/resolved' ||
-            event.kind === 'provider.response.submitted' ||
-            event.kind === 'provider.response') &&
-          (event.payload.request_id !== undefined || event.payload.rpc_id !== undefined),
-      )
-      .map((event) => String(event.payload.request_id ?? event.payload.rpc_id)),
-  )
   // Typing past a slash command drops the highlight back to the first match.
   const [commandIndexFor, setCommandIndexFor] = useState(message)
   if (commandIndexFor !== message) {
@@ -245,16 +271,20 @@ export function RunScreen({
     setShowEnvironment(false)
     setSelectedActivityId(entry.id)
   }
-  const selectRewind = (turnId: string, text: string) => {
-    const index = backtrackable.findIndex((event) => event.payload.turn_id === turnId)
-    if (index < 0) return
-    setRewind({
-      turnId,
-      lastTurnId: index > 0 ? String(backtrackable[index - 1].payload.turn_id) : null,
-      text,
-    })
-    setMessage(text)
-  }
+  // Stable so memoized ThreadEvent rows are not invalidated by every render.
+  const selectRewind = useCallback(
+    (turnId: string, text: string) => {
+      const index = backtrackable.findIndex((event) => event.payload.turn_id === turnId)
+      if (index < 0) return
+      setRewind({
+        turnId,
+        lastTurnId: index > 0 ? String(backtrackable[index - 1].payload.turn_id) : null,
+        text,
+      })
+      setMessage(text)
+    },
+    [backtrackable, setMessage],
+  )
   const mergeManagedWorktree = async () => {
     if (!run.worktreeId || worktreeBusy) return
     setWorktreeBusy(true)
@@ -265,24 +295,28 @@ export function RunScreen({
         throw new Error(
           'The worktree has uncommitted changes. Ask the agent to commit them before merging.',
         )
-      if (
-        !confirm(
-          `Merge ${status.worktree.branch || 'this worktree'} into ${target}? Codesk will refuse if the project checkout is dirty and will abort on conflicts.`,
-        )
-      )
-        return
-      const result = await api.mergeWorktree(
-        run.hostId,
-        run.worktreeId,
-        status.worktree.base_ref || undefined,
-      )
-      alert(
-        result.changed
-          ? `Merged ${result.source_branch} into ${result.target_branch} at ${result.commit}.`
-          : `${result.source_branch} is already merged into ${result.target_branch}.`,
-      )
+      setDialog({
+        kind: 'confirm',
+        title: `Merge ${status.worktree.branch || 'this worktree'} into ${target}?`,
+        body: 'Codesk will refuse if the project checkout is dirty and will abort on conflicts.',
+        confirmLabel: 'Merge',
+        action: async () => {
+          const result = await api.mergeWorktree(
+            run.hostId,
+            run.worktreeId!,
+            status.worktree.base_ref || undefined,
+          )
+          setDialog({
+            kind: 'message',
+            title: 'Worktree merge',
+            body: result.changed
+              ? `Merged ${result.source_branch} into ${result.target_branch} at ${result.commit}.`
+              : `${result.source_branch} is already merged into ${result.target_branch}.`,
+          })
+        },
+      })
     } catch (cause) {
-      alert(cause instanceof Error ? cause.message : String(cause))
+      onError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setWorktreeBusy(false)
     }
@@ -440,8 +474,16 @@ export function RunScreen({
                   <button
                     className={environmentActionButton}
                     onClick={async () => {
-                      const status = await api.worktreeStatus(run.hostId, run.worktreeId!)
-                      alert(`${status.summary}\n\n${status.diff_stat}`)
+                      try {
+                        const status = await api.worktreeStatus(run.hostId, run.worktreeId!)
+                        setDialog({
+                          kind: 'message',
+                          title: 'Worktree changes',
+                          body: `${status.summary}\n\n${status.diff_stat}`,
+                        })
+                      } catch (cause) {
+                        onError(cause instanceof Error ? cause.message : String(cause))
+                      }
                     }}
                   >
                     Inspect changes
@@ -457,15 +499,21 @@ export function RunScreen({
                   <button
                     className={cn(environmentActionButton, environmentActionDanger)}
                     onClick={async () => {
-                      const status = await api.worktreeStatus(run.hostId, run.worktreeId!)
-                      if (
-                        confirm(
-                          status.dirty
-                            ? 'This worktree has uncommitted changes. Force remove it?'
-                            : 'Remove this managed worktree?',
-                        )
-                      )
-                        await api.removeWorktree(run.hostId, run.worktreeId!, status.dirty)
+                      try {
+                        const status = await api.worktreeStatus(run.hostId, run.worktreeId!)
+                        setDialog({
+                          kind: 'confirm',
+                          title: status.dirty ? 'Force remove worktree?' : 'Remove worktree?',
+                          body: status.dirty
+                            ? 'This worktree has uncommitted changes that will be lost.'
+                            : undefined,
+                          confirmLabel: 'Remove',
+                          danger: true,
+                          action: () => api.removeWorktree(run.hostId, run.worktreeId!, status.dirty),
+                        })
+                      } catch (cause) {
+                        onError(cause instanceof Error ? cause.message : String(cause))
+                      }
                     }}
                   >
                     Remove worktree
@@ -592,6 +640,8 @@ export function RunScreen({
               type="button"
               className="grid shrink-0 place-items-center text-muted hover:text-fg"
               aria-label="Add attachment"
+              title="Attachments are not supported yet"
+              disabled
             >
               <Plus size={18} />
             </button>
@@ -627,8 +677,13 @@ export function RunScreen({
                 type="button"
                 className={interrupt}
                 onClick={() =>
-                  confirm(`Close this attached ${providerName(run.provider)} session?`) &&
-                  api.controlRun(run.hostId, run.id, 'terminate')
+                  setDialog({
+                    kind: 'confirm',
+                    title: `Close this attached ${providerName(run.provider)} session?`,
+                    confirmLabel: 'Close session',
+                    danger: true,
+                    action: () => api.controlRun(run.hostId, run.id, 'terminate'),
+                  })
                 }
               >
                 <Square size={14} />
@@ -648,8 +703,13 @@ export function RunScreen({
                   type="button"
                   className={interrupt}
                   onClick={() =>
-                    confirm('Force kill the full process group?') &&
-                    api.controlRun(run.hostId, run.id, 'kill')
+                    setDialog({
+                      kind: 'confirm',
+                      title: 'Force kill the full process group?',
+                      confirmLabel: 'Kill',
+                      danger: true,
+                      action: () => api.controlRun(run.hostId, run.id, 'kill'),
+                    })
                   }
                 >
                   Kill
@@ -696,6 +756,13 @@ export function RunScreen({
             </button>
           </ComposerFooter>
         </ComposerFrame>
+        {dialog && (
+          <ConfirmDialog
+            request={dialog}
+            onClose={() => setDialog((current) => (current === dialog ? null : current))}
+            onError={onError}
+          />
+        )}
       </div>
     </FilePreviewContext.Provider>
   )

@@ -9,57 +9,27 @@ import { StartScreen } from './features/screens/StartScreen'
 import { Sidebar } from './features/sidebar/Sidebar'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
-import { api, gatewayOrigin } from './api'
-import type {
-  AppState,
-  DiscoveredAgent,
-  DraftSession,
-  Project,
-  ProviderSession,
-  Run,
-  RunEvent,
-  SessionMessage,
-} from './types'
+import { api } from './api'
+import type { AppState, Project, ProviderSession, Run } from './types'
 import { useLatest } from './hooks/useLatest'
-import { empty, normalizeState, observedAgents } from './lib/app-state'
-import {
-  active,
-  externalCompletionSettleMs,
-  mergeEvents,
-  mergeSessionMessages,
-  notificationEventKinds,
-  terminalRunStatuses,
-  terminalStatusByEventKind,
-  transcriptTurnOpen,
-} from './lib/events'
-import type { ExternalTranscriptWatch } from './lib/events'
+import { empty, observedAgents } from './lib/app-state'
 import {
   projectKey,
   recentFirst,
-  runEventNotificationKey,
-  runNotificationKeys,
   runRowKey,
   sessionKey,
   sessionNotificationKey,
-  terminalNotificationTag,
 } from './lib/keys'
-import {
-  isTauriDesktop,
-  notify,
-  prepareNotifications,
-  reconcileUnreadKeys,
-} from './lib/notifications'
-import { loadStringSet, saveStringSet } from './lib/storage'
+import { prepareNotifications } from './lib/notifications'
+import { useAppStatePolling } from './hooks/useAppStatePolling'
+import { useExternalTranscriptWatcher } from './hooks/useExternalTranscriptWatcher'
+import { useRunEventStream } from './hooks/useRunEventStream'
+import { useSelection } from './hooks/useSelection'
+import { useSessionMessagesPoller } from './hooks/useSessionMessagesPoller'
+import { useUnreadNotifications } from './hooks/useUnreadNotifications'
 
 export function App() {
   const [state, setState] = useState<AppState>(empty)
-  const [events, setEvents] = useState<Record<string, RunEvent[]>>({})
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [selectedSessionKey, setSelectedSessionKey] = useState<string | null>(null)
-  const [sessionMessages, setSessionMessages] = useState<Record<string, SessionMessage[]>>({})
-  const [selectedAgentKey, setSelectedAgentKey] = useState<string | null>(null)
-  const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null)
-  const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [extraSessions, setExtraSessions] = useState<Record<string, ProviderSession[]>>({})
   const [newProject, setNewProject] = useState(false)
@@ -68,266 +38,73 @@ export function App() {
   const [projectToRemove, setProjectToRemove] = useState<Project | null>(null)
   const [removingProject, setRemovingProject] = useState(false)
   const [error, setError] = useState('')
-  const initialized = useRef(false)
-  const selectedRunRef = useRef<Run | null>(null)
-  const sessionMessagesRef = useRef<Record<string, SessionMessage[]>>({})
-  const priorRunStatus = useRef<Map<string, Run['status']>>(new Map())
-  const priorSessionStatus = useRef<Map<string, ProviderSession['status']>>(new Map())
-  const externalTranscriptWatches = useRef<Map<string, ExternalTranscriptWatch>>(new Map())
+  // Shared between the transcript watcher (which records when a turn
+  // completion was announced) and the unread bookkeeping (which suppresses the
+  // later session-stopped announcement for the same turn).
   const sessionCompletionNotifiedAt = useRef<Map<string, number>>(new Map())
-  const notified = useRef<Set<string>>(loadStringSet('codesk.notifications'))
-  const [unreadKeys, setUnreadKeys] = useState<Set<string>>(() =>
-    loadStringSet('codesk.unread-notifications:v1'),
-  )
   // Long-lived pollers and socket handlers are set up once and must not tear
-  // down every time state changes, so they read these instead of closing over
-  // the values directly.
+  // down every time state changes, so they read this instead of closing over
+  // the value directly.
   const stateRef = useLatest(state)
-  const eventsRef = useLatest(events)
-  useEffect(() => {
-    if (!isTauriDesktop()) return
-    void import('@tauri-apps/api/window')
-      .then(({ getCurrentWindow }) =>
-        getCurrentWindow().setBadgeCount(unreadKeys.size || undefined),
-      )
-      .catch(() => {})
-  }, [unreadKeys.size])
-  const updateUnread = useCallback(
-    (added: string[], removed: string[] = []) =>
-      setUnreadKeys((current) => {
-        const next = new Set(current)
-        let changed = false
-        for (const key of removed) changed = next.delete(key) || changed
-        for (const key of added)
-          if (!next.has(key)) {
-            next.add(key)
-            changed = true
-          }
-        if (!changed) return current
-        saveStringSet('codesk.unread-notifications:v1', next)
-        return next
-      }),
-    [],
-  )
-  const reconcileUnread = useCallback(
-    (snapshot: AppState) =>
-      setUnreadKeys((current) => {
-        const next = reconcileUnreadKeys(current, snapshot)
-        if (next.size === current.size && [...next].every((key) => current.has(key))) return current
-        saveStringSet('codesk.unread-notifications:v1', next)
-        return next
-      }),
-    [],
-  )
-  const addUnread = useCallback((keys: string[]) => updateUnread(keys), [updateUnread])
-  const clearUnread = useCallback((keys: string[]) => updateUnread([], keys), [updateUnread])
-  const readRun = useCallback((run: Run) => clearUnread(runNotificationKeys(run)), [clearUnread])
-  const readSession = useCallback(
-    (session: ProviderSession) =>
-      clearUnread([
-        sessionNotificationKey(session),
-        ...stateRef.current.runs
-          .filter(
-            (run) =>
-              run.hostId === session.hostId &&
-              run.provider === session.provider &&
-              run.sessionId === session.nativeSessionId,
-          )
-          .flatMap(runNotificationKeys),
-      ]),
-    [clearUnread, stateRef],
-  )
-  /// Claims a notification tag, returning false if it was already delivered.
-  /// The ledger is capped and persisted so a reload does not re-announce work
-  /// the user has already seen.
-  const rememberNotification = useCallback((tag: string) => {
-    if (notified.current.has(tag)) return false
-    notified.current.add(tag)
-    localStorage.setItem('codesk.notifications', JSON.stringify([...notified.current].slice(-500)))
-    return true
-  }, [])
-  const markRunUnread = useCallback(
-    (runId: string, run: Pick<Run, 'hostId' | 'provider' | 'sessionId'> | undefined) => {
-      const runKey = runEventNotificationKey(run?.hostId || 'unknown', runId)
-      if (run?.sessionId)
-        updateUnread([`session:${run.hostId}:${run.provider}:${run.sessionId}`], [runKey])
-      else addUnread([runKey])
-    },
-    [addUnread, updateUnread],
-  )
-  const notifyRunEvent = useCallback(
-    (event: RunEvent) => {
-      if (!notificationEventKinds.has(event.kind)) return
-      const run = stateRef.current.runs.find((item) => item.id === event.run_id)
-      const terminalStatus = terminalStatusByEventKind.get(event.kind)
-      const tag = terminalStatus
-        ? terminalNotificationTag(event.run_id, terminalStatus)
-        : event.event_id
-      if (!rememberNotification(tag)) return
-      markRunUnread(event.run_id, run)
-      if (!stateRef.current.settings.notifications) return
-      const label =
-        event.kind === 'input.required'
-          ? 'Input required'
-          : event.kind === 'approval.required'
-            ? 'Approval required'
-            : `Run ${terminalStatus || 'updated'}`
-      void notify(
-        `Codesk · ${label}`,
-        String(event.payload.text || run?.title || 'Agent run updated'),
-        tag,
-      )
-    },
-    [markRunUnread, rememberNotification, stateRef],
-  )
-  // Status changes are noticed where a fresh snapshot arrives rather than in an
-  // effect keyed on `state`. The only thing that moves a run or session between
-  // statuses is a fetch, so this is the event handler for that change — and
-  // doing it here keeps the unread writes out of the commit phase, where they
-  // would cascade a second render on every poll.
-  const noticeStatusChanges = useCallback(
-    (next: AppState) => {
-      const unread: string[] = []
-      const read: string[] = []
-      for (const run of next.runs) {
-        const prior = priorRunStatus.current.get(run.id)
-        priorRunStatus.current.set(run.id, run.status)
-        if (!prior || !active.has(prior) || !terminalRunStatuses.has(run.status)) continue
-        const tag = terminalNotificationTag(run.id, run.status)
-        if (!rememberNotification(tag)) continue
-        markRunUnread(run.id, run)
-        if (next.settings.notifications) void notify(`Codesk · Run ${run.status}`, run.title, tag)
-      }
-      for (const session of next.sessions) {
-        const key = `${session.hostId}:${session.id}`
-        const prior = priorSessionStatus.current.get(key)
-        priorSessionStatus.current.set(key, session.status)
-        const notificationKey = sessionNotificationKey(session)
-        const managed = next.runs.some(
-          (run) =>
-            run.hostId === session.hostId &&
-            run.provider === session.provider &&
-            run.sessionId === session.nativeSessionId,
-        )
-        if (session.status === 'running' && !managed) read.push(notificationKey)
-        if (session.status !== 'stopped' || prior !== 'running') continue
-        // A turn that already announced itself through the transcript watcher
-        // must not announce itself again when the harness later exits.
-        const completionAt = sessionCompletionNotifiedAt.current.get(notificationKey) || 0
-        if (Date.now() - completionAt < 120_000) continue
-        unread.push(notificationKey)
-        if (!next.settings.notifications) continue
-        const tag = `session-stopped:${key}:${session.updatedAt}`
-        if (rememberNotification(tag)) void notify('Codesk · Agent stopped', session.title, tag)
-      }
-      if (unread.length || read.length) updateUnread(unread, read)
-    },
-    [markRunUnread, rememberNotification, updateUnread],
-  )
-  const initializeSelection = useCallback((next: AppState) => {
-    const firstDraft = next.drafts[0]
-    const firstSession = next.sessions[0] || next.settings.pinnedSessions[0]
-    const firstRun = next.runs[0]
-    selectedRunRef.current = !firstDraft && !firstSession ? firstRun || null : null
-    if (firstDraft) setSelectedDraftId(firstDraft.id)
-    else if (firstSession) setSelectedSessionKey(sessionKey(firstSession))
-    else setSelectedId(firstRun?.id || null)
-    const firstProject = firstDraft
-      ? next.projects.find(
-          (item) => item.id === firstDraft.projectId && item.hostId === firstDraft.hostId,
-        )
-      : firstSession
-        ? next.projects.find(
-            (item) => item.id === firstSession.projectId && item.hostId === firstSession.hostId,
-          )
-        : firstRun
-          ? next.projects.find(
-              (item) => item.id === firstRun.projectId && item.hostId === firstRun.hostId,
-            )
-          : next.projects[0]
-    setSelectedProjectKey(firstProject ? projectKey(firstProject) : null)
-    initialized.current = true
-  }, [])
-  const reload = useCallback(async () => {
-    try {
-      const next = normalizeState(await api.state())
-      reconcileUnread(next)
-      const selectedRun = selectedRunRef.current
-      const refreshedRun = selectedRun && next.runs.find((item) => item.id === selectedRun.id)
-      if (refreshedRun) selectedRunRef.current = refreshedRun
-      else if (selectedRun)
-        next.runs = [selectedRun, ...next.runs.filter((item) => item.id !== selectedRun.id)]
-      setState(next)
-      setExtraSessions((current) => {
-        const refreshed = { ...current }
-        for (const [key, items] of Object.entries(refreshed)) {
-          const latest = new Map(
-            next.sessions
-              .filter((item) => `${item.hostId}:${item.projectId}` === key)
-              .map((item) => [sessionKey(item), item]),
-          )
-          refreshed[key] = items.map((item) => latest.get(sessionKey(item)) || item)
-        }
-        return refreshed
-      })
-      setError('')
-      noticeStatusChanges(next)
-      if (!initialized.current) initializeSelection(next)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }, [initializeSelection, noticeStatusChanges, reconcileUnread])
-  useEffect(() => {
-    let cancelled = false
-    api
-      .navigation()
-      .then((value) => {
-        if (cancelled || initialized.current) return
-        const next = normalizeState(value)
-        setState(next)
-        reconcileUnread(next)
-        noticeStatusChanges(next)
-        if (
-          next.projects.length ||
-          next.drafts.length ||
-          next.sessions.length ||
-          next.runs.length ||
-          next.settings.pinnedSessions.length
-        )
-          initializeSelection(next)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [initializeSelection, noticeStatusChanges, reconcileUnread])
-  useEffect(() => {
-    let cancelled = false
-    let timer = 0
-    let loading = false
-    const poll = async () => {
-      if (cancelled || loading || document.hidden) return
-      loading = true
-      try {
-        await reload()
-      } finally {
-        loading = false
-      }
-      if (!cancelled && !document.hidden) timer = window.setTimeout(poll, 15_000)
-    }
-    const visibility = () => {
-      clearTimeout(timer)
-      if (!document.hidden) void poll()
-    }
-    document.addEventListener('visibilitychange', visibility)
-    void poll()
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', visibility)
-    }
-  }, [reload])
-  const run = state.runs.find((item) => item.id === selectedId) || null
+  const {
+    unreadKeys,
+    addUnread,
+    clearUnread,
+    readRun,
+    readSession,
+    rememberNotification,
+    notifyRunEvent,
+    noticeStatusChanges,
+    reconcileUnread,
+    notified,
+  } = useUnreadNotifications({ stateRef, sessionCompletionNotifiedAt })
+  const allSessions = useMemo(() => {
+    const merged = new Map(
+      [...state.settings.pinnedSessions, ...state.settings.archivedSessions, ...state.sessions].map(
+        (item) => [sessionKey(item), item],
+      ),
+    )
+    for (const items of Object.values(extraSessions))
+      for (const item of items) merged.set(sessionKey(item), item)
+    return [...merged.values()]
+  }, [
+    state.sessions,
+    state.settings.pinnedSessions,
+    state.settings.archivedSessions,
+    extraSessions,
+  ])
+  const {
+    selectedId,
+    setSelectedId,
+    selectedSessionKey,
+    setSelectedSessionKey,
+    selectedAgentKey,
+    setSelectedAgentKey,
+    selectedDraftId,
+    setSelectedDraftId,
+    selectedProjectKey,
+    setSelectedProjectKey,
+    run,
+    initialized,
+    selectedRunRef,
+    initializeSelection,
+    clearSelectedRun,
+    selectProject,
+    selectRun,
+    selectSession,
+    selectDraft,
+    selectAgent,
+  } = useSelection({ state, setState, stateRef, allSessions })
+  const { reload } = useAppStatePolling({
+    setState,
+    setExtraSessions,
+    setError,
+    reconcileUnread,
+    noticeStatusChanges,
+    initializeSelection,
+    initialized,
+    selectedRunRef,
+  })
   const session =
     [
       ...state.sessions,
@@ -340,10 +117,6 @@ export function App() {
   )
   const runId = run?.id
   const runHostId = run?.hostId
-  const runProjectId = run?.projectId
-  const runProvider = run?.provider
-  const runSessionId = run?.sessionId
-  const runInputTransport = run?.inputTransport
   const sessionHostId = session?.hostId
   const sessionProjectId = session?.projectId
   const sessionProviderId = session?.provider
@@ -367,7 +140,6 @@ export function App() {
     // Idempotent: `updateUnread` returns the same Set when nothing was unread,
     // so the common case bails out of the re-render, and when there is
     // something to clear the extra render is the point.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     readSelected()
     window.addEventListener('focus', readSelected)
     document.addEventListener('visibilitychange', readSelected)
@@ -376,84 +148,16 @@ export function App() {
       document.removeEventListener('visibilitychange', readSelected)
     }
   }, [readSelected])
-  useEffect(() => {
-    if (!runId || !runHostId || eventsRef.current[runId]) return
-    api
-      .events(runHostId, runId)
-      .then((items) => setEvents((current) => ({ ...current, [runId]: items })))
-      .catch(() => {})
-  }, [eventsRef, runHostId, runId])
-  useEffect(() => {
-    // A tmux session is rendered from its provider transcript, but Codesk's own
-    // synthetic events (usage snapshots) live on the backing managed run.
-    if (!managedRunId || !sessionHostId || eventsRef.current[managedRunId]) return
-    api
-      .events(sessionHostId, managedRunId)
-      .then((items) => setEvents((current) => ({ ...current, [managedRunId]: items })))
-      .catch(() => {})
-  }, [eventsRef, managedRunId, sessionHostId])
-  useEffect(() => {
-    if (
-      !selectedSessionKey ||
-      !sessionHostId ||
-      sessionProjectId === undefined ||
-      !sessionProviderId ||
-      !sessionNativeId ||
-      sessionHostStatus !== 'online'
-    )
-      return
-    let stopped = false
-    let timer = 0
-    let idleDelay = 2000
-    const load = async () => {
-      const prior = sessionMessagesRef.current[selectedSessionKey] || []
-      const after = [...prior].reverse().find((item) => item.timestamp)?.timestamp
-      try {
-        const incoming = await api.sessionMessages(
-          sessionHostId,
-          sessionProjectId,
-          sessionProviderId,
-          sessionNativeId,
-          after,
-        )
-        if (stopped || !incoming.length) return false
-        setSessionMessages((current) => {
-          const existing = current[selectedSessionKey] || []
-          const next = mergeSessionMessages(existing, incoming)
-          if (next === existing) return current
-          const updated = { ...current, [selectedSessionKey]: next }
-          sessionMessagesRef.current = updated
-          return updated
-        })
-        return true
-      } catch (cause) {
-        if (!stopped) setError(cause instanceof Error ? cause.message : String(cause))
-        return false
-      }
-    }
-    const poll = async () => {
-      if (stopped || document.hidden) return
-      const changed = await load()
-      if (stopped || document.hidden) return
-      if (sessionStatus === 'running' || changed) idleDelay = 2000
-      else idleDelay = Math.min(15_000, idleDelay * 2)
-      timer = window.setTimeout(poll, sessionStatus === 'running' ? 2000 : idleDelay)
-    }
-    const visibility = () => {
-      clearTimeout(timer)
-      if (!document.hidden) {
-        idleDelay = 2000
-        void poll()
-      }
-    }
-    document.addEventListener('visibilitychange', visibility)
-    void poll()
-    return () => {
-      stopped = true
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', visibility)
-    }
-  }, [
+  const { events } = useRunEventStream({
+    runId,
+    runHostId,
+    managedRunId,
+    sessionHostId,
+    stateRef,
+    notifyRunEvent,
+    reload,
+  })
+  const { sessionMessages } = useSessionMessagesPoller({
     selectedSessionKey,
     sessionHostId,
     sessionProjectId,
@@ -461,213 +165,22 @@ export function App() {
     sessionNativeId,
     sessionStatus,
     sessionHostStatus,
-  ])
-  const liveExternalSessionSignature = state.sessions
-    .filter((item) => item.pid)
-    .map((item) => sessionNotificationKey(item))
-    .sort()
-    .join('|')
-  useEffect(() => {
-    let stopped = false
-    let timer = 0
-    let loading = false
-    const pollSession = async (session: ProviderSession) => {
-      const key = sessionNotificationKey(session)
-      let watch = externalTranscriptWatches.current.get(key)
-      if (!watch) {
-        watch = { seen: new Set(), initialized: false, turnOpen: false }
-        externalTranscriptWatches.current.set(key, watch)
-      }
-      try {
-        const incoming = await api.sessionMessages(
-          session.hostId,
-          session.projectId,
-          session.provider,
-          session.nativeSessionId,
-          watch.after,
-        )
-        if (stopped) return
-        const latestTimestamp = incoming.reduce(
-          (latest, message) => (message.timestamp > latest ? message.timestamp : latest),
-          watch.after || '',
-        )
-        if (latestTimestamp) watch.after = latestTimestamp
-        if (!watch.initialized) {
-          watch.seen = new Set(incoming.map((message) => message.id))
-          watch.turnOpen = transcriptTurnOpen(incoming, session.status)
-          watch.initialized = true
-          return
-        }
-        for (const message of incoming) {
-          if (watch.seen.has(message.id)) continue
-          watch.seen.add(message.id)
-          if (message.kind !== 'turn_completed') {
-            if (!watch.turnOpen || watch.pendingCompletion) clearUnread([key])
-            watch.turnOpen = true
-            watch.pendingCompletion = undefined
-            sessionCompletionNotifiedAt.current.delete(key)
-            continue
-          }
-          if (!watch.turnOpen) continue
-          watch.turnOpen = false
-          const tag = `session-turn:${session.hostId}:${session.provider}:${session.nativeSessionId}:${message.id}`
-          if (!notified.current.has(tag))
-            watch.pendingCompletion = { messageId: message.id, detectedAt: Date.now() }
-        }
-        const pending = watch.pendingCompletion
-        if (
-          pending &&
-          !watch.turnOpen &&
-          session.status !== 'running' &&
-          Date.now() - pending.detectedAt >= externalCompletionSettleMs
-        ) {
-          watch.pendingCompletion = undefined
-          const tag = `session-turn:${session.hostId}:${session.provider}:${session.nativeSessionId}:${pending.messageId}`
-          if (rememberNotification(tag)) {
-            sessionCompletionNotifiedAt.current.set(key, Date.now())
-            const activelyViewing =
-              !document.hidden &&
-              document.hasFocus() &&
-              selectedSessionNotificationKeyRef.current === key
-            if (!activelyViewing) {
-              addUnread([key])
-              if (stateRef.current.settings.notifications)
-                void notify('Codesk · Turn completed', session.title, tag)
-            }
-          }
-        }
-      } catch {}
-    }
-    const poll = async () => {
-      if (stopped || loading) return
-      loading = true
-      const snapshot = stateRef.current
-      const managedSessions = new Set(
-        snapshot.runs.flatMap((run) =>
-          run.sessionId ? [`${run.hostId}:${run.provider}:${run.sessionId}`] : [],
-        ),
-      )
-      const sessions = snapshot.sessions.filter(
-        (session) =>
-          session.pid &&
-          snapshot.hosts.find((host) => host.id === session.hostId)?.status === 'online' &&
-          !managedSessions.has(`${session.hostId}:${session.provider}:${session.nativeSessionId}`),
-      )
-      const activeKeys = new Set(sessions.map(sessionNotificationKey))
-      for (const key of externalTranscriptWatches.current.keys())
-        if (!activeKeys.has(key)) externalTranscriptWatches.current.delete(key)
-      await Promise.all(sessions.map(pollSession))
-      loading = false
-      if (stopped) return
-      const needsFastPoll = sessions.some((session) => {
-        const watch = externalTranscriptWatches.current.get(sessionNotificationKey(session))
-        return watch?.turnOpen || watch?.pendingCompletion
-      })
-      timer = window.setTimeout(poll, needsFastPoll ? 3_000 : 15_000)
-    }
-    void poll()
-    return () => {
-      stopped = true
-      clearTimeout(timer)
-    }
-  }, [
+    setError,
+  })
+  useExternalTranscriptWatcher({
+    sessions: state.sessions,
+    stateRef,
     addUnread,
     clearUnread,
-    liveExternalSessionSignature,
     rememberNotification,
+    notified,
     selectedSessionNotificationKeyRef,
-    stateRef,
-  ])
-  useEffect(() => {
-    const origin = gatewayOrigin
-      ? gatewayOrigin.replace('http://', 'ws://').replace('https://', 'wss://')
-      : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
-    let ws: WebSocket | null = null
-    let stopped = false
-    let retry = 500
-    const replay = async () => {
-      const snapshot = await api.state()
-      await Promise.all(
-        snapshot.runs.map(async (item) => {
-          const incoming = await api.events(item.hostId, item.id)
-          setEvents((current) => ({
-            ...current,
-            [item.id]: mergeEvents(current[item.id] || [], incoming),
-          }))
-        }),
-      )
-    }
-    const connect = () => {
-      if (stopped) return
-      ws = new WebSocket(`${origin}/ws`)
-      ws.onopen = () => {
-        retry = 500
-        void reload()
-        void replay().catch(() => {})
-      }
-      ws.onmessage = (message) => {
-        const envelope = JSON.parse(message.data)
-        if (envelope.type === 'daemon.event') {
-          const event = envelope.payload.event as RunEvent
-          setEvents((current) => {
-            const prior = current[event.run_id] || []
-            return prior.some((item) => item.event_id === event.event_id)
-              ? current
-              : {
-                  ...current,
-                  [event.run_id]: [...prior, event].sort((a, b) => a.run_sequence - b.run_sequence),
-                }
-          })
-          if (
-            event.kind.startsWith('run.') ||
-            event.kind.startsWith('control.') ||
-            event.kind.startsWith('turn.') ||
-            event.kind.startsWith('thread.') ||
-            event.kind.startsWith('queue.')
-          )
-            void reload()
-          notifyRunEvent(event)
-        } else if (
-          envelope.type.startsWith('host.') ||
-          envelope.type.startsWith('draft.') ||
-          envelope.type === 'settings.updated' ||
-          envelope.type === 'state.updated'
-        )
-          void reload()
-      }
-      ws.onclose = () => {
-        if (!stopped) {
-          window.setTimeout(connect, retry)
-          retry = Math.min(10000, retry * 1.8)
-        }
-      }
-      ws.onerror = () => ws?.close()
-    }
-    connect()
-    return () => {
-      stopped = true
-      ws?.close()
-    }
-  }, [notifyRunEvent, reload])
+    sessionCompletionNotifiedAt,
+  })
   useEffect(() => {
     if (!state.settings.notifications) return
     void prepareNotifications()
   }, [state.settings.notifications])
-  const allSessions = useMemo(() => {
-    const merged = new Map(
-      [...state.settings.pinnedSessions, ...state.settings.archivedSessions, ...state.sessions].map(
-        (item) => [sessionKey(item), item],
-      ),
-    )
-    for (const items of Object.values(extraSessions))
-      for (const item of items) merged.set(sessionKey(item), item)
-    return [...merged.values()]
-  }, [
-    state.sessions,
-    state.settings.pinnedSessions,
-    state.settings.archivedSessions,
-    extraSessions,
-  ])
   const archivedSessions = state.settings.archivedSessionKeys
     .map((key) => allSessions.find((item) => sessionKey(item) === key))
     .filter((item): item is ProviderSession => Boolean(item))
@@ -697,108 +210,6 @@ export function App() {
   const sessionProvider = session
     ? state.providersByHost[session.hostId]?.find((item) => item.id === session.provider)
     : undefined
-  const clearSelectedRun = useCallback(() => {
-    selectedRunRef.current = null
-  }, [])
-  const selectProject = useCallback(
-    (next: Project) => {
-      clearSelectedRun()
-      setSelectedProjectKey(projectKey(next))
-      setSelectedId(null)
-      setSelectedSessionKey(null)
-      setSelectedAgentKey(null)
-      setSelectedDraftId(null)
-    },
-    [clearSelectedRun],
-  )
-  const selectRun = useCallback((next: Run) => {
-    selectedRunRef.current = next
-    setState((current) => ({
-      ...current,
-      runs: [next, ...current.runs.filter((item) => item.id !== next.id)],
-    }))
-    setSelectedId(next.id)
-    setSelectedSessionKey(null)
-    setSelectedAgentKey(null)
-    setSelectedDraftId(null)
-    setSelectedProjectKey(`${next.hostId}:${next.projectId}`)
-  }, [])
-  const selectSession = useCallback(
-    (next: ProviderSession) => {
-      const activeRun = stateRef.current.runs.find(
-        (item) =>
-          item.hostId === next.hostId &&
-          item.projectId === next.projectId &&
-          item.provider === next.provider &&
-          item.sessionId === next.nativeSessionId &&
-          active.has(item.status),
-      )
-      if (activeRun && activeRun.inputTransport !== 'tmux') {
-        selectRun(activeRun)
-        return
-      }
-      clearSelectedRun()
-      setSelectedSessionKey(`${next.hostId}:${next.id}`)
-      setSelectedId(null)
-      setSelectedAgentKey(null)
-      setSelectedDraftId(null)
-      setSelectedProjectKey(`${next.hostId}:${next.projectId}`)
-    },
-    [clearSelectedRun, selectRun, stateRef],
-  )
-  useEffect(() => {
-    if (
-      runInputTransport !== 'tmux' ||
-      !runSessionId ||
-      !runHostId ||
-      runProjectId === undefined ||
-      !runProvider
-    )
-      return
-    const matching = allSessions.find(
-      (item) =>
-        item.hostId === runHostId &&
-        item.projectId === runProjectId &&
-        item.provider === runProvider &&
-        item.nativeSessionId === runSessionId,
-    )
-    if (!matching) return
-    // Redirecting the selection is a state write, and it cannot move into the
-    // click handler that picked the run: a tmux-backed run only learns its
-    // native session id once the harness has attached, which happens after the
-    // run is already on screen.
-    selectSession(matching)
-  }, [
-    allSessions,
-    runHostId,
-    runInputTransport,
-    runProjectId,
-    runProvider,
-    runSessionId,
-    selectSession,
-  ])
-  const selectDraft = useCallback(
-    (next: DraftSession) => {
-      clearSelectedRun()
-      setSelectedDraftId(next.id)
-      setSelectedId(null)
-      setSelectedSessionKey(null)
-      setSelectedAgentKey(null)
-      setSelectedProjectKey(`${next.hostId}:${next.projectId}`)
-    },
-    [clearSelectedRun],
-  )
-  const selectAgent = useCallback(
-    (hostId: string, agent: DiscoveredAgent, nextProject?: Project) => {
-      clearSelectedRun()
-      setSelectedAgentKey(`${hostId}:${agent.id}`)
-      setSelectedId(null)
-      setSelectedSessionKey(null)
-      setSelectedDraftId(null)
-      if (nextProject) setSelectedProjectKey(projectKey(nextProject))
-    },
-    [clearSelectedRun],
-  )
   const newDraft = async (nextProject = project) => {
     if (!nextProject) return
     try {
@@ -1043,6 +454,7 @@ export function App() {
             key={`session:${sessionNotificationKey(session)}`}
             session={session}
             messages={sessionMessages[selectedSessionKey!] || []}
+            messagesLoaded={Boolean(sessionMessages[selectedSessionKey!])}
             runEvents={session.managedRunId ? events[session.managedRunId] || [] : []}
             project={project}
             host={host}
@@ -1099,9 +511,12 @@ export function App() {
         )}
       </section>
       {error && (
-        <div className="fixed right-5 bottom-5 z-30 flex gap-3 rounded-lg border border-scarlet-600/60 bg-scarlet-950 px-3.5 py-3 text-scarlet-400">
+        <div
+          role="alert"
+          className="fixed right-5 bottom-5 z-30 flex gap-3 rounded-lg border border-scarlet-600/60 bg-scarlet-950 px-3.5 py-3 text-scarlet-400"
+        >
           {error}
-          <button onClick={() => setError('')}>
+          <button aria-label="Dismiss error" onClick={() => setError('')}>
             <X size={14} />
           </button>
         </div>

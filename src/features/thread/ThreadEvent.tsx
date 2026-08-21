@@ -40,7 +40,9 @@ import {
 } from './file-change-styles'
 import { CheckCircle2 } from 'lucide-react'
 import { Bot, Clock3, FileDiff, FolderOpen, Pencil, ShieldAlert, Terminal } from 'lucide-react'
+import { memo, useState } from 'react'
 import { api } from '../../api'
+import { InputRequestDialog } from './InputRequestDialog'
 import { activityText } from '../../lib/activity'
 import { conversationText, durationLabel } from '../../lib/format'
 import { providerName, providerUi } from '../../lib/providers'
@@ -386,7 +388,52 @@ export function UsageCard({ event }: { event: RunEvent }) {
   )
 }
 
-export function ThreadEvent({
+function InputRequestCard({
+  event,
+  run,
+  rpcId,
+  resolved,
+  text,
+}: {
+  event: RunEvent
+  run: Run
+  rpcId: unknown
+  resolved: boolean
+  text: string
+}) {
+  const [answering, setAnswering] = useState(false)
+  const raw = event.raw_payload as {
+    params?: { questions?: Array<{ id: string; question?: string; header?: string }> }
+  }
+  const questions = raw?.params?.questions || []
+  return (
+    <div className={cn(requestCard, resolved && requestCardResolved)}>
+      <strong className={requestTitle}>
+        {resolved ? 'Input submitted' : `${providerName(run.provider)} needs input`}
+      </strong>
+      <p className={requestBody}>{text}</p>
+      {!resolved && (
+        <div className={requestActions}>
+          <button className={requestButton} onClick={() => setAnswering(true)}>
+            Answer
+          </button>
+        </div>
+      )}
+      {answering && (
+        <InputRequestDialog
+          provider={providerName(run.provider)}
+          questions={questions}
+          onSubmit={(answers) => void api.providerResponse(run.hostId, run.id, rpcId, { answers })}
+          onClose={() => setAnswering(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+// Memoized: rows are immutable once rendered (events never mutate in place),
+// so a streaming append should only mount the new row, not re-render history.
+export const ThreadEvent = memo(function ThreadEvent({
   event,
   run,
   durationMs,
@@ -534,35 +581,13 @@ export function ThreadEvent({
     )
   if (event.kind === 'input.required' && rpcId !== undefined && rpcId !== null)
     return (
-      <div className={cn(requestCard, resolved && requestCardResolved)}>
-        <strong className={requestTitle}>
-          {resolved ? 'Input submitted' : `${providerName(run.provider)} needs input`}
-        </strong>
-        <p className={requestBody}>{text}</p>
-        {!resolved && (
-          <div className={requestActions}>
-            <button
-              className={requestButton}
-              onClick={() => {
-                const raw = event.raw_payload as {
-                  params?: { questions?: Array<{ id: string; question?: string; header?: string }> }
-                }
-                const answers: Record<string, { answers: string[] }> = {}
-                for (const question of raw?.params?.questions || []) {
-                  const answer = prompt(
-                    question.question || question.header || `Answer ${run.provider}`,
-                  )
-                  if (answer === null) return
-                  answers[question.id] = { answers: [answer] }
-                }
-                void api.providerResponse(run.hostId, run.id, rpcId, { answers })
-              }}
-            >
-              Answer
-            </button>
-          </div>
-        )}
-      </div>
+      <InputRequestCard
+        event={event}
+        run={run}
+        rpcId={rpcId}
+        resolved={resolved}
+        text={text}
+      />
     )
   if (event.kind === 'user.message')
     return (
@@ -608,4 +633,4 @@ export function ThreadEvent({
       )}
     </div>
   )
-}
+})

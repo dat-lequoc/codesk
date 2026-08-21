@@ -22,6 +22,7 @@ import { ListPlus, Plus, RefreshCw, Send, Terminal } from 'lucide-react'
 import { api } from '../../api'
 import { Spinner } from '../../components/ui/spinner'
 import { useLatest } from '../../hooks/useLatest'
+import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
 import { providerName } from '../../lib/providers'
 import { ProviderIcon } from '../../components/ProviderIcon'
@@ -35,7 +36,7 @@ import type {
 } from '../../types'
 import { ComposerFooter, ComposerFrame, ComposerInput } from '../composer/Composer'
 import { TmuxDetails } from '../environment/Environment'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 export function ObservedScreen({
   host,
   project,
@@ -102,36 +103,17 @@ export function ObservedScreen({
       void submit()
     }
   }
-  useEffect(() => {
-    if (!hostId || !agent.pid || !controlled || !hasQueued || hostStatus !== 'online') return
-    let stopped = false
-    let timer = 0
-    const poll = async () => {
-      try {
-        const items = await api.externalSessionQueue(hostId, agent.pid)
-        if (stopped) return
-        const started = items.find((item) => item.status === 'started' && item.run)
-        if (started?.run) {
-          void api.removeExternalQueued(hostId, agent.pid, started.id).catch(() => {})
-          onStartedRef.current(started.run)
-          return
-        }
-        setQueued(items)
-      } catch {}
-      if (!stopped && !document.hidden) timer = window.setTimeout(poll, 1000)
-    }
-    const visibility = () => {
-      clearTimeout(timer)
-      if (!document.hidden) void poll()
-    }
-    document.addEventListener('visibilitychange', visibility)
-    timer = window.setTimeout(poll, 1000)
-    return () => {
-      stopped = true
-      clearTimeout(timer)
-      document.removeEventListener('visibilitychange', visibility)
-    }
-  }, [hostId, hostStatus, agent.pid, hasQueued, controlled, onStartedRef])
+  const handleQueueStarted = useLatest((run: Run) => {
+    onStartedRef.current(run)
+    return true
+  })
+  useExternalQueuePoller({
+    hostId,
+    pid: agent.pid,
+    enabled: Boolean(controlled && hasQueued && hostStatus === 'online'),
+    handleStarted: handleQueueStarted,
+    setQueued,
+  })
   return (
     <div className={threadScreen}>
       <header className={threadHeader}>

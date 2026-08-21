@@ -301,6 +301,8 @@ export function StartScreen({
               type="button"
               className="grid size-7 shrink-0 place-items-center text-muted hover:text-fg"
               aria-label="Add attachment"
+              title="Attachments are not supported yet"
+              disabled
             >
               <Plus size={18} />
             </button>
