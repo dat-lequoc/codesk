@@ -7,6 +7,19 @@ import { promisify } from 'node:util'
 import WebSocket from 'ws'
 
 const sshOptions = ['-o','BatchMode=yes','-o','ExitOnForwardFailure=yes','-o','ConnectTimeout=7','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=3','-o','ControlMaster=auto','-o','ControlPersist=10m','-o','ControlPath=~/.ssh/codesk-%C']
+// The oldest codeskd this gateway knows how to drive. A remote host can keep
+// running a daemon installed by an older Codesk indefinitely; without this
+// check it stays "online" while requests fail in confusing ways.
+const MIN_DAEMON_VERSION = '0.2.0'
+function versionLt(left, right) {
+  const parse = (value) => String(value).split('.').map((part) => Number.parseInt(part, 10) || 0)
+  const a = parse(left); const b = parse(right)
+  for (let index = 0; index < 3; index++) {
+    const x = a[index] || 0; const y = b[index] || 0
+    if (x !== y) return x < y
+  }
+  return false
+}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const execFileAsync = promisify(execFile)
 
@@ -44,10 +57,16 @@ export class Gateway {
 
   async ensureLocal() {
     const host = this.host('local')
+    // A previous ensureLocal may still be mid-spawn or have a retry timer
+    // armed. Entering again would race it and leave two codeskd children
+    // fighting over the port, so this method is single-flight.
+    clearTimeout(this.pollers.get('ensure:local'))
+    this.pollers.delete('ensure:local')
+    if (this.processes.has(host.id)) return
     const configuredBinary = process.env.CODESK_DAEMON_BINARY
     const binary = configuredBinary && fs.existsSync(configuredBinary) ? configuredBinary : path.resolve(process.cwd(), 'target/debug/codeskd')
     if (await this.health(host)) return this.markOnline(host)
-    if (this.shuttingDown) return
+    if (this.shuttingDown || this.processes.has(host.id)) return
     // codeskd is ours, so it must not outlive this gateway. The watchdog it
     // starts from CODESK_OWNER_PID covers the case where we are SIGKILLed and
     // never get to run shutdown(). See ARCHITECTURE.md §6.5.
@@ -56,7 +75,7 @@ export class Gateway {
     child.stderr.on('data', (data) => { host.error = data.toString().trim().split('\n').at(-1) })
     // Restarting a daemon we are deliberately stopping would undo shutdown, so
     // the respawn is conditional on still being alive.
-    child.on('exit', () => { this.processes.delete(host.id); if (this.shuttingDown) return; this.markOffline(host, 'Local daemon stopped'); this.pollers.set('ensure:local', setTimeout(() => this.ensureLocal(), 1500)) })
+    child.on('exit', () => { this.processes.delete(host.id); if (this.shuttingDown) return; this.markOffline(host, 'Local daemon stopped'); clearTimeout(this.pollers.get('ensure:local')); this.pollers.set('ensure:local', setTimeout(() => this.ensureLocal(), 1500)) })
     for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (this.shuttingDown) return; if (await this.health(host)) { this.markOnline(host); return } }
     this.markOffline(host, host.error || 'Local daemon did not start')
   }
@@ -93,7 +112,18 @@ export class Gateway {
     } catch { return false }
   }
 
+  daemonOutdated(host) {
+    const version = host.health?.version
+    return Boolean(version) && versionLt(version, MIN_DAEMON_VERSION)
+  }
+
   markOnline(host) {
+    // A reachable but outdated daemon is worse than an offline one: requests
+    // would fail with protocol errors instead of one actionable message.
+    if (this.daemonOutdated(host)) {
+      this.markOffline(host, `codeskd ${host.health.version} on ${host.name} is older than the required ${MIN_DAEMON_VERSION}. Update it (run \`codeskd install\` with a newer binary) and reconnect.`)
+      return
+    }
     const changed = host.status !== 'online'
     host.status = 'online'; host.error = null; host.bootstrapError = null; host.lastSeen = new Date().toISOString(); this.failures.set(host.id, 0); this.bootstrapAttempts.delete(host.id); this.store.save()
     if (changed) this.broadcast('host.updated', host)
@@ -140,6 +170,9 @@ export class Gateway {
     child.stderr.on('data', (data) => { error = data.toString().trim().split('\n').at(-1) || error })
     child.on('exit', () => {
       this.processes.delete(host.id)
+      // A host that is no longer in the store was deleted; reviving its tunnel
+      // (or persisting offline state for it) would resurrect a removed host.
+      if (!this.host(host.id)) return
       this.markOffline(host, error || 'SSH tunnel disconnected')
       this.scheduleReconnect(host.id)
     })
@@ -203,17 +236,43 @@ export class Gateway {
   }
 
   async sshAliases() {
-    const files = [path.join(os.homedir(), '.ssh', 'config')]
     const aliases = new Set()
-    for (const file of files) {
+    const visited = new Set()
+    const home = os.homedir()
+    // OpenSSH resolves a bare Include path relative to ~/.ssh, expands ~, and
+    // accepts globs. Configs split across ~/.ssh/config.d were invisible to
+    // the picker before this walked Include directives.
+    const expand = async (pattern) => {
+      const resolved = pattern.startsWith('~')
+        ? path.join(home, pattern.slice(1))
+        : path.isAbsolute(pattern)
+          ? pattern
+          : path.join(home, '.ssh', pattern)
+      if (!/[*?[\]]/.test(resolved)) return [resolved]
+      try {
+        const matches = []
+        for await (const match of fs.promises.glob(resolved)) matches.push(match)
+        return matches
+      } catch { return [] }
+    }
+    const readConfig = async (file) => {
+      if (visited.has(file) || visited.size > 64) return
+      visited.add(file)
       let text = ''
-      try { text = await fs.promises.readFile(file, 'utf8') } catch { continue }
+      try { text = await fs.promises.readFile(file, 'utf8') } catch { return }
       for (const raw of text.split(/\r?\n/)) {
+        const include = raw.match(/^\s*Include\s+(.+)$/i)
+        if (include) {
+          for (const pattern of include[1].trim().split(/\s+/))
+            for (const match of await expand(pattern)) await readConfig(match)
+          continue
+        }
         const match = raw.match(/^\s*Host\s+(.+)$/i)
         if (!match) continue
         for (const value of match[1].trim().split(/\s+/)) if (!/[*?!]/.test(value)) aliases.add(value)
       }
     }
+    await readConfig(path.join(home, '.ssh', 'config'))
     return [...aliases].sort((a,b)=>a.localeCompare(b))
   }
 
@@ -268,6 +327,23 @@ export class Gateway {
     const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(command)],{timeout:60000,maxBuffer:1024*1024})
     if (reconnect) this.reconnect(hostId)
     return {ok:true,stdout,stderr}
+  }
+
+  /// Forget every per-host resource: timers, sockets, cursors, backoff state,
+  /// and the tunnel process. Callers must remove the host from the store first
+  /// so the tunnel exit handler knows not to reconnect.
+  removeHost(hostId) {
+    clearTimeout(this.pollers.get(`connect:${hostId}`))
+    this.pollers.delete(`connect:${hostId}`)
+    this.closeEvents(hostId)
+    this.pollers.delete(`events:${hostId}`)
+    this.failures.delete(hostId)
+    this.cursors.delete(hostId)
+    this.eventFailures.delete(hostId)
+    this.bootstrapAttempts.delete(hostId)
+    this.bootstrapping.delete(hostId)
+    const child = this.processes.get(hostId)
+    if (child) { try { child.kill('SIGTERM') } catch {} }
   }
 
   reconnect(hostId) {
@@ -361,4 +437,14 @@ function localArtifactFor(inspection){
   if(matchesLocalPlatform(inspection))candidates.push(path.resolve(process.cwd(),'target/release/codeskd'),path.resolve(process.cwd(),'target/debug/codeskd'))
   return candidates.find((candidate)=>fs.existsSync(candidate))||''
 }
-function releaseArtifactUrl(inspection){const base=process.env.CODESK_DAEMON_RELEASE_BASE_URL;if(!base)return '';const arch=inspection.arch==='x86_64'?'x86_64':inspection.arch==='aarch64'||inspection.arch==='arm64'?'aarch64':inspection.arch;return `${base.replace(/\/$/,'')}/codeskd-${inspection.os}-${arch}`}
+// Release assets are named after each platform's native `uname -m`:
+// codeskd-Darwin-arm64 and codeskd-Linux-aarch64. Normalizing both spellings
+// to aarch64 made every Darwin arm64 download 404.
+function releaseArtifactUrl(inspection){
+  const base=process.env.CODESK_DAEMON_RELEASE_BASE_URL
+  if(!base)return ''
+  const arch=inspection.os==='Darwin'
+    ?(inspection.arch==='aarch64'?'arm64':inspection.arch)
+    :(inspection.arch==='arm64'?'aarch64':inspection.arch)
+  return `${base.replace(/\/$/,'')}/codeskd-${inspection.os}-${arch}`
+}

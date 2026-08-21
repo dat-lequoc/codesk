@@ -3,8 +3,9 @@ import path from 'node:path'
 
 const root = process.env.CODESK_CLIENT_DATA_DIR || path.resolve(process.cwd(), '.codesk')
 const emptyDraftMaxAgeMs = 24 * 60 * 60 * 1000
+const localHostName = process.platform === 'darwin' ? 'This Mac' : 'This machine'
 const defaults = {
-  hosts: [{ id: 'local', name: 'This Mac', type: 'local', daemonPort: 4243, status: 'checking', createdAt: new Date().toISOString() }],
+  hosts: [{ id: 'local', name: localHostName, type: 'local', daemonPort: 4243, status: 'checking', createdAt: new Date().toISOString() }],
   drafts: [],
   navigationByHost: {},
   settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [], archivedRunKeys: [] },
@@ -13,12 +14,28 @@ const defaults = {
 export class Store {
   constructor(dataRoot = root) {
     this.file = path.join(dataRoot, 'client-state.json')
+    this.saveTimer = null
+    this.dirty = false
     fs.mkdirSync(dataRoot, { recursive: true })
+    // Debounced saves must still hit disk if the process exits normally
+    // between the mutation and the timer. The data root may already be gone
+    // during teardown (tests, uninstall); losing that final write is fine.
+    process.once('exit', () => { try { this.flushSync() } catch {} })
     try {
       const persisted = JSON.parse(fs.readFileSync(this.file, 'utf8'))
       this.state = { ...structuredClone(defaults), ...persisted, settings: { ...defaults.settings, ...persisted.settings } }
     }
-    catch { this.state = structuredClone(defaults); this.save() }
+    catch (error) {
+      // A missing file is a fresh install; anything else is a store we failed
+      // to parse. Overwriting it with defaults would silently destroy the
+      // user's hosts, drafts, and settings, so preserve the bytes first.
+      if (error.code !== 'ENOENT') {
+        const backup = `${this.file}.corrupt-${Date.now()}`
+        try { fs.renameSync(this.file, backup); console.error(`Codesk client state was unreadable (${error.message}); the original file was preserved at ${backup}`) } catch {}
+      }
+      this.state = structuredClone(defaults)
+      this.save()
+    }
     if (!this.state.hosts.some((host) => host.id === 'local')) this.state.hosts.unshift(defaults.hosts[0])
     if (!Array.isArray(this.state.drafts)) this.state.drafts = []
     const now = Date.now()
@@ -42,7 +59,24 @@ export class Store {
     if (!Array.isArray(this.state.settings.archivedRunKeys)) this.state.settings.archivedRunKeys = []
     if (draftsChanged) this.save()
   }
-  save() { const temp = `${this.file}.tmp`; fs.writeFileSync(temp, JSON.stringify(this.state, null, 2)); fs.renameSync(temp, this.file) }
+  /// Persist soon, not now. Every mutation used to rewrite the full document
+  /// synchronously on the event loop; host status churn and navigation cache
+  /// updates made that a constant background disk cost. Writes coalesce on a
+  /// short timer, and `flushSync()` covers shutdown.
+  save() {
+    this.dirty = true
+    if (this.saveTimer) return
+    this.saveTimer = setTimeout(() => { try { this.flushSync() } catch (error) { console.error(`Failed to persist client state: ${error.message}`) } }, 250)
+    this.saveTimer.unref?.()
+  }
+  flushSync() {
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null }
+    if (!this.dirty) return
+    const temp = `${this.file}.tmp`
+    fs.writeFileSync(temp, JSON.stringify(this.state, null, 2))
+    fs.renameSync(temp, this.file)
+    this.dirty = false
+  }
   createDraft(input) {
     const existing = this.state.drafts.find((draft) => draft.hostId === input.hostId && draft.projectId === input.projectId && !draft.prompt?.trim())
     if (existing) return existing

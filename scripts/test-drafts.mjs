@@ -19,12 +19,14 @@ try {
   assert.equal(first.state.drafts.length, 1)
   assert(first.state.drafts.every((draft) => draft.title === 'New chat'))
 
+  first.flushSync()
   const restarted = new Store(root)
   assert.deepEqual(restarted.state.drafts.map((draft) => draft.id), [one.id])
   const untouchedTimestamp = restarted.state.drafts[0].updatedAt
   restarted.updateDraft(one.id, { prompt: '', provider: 'codex', workspaceMode: 'current_checkout' })
   assert.equal(restarted.state.drafts[0].updatedAt, untouchedTimestamp, 'unchanged drafts must not appear recently updated')
   restarted.updateDraft(one.id, { prompt: 'preserved composer text', provider: 'pi', workspaceMode: 'managed_worktree' })
+  restarted.flushSync()
   const edited = new Store(root).state.drafts.find((draft) => draft.id === one.id)
   assert.equal(edited.prompt, 'preserved composer text')
   assert.equal(edited.provider, 'pi')
@@ -34,6 +36,7 @@ try {
   restarted.updateSettings({ pinnedSessionKeys: ['remote:session-1'], pinnedSessions: [pinnedSession] })
   restarted.updateSettings({ pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: ['remote:session-1'], archivedSessions: [pinnedSession] })
   restarted.updateNavigationHost('remote', { hostId: 'remote', projects: [{ id: 'pi-agi', hostId: 'remote', name: 'pi-agi' }], sessions: [pinnedSession], runs: [], providers: [], updatedAt: new Date().toISOString() })
+  restarted.flushSync()
   const withNavigation = new Store(root)
   assert.deepEqual(withNavigation.state.settings.pinnedSessionKeys, [])
   assert.deepEqual(withNavigation.state.settings.archivedSessionKeys, ['remote:session-1'])
@@ -64,6 +67,22 @@ try {
   const started = await startDraft(afterReconciliation, gateway, one.id, { prompt: 'do work' })
   assert.equal(started.run.id, 'run-1')
   assert.equal(afterReconciliation.state.drafts.length, 0, 'successful start must reconcile the draft')
+
+  // A corrupt store must never be silently replaced: the unreadable bytes are
+  // preserved next to the fresh defaults so the user's hosts and drafts can be
+  // recovered by hand.
+  const corruptRoot = path.join(root, 'corrupt')
+  await fs.mkdir(corruptRoot, { recursive: true })
+  await fs.writeFile(path.join(corruptRoot, 'client-state.json'), '{"hosts": [truncated')
+  const recovered = new Store(corruptRoot)
+  assert.equal(recovered.state.hosts[0].id, 'local', 'corrupt store boots with defaults')
+  const backups = (await fs.readdir(corruptRoot)).filter((name) => name.includes('.corrupt-'))
+  assert.equal(backups.length, 1, 'corrupt store bytes are preserved as a backup')
+  assert.equal(
+    await fs.readFile(path.join(corruptRoot, backups[0]), 'utf8'),
+    '{"hosts": [truncated',
+    'backup preserves the original bytes',
+  )
   console.log('ok - blank composers deduplicate and meaningful drafts persist')
 } finally {
   await fs.rm(root, { recursive: true, force: true })

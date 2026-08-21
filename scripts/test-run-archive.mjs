@@ -26,6 +26,7 @@ try {
   assert.deepEqual(withSession.archivedRunKeys, ['local:run-a', 'local:run-b'], 'run keys survive a session update')
   assert.equal(withSession.archivedSessions.length, 1, 'session snapshot retained')
 
+  store.flushSync()
   const reopened = new Store(dataDir)
   assert.deepEqual(reopened.state.settings.archivedRunKeys, ['local:run-a', 'local:run-b'], 'persists across reopen')
 
