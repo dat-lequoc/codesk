@@ -23,6 +23,7 @@ import {
 } from './lib/keys'
 import { hiddenAgentKey } from './lib/observed'
 import { prepareNotifications } from './lib/notifications'
+import { forgetSessionFinishSeen } from './lib/session-finish'
 import { applyTheme, rememberTheme, watchSystemTheme } from './lib/theme'
 import type { ThemePreference } from './lib/theme'
 import { useAppStatePolling } from './hooks/useAppStatePolling'
@@ -77,6 +78,14 @@ export function App() {
     state.settings.archivedSessions,
     extraSessions,
   ])
+  // A new turn must be allowed to show the just-finished circle again, even
+  // if the previous one was already checked. Session rows may be unmounted
+  // (collapsed project), so this lives above the sidebar.
+  useEffect(() => {
+    for (const item of allSessions) {
+      if (item.status === 'running') forgetSessionFinishSeen(sessionNotificationKey(item))
+    }
+  }, [allSessions])
   const {
     selectedId,
     setSelectedId,

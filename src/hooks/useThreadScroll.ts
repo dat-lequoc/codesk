@@ -22,10 +22,36 @@ const applyPosition = (element: HTMLElement, key: string) => {
  * used to fire `onScroll` at offset 0 and flip "following" off, which is why
  * switching away and back landed on the first message.
  */
-export function useThreadScroll(key: string, contentKey: string) {
+type ThreadScrollOptions = {
+  /// False while the transcript is still loading, so an empty pane is not
+  /// treated as "the user has read to the end".
+  ready?: boolean
+  /// Fires when the visible pane is at the latest turn — used to dismiss the
+  /// just-finished marker once the user has actually checked the result.
+  onAtEnd?: () => void
+}
+
+const hasLaidOut = (element: HTMLElement) =>
+  element.scrollHeight > 0 || element.clientHeight > 0
+
+export function useThreadScroll(key: string, contentKey: string, options?: ThreadScrollOptions) {
   const scroll = useRef<HTMLDivElement>(null)
   const following = useRef(recallThreadScroll(key)?.following !== false)
   const restoring = useRef(true)
+  const onAtEndRef = useRef(options?.onAtEnd)
+  const readyRef = useRef(options?.ready !== false)
+
+  const notifyIfAtEnd = () => {
+    const element = scroll.current
+    const cb = onAtEndRef.current
+    if (!element || !readyRef.current || !cb || !hasLaidOut(element)) return
+    if (atBottom(element)) cb()
+  }
+
+  useLayoutEffect(() => {
+    onAtEndRef.current = options?.onAtEnd
+    readyRef.current = options?.ready !== false
+  })
 
   useLayoutEffect(() => {
     following.current = recallThreadScroll(key)?.following !== false
@@ -35,8 +61,9 @@ export function useThreadScroll(key: string, contentKey: string) {
     applyPosition(element, key)
     requestAnimationFrame(() => {
       restoring.current = false
+      notifyIfAtEnd()
     })
-  }, [key, contentKey])
+  }, [key, contentKey, options?.ready])
 
   useLayoutEffect(() => {
     const element = scroll.current
@@ -58,17 +85,19 @@ export function useThreadScroll(key: string, contentKey: string) {
       element.scrollTop = element.scrollHeight
       requestAnimationFrame(() => {
         restoring.current = false
+        notifyIfAtEnd()
       })
     })
     for (const child of element.children) observer.observe(child)
     return () => observer.disconnect()
-  }, [key, contentKey])
+  }, [key, contentKey, options?.ready])
 
   const onScroll = () => {
     const element = scroll.current
     if (!element || restoring.current) return
     following.current = atBottom(element)
     rememberThreadScroll(key, { following: following.current, top: element.scrollTop })
+    if (following.current) notifyIfAtEnd()
   }
 
   const saved = recallThreadScroll(key)

@@ -67,7 +67,8 @@ import {
 } from '../../lib/kiro'
 import type { SlashSuggestion } from '../../lib/kiro'
 import { pendingQueue } from '../../lib/events'
-import { threadScrollKeyForSession } from '../../lib/keys'
+import { sessionNotificationKey, threadScrollKeyForSession } from '../../lib/keys'
+import { markSessionFinishSeen } from '../../lib/session-finish'
 import { providerName } from '../../lib/providers'
 import { ProviderIcon } from '../../components/ProviderIcon'
 import type {
@@ -363,10 +364,17 @@ export function SessionScreen({
   // Streaming updates the last message in place without changing the count, so
   // follow-bottom keys on the tail's identity and content, not just length.
   const lastMessage = messages.at(-1)
-  const followKey = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.text?.length ?? 0}`
+  const followKey = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.text?.length ?? 0}:${session.status}`
   const { scroll, onScroll, startAtEnd, savedTop } = useThreadScroll(
     threadScrollKeyForSession(session),
     followKey,
+    {
+      ready: messages.length > 0 || messagesLoaded,
+      onAtEnd: () => {
+        if (session.status === 'running') return
+        markSessionFinishSeen(sessionNotificationKey(session))
+      },
+    },
   )
   const openFile = (href: string) => {
     setSelectedActivityId(null)

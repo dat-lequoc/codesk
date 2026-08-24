@@ -184,6 +184,10 @@ export function createStateCache({ store, gateway, broadcast, mappers }) {
     for (const session of sessions) {
       const key = `${session.hostId}:${session.id}`; const prior = previousSessionStatus.get(key)
       if (!sessionSortAt.has(key)) sessionSortAt.set(key, session.updatedAt)
+      // Hold `stopped` for 45s so a just-finished row stays visible (red
+      // circle + sort). The desktop hides the circle once the user has
+      // viewed the bottom of the thread; this hold is for chats they have
+      // not opened yet.
       if (prior === 'running' && session.status !== 'running') {
         stoppedUntil.set(key, now + 45_000)
         sessionSortAt.set(key, session.updatedAt)

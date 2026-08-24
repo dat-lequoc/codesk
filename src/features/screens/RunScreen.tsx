@@ -83,6 +83,7 @@ import { ThreadEvent } from '../thread/ThreadEvent'
 import { VirtualTimeline, virtualRowEstimate } from '../thread/VirtualTimeline'
 import { useThreadScroll } from '../../hooks/useThreadScroll'
 import { threadScrollKeyForRun } from '../../lib/keys'
+import { markSessionFinishSeen } from '../../lib/session-finish'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 export function RunScreen({
@@ -124,7 +125,14 @@ export function RunScreen({
   const lastEvent = events.at(-1)
   const { scroll, onScroll, startAtEnd, savedTop } = useThreadScroll(
     threadScrollKeyForRun(run),
-    `${events.length}:${lastEvent?.event_id ?? ''}:${lastEvent?.kind ?? ''}`,
+    `${events.length}:${lastEvent?.event_id ?? ''}:${lastEvent?.kind ?? ''}:${run.status}`,
+    {
+      ready: events.length > 0,
+      onAtEnd: () => {
+        if (active.has(run.status) || !run.sessionId) return
+        markSessionFinishSeen(`session:${run.hostId}:${run.provider}:${run.sessionId}`)
+      },
+    },
   )
   const projectHostId = project?.hostId
   const projectId = project?.id

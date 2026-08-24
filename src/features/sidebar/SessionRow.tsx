@@ -1,8 +1,10 @@
 import { memo } from 'react'
 import { Archive, Circle, Pin, PinOff } from 'lucide-react'
 import { Spinner } from '../../components/ui/spinner'
+import { useSessionFinishSeen } from '../../hooks/useSessionFinishSeen'
 import { cn } from '../../lib/cn'
 import { relative } from '../../lib/format'
+import { sessionNotificationKey } from '../../lib/keys'
 import { providerName } from '../../lib/providers'
 import type { ProviderSession } from '../../types'
 import { recentStatus, rowAffordance, rowMeta, rowTitle, sessionRow, unreadDot } from './row-styles'
@@ -27,6 +29,11 @@ export const SessionRow = memo(function SessionRow({
   onTogglePin: (session: ProviderSession) => Promise<void>
   onArchive: (session: ProviderSession) => void
 }) {
+  // The gateway keeps `stopped` for 45s after a run ends so this circle can
+  // surface a just-finished chat. Hide it as soon as the user has read to
+  // the bottom — waiting out the hold felt like the indicator was stuck.
+  const finishSeen = useSessionFinishSeen(sessionNotificationKey(session))
+  const justFinished = session.status === 'stopped' && !finishSeen
   return (
     <div className="group relative flex min-h-7 min-w-0">
       <button
@@ -51,11 +58,12 @@ export const SessionRow = memo(function SessionRow({
         >
           {session.status === 'running' ? (
             <Spinner />
-          ) : session.status === 'stopped' ? (
+          ) : justFinished ? (
             <Circle
               className="drop-shadow-[0_0_3px_#e54848]"
               size={7}
               fill="currentColor"
+              aria-label="Just finished"
             />
           ) : null}
         </span>
