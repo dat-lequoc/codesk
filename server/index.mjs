@@ -7,7 +7,22 @@ import { createMappers } from './mappers.mjs'
 import { createStateCache } from './state-cache.mjs'
 import { registerRoutes } from './routes.mjs'
 
-const app = express(); const server = http.createServer(app); const wss = new WebSocketServer({ server, path: '/ws' }); const store = new Store()
+// Only the Tauri webview and local dev servers are legitimate cross-origin
+// callers. A request with any other `Origin` is a page the user happened to
+// visit reaching a loopback port that can drive their agents, so it is refused
+// rather than merely denied a readable response. Callers with no `Origin` at
+// all — the desktop shell, scripts, tests — are not browsers and pass through.
+const allowedOrigin = (origin) =>
+  Boolean(origin) &&
+  (origin.startsWith('tauri://') ||
+    origin.startsWith('http://tauri.localhost') ||
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))
+
+const app = express(); const server = http.createServer(app); const store = new Store()
+// The same rule has to be enforced here separately: WebSocket handshakes are
+// exempt from CORS, so without this check any page could open /ws and read the
+// live event stream regardless of what the HTTP layer allows.
+const wss = new WebSocketServer({ server, path: '/ws', verifyClient: ({ origin }) => !origin || allowedOrigin(origin) })
 // Clients that stop reading accumulate frames in the ws send buffer without
 // bound. Skipping them instead of queueing is safe: the UI re-fetches state on
 // reconnect and polls periodically, so a dropped frame heals itself.
@@ -23,17 +38,13 @@ const gateway = new Gateway(store, broadcast)
 const mappers = createMappers(store)
 const stateCache = createStateCache({ store, gateway, broadcast, mappers })
 
-// Only the Tauri webview and local dev servers are legitimate cross-origin
-// callers. Reflecting `*` let any website the user visits read gateway state
-// and drive its mutating routes from the browser.
-const allowedOrigin = (origin) =>
-  Boolean(origin) &&
-  (origin.startsWith('tauri://') ||
-    origin.startsWith('http://tauri.localhost') ||
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))
 app.use((req, res, next) => {
   const origin = req.headers.origin
-  if (allowedOrigin(origin)) {
+  // Omitting the allow-origin header only stops the page from reading the
+  // reply; the request still ran. Mutating routes start agents and install
+  // daemons, so a foreign origin has to be turned away before that happens.
+  if (origin && !allowedOrigin(origin)) return res.status(403).json({ error: 'Cross-origin requests are not allowed' })
+  if (origin) {
     res.setHeader('Access-Control-Allow-Origin', origin)
     res.setHeader('Vary', 'Origin')
   }

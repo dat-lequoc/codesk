@@ -54,6 +54,7 @@ jobs:
       - run: node scripts/test-run-archive.mjs
       - run: node scripts/test-daemon-survival.mjs
       - run: node scripts/test-daemon-lifecycle.mjs
+      - run: node scripts/test-gateway-origin.mjs
       - run: node scripts/test-worktrees.mjs
       - run: node scripts/test-discovery.mjs
       - run: node scripts/test-drafts.mjs
