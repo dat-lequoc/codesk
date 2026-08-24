@@ -4,18 +4,23 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 
 import { cn } from '../../lib/cn'
 import { threadColumn } from './thread-column'
+
+export const virtualRowEstimate = 110
+
 export function VirtualTimeline<T>({
   items,
   scrollRef,
   itemKey,
   renderItem,
   before,
+  initialOffset,
 }: {
   items: T[]
   scrollRef: React.RefObject<HTMLDivElement | null>
   itemKey: (item: T) => string
   renderItem: (item: T) => React.ReactNode
   before?: React.ReactNode
+  initialOffset?: number
 }) {
   // Virtualize early: below the threshold every streamed token re-renders all
   // rows, and markdown rows are the most expensive thing in the app. The
@@ -30,7 +35,8 @@ export function VirtualTimeline<T>({
     enabled,
     getScrollElement: () => scrollRef.current,
     getItemKey: (index) => itemKey(items[index]),
-    estimateSize: () => 110,
+    estimateSize: () => virtualRowEstimate,
+    initialOffset,
     overscan: 8,
   })
   if (!enabled)

@@ -11,6 +11,8 @@ import {
   sessionKey,
   sessionNotificationKey,
   terminalNotificationTag,
+  threadScrollKeyForRun,
+  threadScrollKeyForSession,
 } from './keys'
 
 beforeEach(resetIds)
@@ -109,6 +111,25 @@ describe('notification keys', () => {
       nativeSessionId: 'native-1',
     })
     expect(runNotificationKeys(run)).toContain(sessionNotificationKey(session))
+  })
+
+  it('reuses the session scroll key for a run that belongs to one', () => {
+    const session = makeSession({
+      hostId: 'host-a',
+      provider: 'codex',
+      nativeSessionId: 'native-1',
+    })
+    const run = makeRun({
+      hostId: 'host-a',
+      provider: 'codex',
+      sessionId: 'native-1',
+    })
+    expect(threadScrollKeyForSession(session)).toBe(sessionNotificationKey(session))
+    expect(threadScrollKeyForRun(run)).toBe(threadScrollKeyForSession(session))
+  })
+
+  it('keeps an unattached run on its own scroll key', () => {
+    expect(threadScrollKeyForRun(makeRun({ id: 'run-1', sessionId: undefined }))).toBe('run:run-1')
   })
 
   it('tags a terminal notification per run and status, so each fires once', () => {

@@ -2,6 +2,8 @@ import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach, vi } from 'vitest'
 
+import { resetThreadScrollCache } from '../lib/thread-scroll'
+
 /**
  * Node 25 exposes its own experimental `localStorage` global, which shadows
  * jsdom's and is inert without `--localstorage-file`. The app reads and writes
@@ -61,5 +63,6 @@ if (!Element.prototype.scrollTo) {
 afterEach(() => {
   cleanup()
   localStorage.clear()
+  resetThreadScrollCache()
   vi.restoreAllMocks()
 })

@@ -31,5 +31,15 @@ export const runNotificationKeys = (run: Pick<Run, 'hostId' | 'id' | 'provider' 
   ...(run.sessionId ? [`session:${run.hostId}:${run.provider}:${run.sessionId}`] : []),
 ]
 
+/// Session and run screens remount independently; share a key when they are
+/// the same conversation so the last scroll position survives that switch too.
+export const threadScrollKeyForSession = sessionNotificationKey
+export const threadScrollKeyForRun = (
+  run: Pick<Run, 'hostId' | 'id' | 'provider' | 'sessionId'>,
+) =>
+  run.sessionId
+    ? `session:${run.hostId}:${run.provider}:${run.sessionId}`
+    : runEventNotificationKey(run.hostId, run.id)
+
 export const terminalNotificationTag = (runId: string, status: Run['status']) =>
   `run-status:${runId}:${status}`

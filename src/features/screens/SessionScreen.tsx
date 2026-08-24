@@ -67,6 +67,7 @@ import {
 } from '../../lib/kiro'
 import type { SlashSuggestion } from '../../lib/kiro'
 import { pendingQueue } from '../../lib/events'
+import { threadScrollKeyForSession } from '../../lib/keys'
 import { providerName } from '../../lib/providers'
 import { ProviderIcon } from '../../components/ProviderIcon'
 import type {
@@ -90,7 +91,8 @@ import { FilePreviewPanel } from '../dialogs/FilePreviewPanel'
 import { EnvironmentPopover, EnvironmentRow, TmuxDetails } from '../environment/Environment'
 import { ConversationMessage } from '../thread/Markdown'
 import { UsageCard } from '../thread/ThreadEvent'
-import { VirtualTimeline } from '../thread/VirtualTimeline'
+import { VirtualTimeline, virtualRowEstimate } from '../thread/VirtualTimeline'
+import { useThreadScroll } from '../../hooks/useThreadScroll'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 export function SessionScreen({
@@ -116,8 +118,6 @@ export function SessionScreen({
   onStarted: (run: Run) => void
   onError: (message: string) => void
 }) {
-  const scroll = useRef<HTMLDivElement>(null)
-  const following = useRef(true)
   const [showEnvironment, setShowEnvironment] = useState(false)
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [message, setMessage] = usePersistentComposerDraft(
@@ -364,20 +364,10 @@ export function SessionScreen({
   // follow-bottom keys on the tail's identity and content, not just length.
   const lastMessage = messages.at(-1)
   const followKey = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.text?.length ?? 0}`
-  useEffect(() => {
-    if (following.current)
-      requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }))
-  }, [followKey])
-  useEffect(() => {
-    const element = scroll.current
-    if (!element || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => {
-      if (!following.current) return
-      requestAnimationFrame(() => element.scrollTo({ top: element.scrollHeight }))
-    })
-    for (const child of element.children) observer.observe(child)
-    return () => observer.disconnect()
-  }, [session.hostId, session.id, timeline.length])
+  const { scroll, onScroll, startAtEnd, savedTop } = useThreadScroll(
+    threadScrollKeyForSession(session),
+    followKey,
+  )
   const openFile = (href: string) => {
     setSelectedActivityId(null)
     filePreview.open(href)
@@ -418,17 +408,13 @@ export function SessionScreen({
             (filePreview.preview || selectedActivity) && threadScrollFilePreview,
           )}
           ref={scroll}
-          onScroll={() => {
-            const element = scroll.current
-            if (element)
-              following.current =
-                element.scrollHeight - element.scrollTop - element.clientHeight < 100
-          }}
+          onScroll={onScroll}
         >
           {messages.length ? (
             <VirtualTimeline
               items={timeline}
               scrollRef={scroll}
+              initialOffset={startAtEnd ? timeline.length * virtualRowEstimate : savedTop}
               itemKey={(item) => item.id}
               renderItem={(item) =>
                 isHistoricalActivity(item) ? (

@@ -80,7 +80,9 @@ import { FilePreviewPanel } from '../dialogs/FilePreviewPanel'
 import { EnvironmentPopover, EnvironmentRow, TmuxDetails } from '../environment/Environment'
 import { ConversationMessage } from '../thread/Markdown'
 import { ThreadEvent } from '../thread/ThreadEvent'
-import { VirtualTimeline } from '../thread/VirtualTimeline'
+import { VirtualTimeline, virtualRowEstimate } from '../thread/VirtualTimeline'
+import { useThreadScroll } from '../../hooks/useThreadScroll'
+import { threadScrollKeyForRun } from '../../lib/keys'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 export function RunScreen({
@@ -114,17 +116,16 @@ export function RunScreen({
   )
   const [worktreeBusy, setWorktreeBusy] = useState(false)
   const [dialog, setDialog] = useState<AppDialogRequest | null>(null)
-  const scroll = useRef<HTMLDivElement>(null)
-  const following = useRef(true)
   const lastEscape = useRef(0)
   const submitting = useRef(false)
   const composerInput = useRef<HTMLTextAreaElement>(null)
   const [commandIndex, setCommandIndex] = useState(0)
   const filePreview = useFilePreview(run.hostId, run.cwd)
-  useEffect(() => {
-    if (following.current)
-      requestAnimationFrame(() => scroll.current?.scrollTo({ top: scroll.current.scrollHeight }))
-  }, [events.length])
+  const lastEvent = events.at(-1)
+  const { scroll, onScroll, startAtEnd, savedTop } = useThreadScroll(
+    threadScrollKeyForRun(run),
+    `${events.length}:${lastEvent?.event_id ?? ''}:${lastEvent?.kind ?? ''}`,
+  )
   const projectHostId = project?.hostId
   const projectId = project?.id
   useEffect(() => {
@@ -404,16 +405,12 @@ export function RunScreen({
             (filePreview.preview || selectedActivity) && threadScrollFilePreview,
           )}
           ref={scroll}
-          onScroll={() => {
-            const element = scroll.current
-            if (element)
-              following.current =
-                element.scrollHeight - element.scrollTop - element.clientHeight < 100
-          }}
+          onScroll={onScroll}
         >
           <VirtualTimeline
             items={displayItems}
             scrollRef={scroll}
+            initialOffset={startAtEnd ? displayItems.length * virtualRowEstimate : savedTop}
             itemKey={(item) => (isActivityGroup(item) ? item.id : item.event_id)}
             before={
               !hasUserEvents ? <ConversationMessage author="user" text={run.prompt} /> : undefined
