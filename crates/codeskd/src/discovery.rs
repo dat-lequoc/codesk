@@ -360,7 +360,10 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
     )
     .await;
     let tmux = TmuxManager::new(data_root.to_path_buf());
-    let panes = tmux.panes_with_extra(&extra_sockets).await.unwrap_or_default();
+    let panes = tmux
+        .panes_with_extra(&extra_sockets)
+        .await
+        .unwrap_or_default();
     let mut agents = Vec::new();
     for (root, members) in provider_process_roots(&candidates, &parents) {
         let pid = root.pid;

@@ -483,8 +483,8 @@ async fn input_external_session(
             .map_err(api_error)?;
         return Ok(Json(json!({"ok":true,"delivery":"steer"})));
     }
-    let project_id = project_id
-        .ok_or_else(|| api_error("project_id is required to queue the next turn"))?;
+    let project_id =
+        project_id.ok_or_else(|| api_error("project_id is required to queue the next turn"))?;
     let queued = ExternalQueuedInput {
         id: Uuid::new_v4().to_string(),
         pid,
@@ -548,9 +548,7 @@ async fn adopt_external_tmux(
 ) -> ApiResult<Json<serde_json::Value>> {
     let agent = external_agent(&state, pid).await.map_err(api_error)?;
     validate_tmux_request(&state, &agent, &request).map_err(api_error)?;
-    let pane = pane_for_agent(&state, &agent)
-        .await
-        .map_err(api_error)?;
+    let pane = pane_for_agent(&state, &agent).await.map_err(api_error)?;
     let now = chrono::Utc::now().to_rfc3339();
     let id = pane
         .control_id
@@ -689,9 +687,7 @@ async fn external_tmux_log(
     Query(query): Query<TmuxLogQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let agent = external_agent(&state, pid).await.map_err(api_error)?;
-    let pane = pane_for_agent(&state, &agent)
-        .await
-        .map_err(api_error)?;
+    let pane = pane_for_agent(&state, &agent).await.map_err(api_error)?;
     let lines = query.lines.unwrap_or(200).clamp(10, 2000);
     let text = state
         .tmux
@@ -768,13 +764,9 @@ fn transcript_path_for_agent(
         .native_session_id
         .as_deref()
         .context("the provider session id is still being discovered")?;
-    let project_id = project_id.context(
-        "the provider transcript is unknown; select the project so it can be resolved",
-    )?;
-    let project = state
-        .db
-        .project(project_id)?
-        .context("project not found")?;
+    let project_id = project_id
+        .context("the provider transcript is unknown; select the project so it can be resolved")?;
+    let project = state.db.project(project_id)?.context("project not found")?;
     let path = sessions::source_path(&project, &agent.provider, session_id)?;
     Ok(path.to_string_lossy().into_owned())
 }

@@ -35,7 +35,9 @@ pub(crate) use pi::index_pi;
 use agy::{agy_transcript_path, agy_workspace_paths, parse_agy_messages};
 use claude::{claude_project_directories, claude_user_text};
 use codex::{codex_rollout_matches_project, codex_rollout_path, parse_codex_history_event};
-use dsh::{dsh_project_directory, dsh_session_files, dsh_turn_active, dsh_values, parse_dsh_messages};
+use dsh::{
+    dsh_project_directory, dsh_session_files, dsh_turn_active, dsh_values, parse_dsh_messages,
+};
 
 const MAX_SESSIONS_PER_PROVIDER: usize = 50;
 /// Newest indexed sessions checked when a discovered process has to be matched to

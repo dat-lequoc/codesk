@@ -761,8 +761,12 @@ mod tests {
 
     #[test]
     fn searches_standard_tmux_socket_directories() {
-        let directories =
-            tmux_socket_directories(1000, Some("/custom"), Some("/var/folders/tmp"), Some("/run/user/1000"));
+        let directories = tmux_socket_directories(
+            1000,
+            Some("/custom"),
+            Some("/var/folders/tmp"),
+            Some("/run/user/1000"),
+        );
         assert!(directories.contains(&PathBuf::from("/custom/tmux-1000")));
         assert!(directories.contains(&PathBuf::from("/var/folders/tmp/tmux-1000")));
         assert!(directories.contains(&PathBuf::from("/run/user/1000/tmux-1000")));

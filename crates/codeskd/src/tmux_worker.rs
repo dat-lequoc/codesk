@@ -460,10 +460,7 @@ async fn adopt_existing_tmux_for_move(
     control: &TmuxControl,
 ) -> anyhow::Result<bool> {
     let agents = cached_agents(state, false).await.unwrap_or_default();
-    let Some(agent) = agents
-        .iter()
-        .find(|agent| agent.pid == control.source_pid)
-    else {
+    let Some(agent) = agents.iter().find(|agent| agent.pid == control.source_pid) else {
         return Ok(false);
     };
     let Some(pane_id) = agent.tmux_pane_id.as_deref() else {
@@ -471,11 +468,7 @@ async fn adopt_existing_tmux_for_move(
     };
     let panes = state.tmux.panes().await.unwrap_or_default();
     let Some(pane) = panes.into_iter().find(|pane| {
-        pane.pane_id == pane_id
-            && agent
-                .tty
-                .as_deref()
-                .is_none_or(|tty| pane.tty == tty)
+        pane.pane_id == pane_id && agent.tty.as_deref().is_none_or(|tty| pane.tty == tty)
     }) else {
         return Ok(false);
     };
@@ -483,8 +476,10 @@ async fn adopt_existing_tmux_for_move(
         .tmux
         .enable_control(&pane, &control.id, &control.provider)
         .await?;
-    let access =
-        tmux::access_command(pane.socket_path.as_deref().map(Path::new), &pane.session_name);
+    let access = tmux::access_command(
+        pane.socket_path.as_deref().map(Path::new),
+        &pane.session_name,
+    );
     let now = chrono::Utc::now().to_rfc3339();
     state.db.upsert_tmux_control(&TmuxControl {
         id: control.id.clone(),
@@ -501,10 +496,7 @@ async fn adopt_existing_tmux_for_move(
             .or_else(|| control.transcript_path.clone()),
         source_pid: agent.pid,
         source_pgid: agent.process_group_id,
-        cwd: agent
-            .cwd
-            .clone()
-            .unwrap_or_else(|| control.cwd.clone()),
+        cwd: agent.cwd.clone().unwrap_or_else(|| control.cwd.clone()),
         original_command: control.original_command.clone(),
         socket_path: pane.socket_path.clone(),
         pane_id: Some(pane.pane_id.clone()),
