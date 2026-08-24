@@ -501,9 +501,7 @@ export function SessionScreen({
               // not because detection failed — and there is nothing to move
               // into tmux, which is what "Not detected" invites you to try.
               emptyLabel={!attached && host?.status === 'online' ? 'No live process' : undefined}
-              note={
-                !attached && canResume ? 'Sending resumes this conversation' : undefined
-              }
+              note={!attached && canResume ? 'Sending resumes this conversation' : undefined}
             />
           </EnvironmentPopover>
         )}
@@ -694,16 +692,10 @@ export function SessionScreen({
               </small>
               <button
                 type="submit"
-                className={cn(
-                  sendButton,
-                  sendButtonSmall,
-                  canResume && 'w-auto gap-1.5 px-2.5',
-                )}
+                className={cn(sendButton, sendButtonSmall, canResume && 'w-auto gap-1.5 px-2.5')}
                 aria-label={canResume ? 'Resume conversation' : 'Send message'}
                 disabled={!message.trim() || busy}
-                title={
-                  canQueue ? 'Steer now (Tab queues instead)' : 'Continue conversation'
-                }
+                title={canQueue ? 'Steer now (Tab queues instead)' : 'Continue conversation'}
               >
                 {busy ? <RefreshCw className="animate-spin" size={15} /> : <Send size={17} />}
                 {canResume ? 'Resume' : null}

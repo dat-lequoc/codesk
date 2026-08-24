@@ -460,14 +460,10 @@ export function Sidebar({
         <button
           className={cn(iconButton, 'relative')}
           title={
-            unreadCount
-              ? `${unreadCount} unread agent updates — click to open`
-              : 'Notifications'
+            unreadCount ? `${unreadCount} unread agent updates — click to open` : 'Notifications'
           }
           aria-label={
-            unreadCount
-              ? `${unreadCount} unread agent updates — click to open`
-              : 'Notifications'
+            unreadCount ? `${unreadCount} unread agent updates — click to open` : 'Notifications'
           }
           onClick={unreadCount ? onJumpToUnread : onArchives}
         >

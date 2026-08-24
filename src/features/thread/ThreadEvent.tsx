@@ -581,13 +581,7 @@ export const ThreadEvent = memo(function ThreadEvent({
     )
   if (event.kind === 'input.required' && rpcId !== undefined && rpcId !== null)
     return (
-      <InputRequestCard
-        event={event}
-        run={run}
-        rpcId={rpcId}
-        resolved={resolved}
-        text={text}
-      />
+      <InputRequestCard event={event} run={run} rpcId={rpcId} resolved={resolved} text={text} />
     )
   if (event.kind === 'user.message')
     return (

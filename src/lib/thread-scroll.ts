@@ -23,10 +23,9 @@ const readStorage = () => {
     const value = JSON.parse(localStorage.getItem(threadScrollStorageKey) || '{}')
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).filter((entry): entry is [
-        string,
-        ThreadScrollPosition,
-      ] => isPosition(entry[1])),
+      Object.entries(value as Record<string, unknown>).filter(
+        (entry): entry is [string, ThreadScrollPosition] => isPosition(entry[1]),
+      ),
     )
   } catch {
     return {}

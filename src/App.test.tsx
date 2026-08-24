@@ -322,13 +322,10 @@ describe('App · reading and selection', () => {
     localStorage.setItem('codesk.unread-notifications:v1', JSON.stringify(['run:run-other']))
     serve(baseState({ runs: [open, other] }))
     await mount()
-    await userEvent.click(
-      await screen.findByLabelText('1 unread agent updates — click to open'),
-    )
+    await userEvent.click(await screen.findByLabelText('1 unread agent updates — click to open'))
     await waitFor(() => expect(unreadKeys()).toEqual([]))
     expect(screen.getByTestId('run-screen')).toHaveTextContent('Background run')
   })
-
 
   it('clears the unread mark on the open run when the window regains focus', async () => {
     vi.mocked(document.hasFocus).mockReturnValue(false)

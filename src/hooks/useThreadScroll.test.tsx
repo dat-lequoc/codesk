@@ -19,7 +19,8 @@ function Scroller({
   return <div data-testid="scroller" ref={scroll} onScroll={onScroll} />
 }
 
-const nextFrame = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+const nextFrame = () =>
+  act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
 
 const size = (element: HTMLElement, height: number, view: number) => {
   Object.defineProperty(element, 'scrollHeight', { configurable: true, value: height })

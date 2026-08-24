@@ -66,9 +66,7 @@ export const reconcileUnreadKeys = (current: Set<string>, state: AppState) => {
     }
     const run = runsByKey.get(key)
     if (!run) continue
-    const resolved = run.sessionId
-      ? `session:${run.hostId}:${run.provider}:${run.sessionId}`
-      : key
+    const resolved = run.sessionId ? `session:${run.hostId}:${run.provider}:${run.sessionId}` : key
     if (!archivedNotificationKeys.has(resolved)) next.add(resolved)
   }
   return next

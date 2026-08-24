@@ -521,9 +521,7 @@ export function App() {
           // a ghost badge nothing in the sidebar explains.
           const stale: string[] = []
           for (const key of unreadKeys) {
-            const unreadSession = allSessions.find(
-              (item) => sessionNotificationKey(item) === key,
-            )
+            const unreadSession = allSessions.find((item) => sessionNotificationKey(item) === key)
             if (unreadSession) {
               readSession(unreadSession)
               selectSession(unreadSession)

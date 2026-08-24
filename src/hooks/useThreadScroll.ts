@@ -31,8 +31,7 @@ type ThreadScrollOptions = {
   onAtEnd?: () => void
 }
 
-const hasLaidOut = (element: HTMLElement) =>
-  element.scrollHeight > 0 || element.clientHeight > 0
+const hasLaidOut = (element: HTMLElement) => element.scrollHeight > 0 || element.clientHeight > 0
 
 export function useThreadScroll(key: string, contentKey: string, options?: ThreadScrollOptions) {
   const scroll = useRef<HTMLDivElement>(null)

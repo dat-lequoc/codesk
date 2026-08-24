@@ -21,7 +21,8 @@ export function InputRequestDialog({
   const [values, setValues] = useState<Record<string, string>>({})
   const submit = () => {
     const answers: Record<string, { answers: string[] }> = {}
-    for (const question of questions) answers[question.id] = { answers: [values[question.id] || ''] }
+    for (const question of questions)
+      answers[question.id] = { answers: [values[question.id] || ''] }
     onSubmit(answers)
     onClose()
   }

@@ -30,16 +30,9 @@ export const RunRow = memo(function RunRow({
         onClick={() => onSelect(run)}
       >
         <span
-          className={cn(
-            recentStatus,
-            active.has(run.status) ? 'text-grass-400' : 'text-muted',
-          )}
+          className={cn(recentStatus, active.has(run.status) ? 'text-grass-400' : 'text-muted')}
         >
-          {active.has(run.status) ? (
-            <Spinner />
-          ) : (
-            <Circle size={7} fill="currentColor" />
-          )}
+          {active.has(run.status) ? <Spinner /> : <Circle size={7} fill="currentColor" />}
         </span>
         <span className={rowTitle}>
           <SidebarHarness provider={run.provider} />

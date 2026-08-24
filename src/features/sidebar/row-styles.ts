@@ -2,8 +2,7 @@ import type { StatusTone } from '../../components/ui/status-dot'
 
 /* Shared row styles. Values mirror the computed styles of the stylesheet this
    replaced, so density is unchanged; the names now say what each row is. */
-export const rowTitle =
-  'flex min-w-0 flex-1 items-center gap-1 overflow-hidden whitespace-nowrap'
+export const rowTitle = 'flex min-w-0 flex-1 items-center gap-1 overflow-hidden whitespace-nowrap'
 export const rowMeta = 'max-w-[44px] shrink-0 truncate text-[9px] text-muted'
 export const recentStatus = 'grid w-[11px] shrink-0 place-items-center [&>svg]:max-w-[10px]'
 export const unreadDot =

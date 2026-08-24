@@ -518,7 +518,8 @@ export function RunScreen({
                             : undefined,
                           confirmLabel: 'Remove',
                           danger: true,
-                          action: () => api.removeWorktree(run.hostId, run.worktreeId!, status.dirty),
+                          action: () =>
+                            api.removeWorktree(run.hostId, run.worktreeId!, status.dirty),
                         })
                       } catch (cause) {
                         onError(cause instanceof Error ? cause.message : String(cause))
