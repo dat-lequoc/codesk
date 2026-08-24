@@ -327,6 +327,7 @@ export class Gateway {
   async installRemote(hostId, artifactUrl, { reconnect = true } = {}) {
     const host=this.host(hostId); if(!host||host.type!=='ssh') throw new Error('SSH host not found')
     if(!artifactUrl) throw new Error('A codeskd artifact URL is required until release artifacts are configured')
+    assertReleaseArtifactUrl(artifactUrl)
     const command=`set -eu; tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT; curl -fL ${shellQuote(artifactUrl)} -o "$tmp"; chmod +x "$tmp"; "$tmp" install ${Number(host.daemonPort||4243)}`
     const {stdout,stderr}=await execFileAsync('ssh',[...sshOptions,host.sshAlias,remoteShell(command)],{timeout:60000,maxBuffer:1024*1024})
     if (reconnect) this.reconnect(hostId)
@@ -449,6 +450,19 @@ function localArtifactFor(inspection){
 // Release assets are named after each platform's native `uname -m`:
 // codeskd-Darwin-arm64 and codeskd-Linux-aarch64. Normalizing both spellings
 // to aarch64 made every Darwin arm64 download 404.
+// The install command curls this URL and executes what comes back, as the
+// remote user, on every configured host. The release channel the operator
+// configured is the only thing that earns that, so an artifact URL supplied
+// by an API caller has to live under it.
+export function assertReleaseArtifactUrl(artifactUrl){
+  const base=process.env.CODESK_DAEMON_RELEASE_BASE_URL
+  if(!base)throw new Error('Installing codeskd from a URL requires CODESK_DAEMON_RELEASE_BASE_URL. Codesk copies a local or peer binary over SSH instead.')
+  let parsed
+  try{parsed=new URL(artifactUrl)}catch{throw new Error('The codeskd artifact must be an absolute URL')}
+  if(parsed.protocol!=='https:'&&parsed.protocol!=='http:')throw new Error('The codeskd artifact must be served over HTTP(S)')
+  const prefix=`${base.replace(/\/$/,'')}/`
+  if(!parsed.href.startsWith(prefix))throw new Error(`The codeskd artifact must come from ${prefix}`)
+}
 function releaseArtifactUrl(inspection){
   const base=process.env.CODESK_DAEMON_RELEASE_BASE_URL
   if(!base)return ''

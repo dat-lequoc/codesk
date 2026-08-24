@@ -28,14 +28,15 @@ use axum::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{StatusCode, header},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{delete, get, post},
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::{
@@ -219,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/runs/{id}/kill", post(kill))
         .route("/v1/events", get(events))
         .route("/v1/events/ws", get(events_ws))
-        .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(refuse_browser_callers))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     let port: u16 = env::var("CODESK_PORT")
@@ -231,6 +232,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%address,"codeskd listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// The daemon's only callers are the gateway and the desktop shell, neither of
+/// which is a browser. An `Origin` header therefore means a page the user
+/// happened to visit reached the loopback port, and these routes start
+/// processes and read files. The previous permissive CORS layer actively
+/// handed such a page the responses.
+async fn refuse_browser_callers(
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    if request.headers().contains_key(header::ORIGIN) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<Health> {

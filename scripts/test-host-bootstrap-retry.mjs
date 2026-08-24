@@ -6,7 +6,24 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Store } from '../server/store.mjs'
-import { Gateway } from '../server/gateway.mjs'
+import { Gateway, assertReleaseArtifactUrl } from '../server/gateway.mjs'
+
+// The URL install path curls and executes its artifact on the remote host, so
+// only the configured release channel may supply one.
+const refuses = (artifactUrl, because) => {
+  try { assertReleaseArtifactUrl(artifactUrl) } catch { return }
+  throw new Error(`an artifact URL ${because} was accepted: ${artifactUrl}`)
+}
+delete process.env.CODESK_DAEMON_RELEASE_BASE_URL
+refuses('https://releases.example/codeskd-Linux-aarch64', 'with no release channel configured')
+process.env.CODESK_DAEMON_RELEASE_BASE_URL = 'https://releases.example/v1'
+refuses('https://evil.example/payload', 'from another origin')
+refuses('https://releases.example/v1-evil/payload', 'that only prefix-matches the channel')
+refuses('file:///etc/passwd', 'with a non-HTTP scheme')
+refuses('not a url', 'that is not absolute')
+assertReleaseArtifactUrl('https://releases.example/v1/codeskd-Linux-aarch64')
+delete process.env.CODESK_DAEMON_RELEASE_BASE_URL
+console.log('ok - codeskd artifact installs are confined to the configured release channel')
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'codesk-retry-'))
 const store = new Store(path.join(temp, 'data'))
