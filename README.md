@@ -126,7 +126,7 @@ On a built macOS or Linux execution host:
 codeskd install 4243
 ```
 
-The daemon binds to loopback and is reached through SSH forwarding.
+The daemon binds to loopback and is reached through SSH forwarding. Every route except `/v1/health` requires the token it writes to its data directory at mode 0600, so API access follows from being able to read that file — see [Security](./SECURITY.md).
 
 ## More
 
