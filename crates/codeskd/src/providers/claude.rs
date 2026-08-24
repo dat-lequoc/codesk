@@ -115,4 +115,149 @@ impl ProviderAdapter for Claude {
     fn transcript_turn_active(&self, path: &Path) -> bool {
         sessions::transcript_turn_active(path, DESCRIPTOR.id)
     }
+
+    fn terminal_ready(&self, screen: &str) -> bool {
+        !claude_input_blocked(screen)
+    }
+
+    fn terminal_input_blocked(&self, screen: &str) -> Option<bool> {
+        Some(claude_input_blocked(screen))
+    }
+}
+
+/// Claude's interactive TUI accepts a paste only at an idle composer.
+///
+/// The transcript is a poor gate here: compact and other TUI-only work write a
+/// `user` record (or nothing classifiable), so the queue either fires into a
+/// busy screen — the prompt vanishes — or waits forever after `/compact`.
+/// The visible pane is the source of truth.
+fn claude_input_blocked(screen: &str) -> bool {
+    let tail: Vec<&str> = screen.lines().rev().take(20).collect();
+    if tail.iter().any(|line| {
+        line.contains("Compacting conversation")
+            || line.contains('▰')
+            || line.contains('▱')
+            // Idle Claude omits this; a live turn and compact both show it.
+            || line.contains("esc to interrupt")
+    }) {
+        return true;
+    }
+    if tail.iter().any(|line| claude_status_working(line)) {
+        return true;
+    }
+    !tail.iter().any(|line| {
+        let trimmed = line.trim();
+        trimmed == "❯" || trimmed.starts_with('❯')
+    })
+}
+
+fn claude_status_working(line: &str) -> bool {
+    let trimmed = line.trim();
+    let spinner = trimmed.starts_with('✻') || trimmed.starts_with('✶') || trimmed.starts_with('●');
+    if !spinner || trimmed.contains("Remote Control") || claude_finished_status(trimmed) {
+        return false;
+    }
+    true
+}
+
+/// `✻ Baked for 7m 58s` / `✻ Brewed for 12s` is the completed-turn footer,
+/// not an in-progress spinner.
+fn claude_finished_status(line: &str) -> bool {
+    let rest = line.trim_start_matches(['✻', '✶', '●', ' ']);
+    rest.split_once(" for ")
+        .is_some_and(|(_, duration)| duration.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ADAPTER, claude_input_blocked};
+    use crate::providers::ProviderAdapter;
+
+    const IDLE: &str = "\
+all four PRs are merged and verified in production.
+
+✻ Baked for 7m 58s
+
+※ recap: Goal was fixing ReadFluent reader bugs.
+
+● Remote Control not started here · another Claude Code on this machine
+  (started 2h ago) already has Remote Control for this conversation
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+";
+
+    const WORKING: &str = "\
+❯ https://example.test/bundle.zip: check this
+
+● I'll download and go through it.
+
+· Whatchamacalliting… (4s · ↓ 48 tokens)
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+";
+
+    const COMPACTING: &str = "\
+✻ Baked for 7m 58s
+
+❯ /compact
+
+✻ Compacting conversation… (1m 23s)
+  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 60%
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+";
+
+    const STARTUP: &str = "\
+Claude Code
+
+Loading previous session…
+";
+
+    const POST_COMPACT: &str = "\
+✻ Brewed for 7m 58s
+
+❯ /compact
+  ⎿  Compacted (ctrl+o to see full summary)
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+";
+
+    #[test]
+    fn idle_composer_accepts_input() {
+        assert!(!claude_input_blocked(IDLE));
+        assert!(!claude_input_blocked(POST_COMPACT));
+        assert!(ADAPTER.terminal_ready(IDLE));
+        assert_eq!(ADAPTER.terminal_input_blocked(IDLE), Some(false));
+    }
+
+    #[test]
+    fn live_turn_blocks_input() {
+        assert!(claude_input_blocked(WORKING));
+        assert!(!ADAPTER.terminal_ready(WORKING));
+    }
+
+    #[test]
+    fn compacting_blocks_input() {
+        assert!(claude_input_blocked(COMPACTING));
+        assert!(!ADAPTER.terminal_ready(COMPACTING));
+        assert_eq!(ADAPTER.terminal_input_blocked(COMPACTING), Some(true));
+    }
+
+    #[test]
+    fn startup_without_composer_blocks_input() {
+        assert!(claude_input_blocked(STARTUP));
+        assert!(!ADAPTER.terminal_ready(STARTUP));
+    }
 }

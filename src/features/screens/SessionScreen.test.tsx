@@ -2,8 +2,9 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { Provider, ProviderSession, SessionMessage } from '../../types'
+import type { Provider, ProviderSession, RunEvent, SessionMessage } from '../../types'
 import {
+  makeEvent,
   makeHost,
   makeMessage,
   makeProject,
@@ -20,6 +21,7 @@ vi.mock('../../api', () => ({
     externalSessionInput: vi.fn(),
     externalSessionQueue: vi.fn(),
     removeExternalQueued: vi.fn(),
+    removeQueued: vi.fn(),
     resumeSession: vi.fn(),
     adoptExternalTmux: vi.fn(),
     moveExternalToTmux: vi.fn(),
@@ -52,12 +54,13 @@ const mount = (
   session: ProviderSession,
   messages: SessionMessage[] = [],
   provider: Provider = makeProvider(),
+  runEvents: RunEvent[] = [],
 ) =>
   render(
     <SessionScreen
       session={session}
       messages={messages}
-      runEvents={[]}
+      runEvents={runEvents}
       project={project}
       host={host}
       provider={provider}
@@ -153,6 +156,17 @@ describe('SessionScreen · steering an attached session', () => {
     )
   })
 
+  it('queues a managed run through the run input API', async () => {
+    vi.mocked(api.input).mockResolvedValue({ ok: true })
+    mount(controlled({ managedRunId: 'run-managed' }))
+    await userEvent.type(composer(), 'after compact')
+    await userEvent.click(screen.getByRole('button', { name: 'Queue' }))
+    await waitFor(() =>
+      expect(api.input).toHaveBeenCalledWith('host-local', 'run-managed', 'after compact', 'queue'),
+    )
+    expect(api.externalSessionInput).not.toHaveBeenCalled()
+  })
+
   it('reports a send failure', async () => {
     vi.mocked(api.externalSessionInput).mockRejectedValue(new Error('tmux pane is gone'))
     mount(controlled())
@@ -236,6 +250,22 @@ describe('SessionScreen · taking control of a terminal session', () => {
 })
 
 describe('SessionScreen · queued prompts', () => {
+  it('lists a managed run queue from run events', () => {
+    mount(
+      controlled({ managedRunId: 'run-managed' }),
+      [],
+      makeProvider(),
+      [
+        makeEvent({
+          kind: 'queue.added',
+          payload: { queue_id: 'q-run', text: 'after compact' },
+        }),
+      ],
+    )
+    expect(screen.getByText('1 queued')).toBeInTheDocument()
+    expect(screen.getByText(/after compact/)).toBeInTheDocument()
+  })
+
   it('lists what the harness has not picked up yet', async () => {
     vi.mocked(api.externalSessionQueue).mockResolvedValue([
       { id: 'q1', pid: 4242, message: 'second thing', status: 'queued' },

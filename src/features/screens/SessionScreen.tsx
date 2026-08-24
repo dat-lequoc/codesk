@@ -66,6 +66,7 @@ import {
   kiroSuggestionLimit,
 } from '../../lib/kiro'
 import type { SlashSuggestion } from '../../lib/kiro'
+import { pendingQueue } from '../../lib/events'
 import { providerName } from '../../lib/providers'
 import { ProviderIcon } from '../../components/ProviderIcon'
 import type {
@@ -131,6 +132,11 @@ export function SessionScreen({
   if (moving && (session.tmuxName || session.tmuxControlled)) setMoving(false)
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
   const hasQueued = queued.length > 0
+  // Managed runs persist the queue on the run journal, not the external-session
+  // table. Without this the composer clears and nothing on the thread explains
+  // that the next prompt is waiting — which is what "Queue does nothing" looks
+  // like while Claude is compacting or otherwise busy.
+  const managedQueued = useMemo(() => pendingQueue(runEvents), [runEvents])
   const onStartedRef = useLatest(onStarted)
   const submitting = useRef(false)
   const composerInput = useRef<HTMLTextAreaElement>(null)
@@ -583,19 +589,28 @@ export function SessionScreen({
               onSelect={setCommandIndex}
               onChoose={chooseCommand}
             />
-            {queued.length > 0 && (
+            {(session.managedRunId ? managedQueued.length > 0 : queued.length > 0) && (
               <div className={queuePanel}>
                 <header>
                   <ListPlus size={13} />
                   <strong>
-                    {
-                      queued.filter((item) => item.status === 'queued' || item.status === 'sending')
-                        .length
-                    }{' '}
+                    {session.managedRunId
+                      ? managedQueued.length
+                      : queued.filter(
+                          (item) => item.status === 'queued' || item.status === 'sending',
+                        ).length}{' '}
                     queued
                   </strong>
                 </header>
-                {queued.map((item) => (
+                {(session.managedRunId
+                  ? managedQueued.map((item) => ({
+                      id: item.id,
+                      message: item.message,
+                      status: item.error ? 'failed' : 'queued',
+                      error: item.error,
+                    }))
+                  : queued
+                ).map((item) => (
                   <div key={item.id} className={item.status === 'failed' ? 'failed' : ''}>
                     <span title={item.error || item.message}>
                       {item.message}
@@ -607,11 +622,16 @@ export function SessionScreen({
                             ? ` · ${item.error}`
                             : ''}
                     </span>
-                    {queuePid && (
+                    {(session.managedRunId || queuePid) && (
                       <button
                         type="button"
                         title="Remove queued prompt"
                         onClick={async () => {
+                          if (session.managedRunId) {
+                            await api.removeQueued(session.hostId, session.managedRunId, item.id)
+                            return
+                          }
+                          if (!queuePid) return
                           await api.removeExternalQueued(session.hostId, queuePid, item.id)
                           setQueued((items) =>
                             items.filter((candidate) => candidate.id !== item.id),

@@ -146,13 +146,16 @@ pub(crate) async fn tmux_control_worker(state: Arc<AppState>) {
 /// Whether this control has work the fast cadence can actually advance.
 ///
 /// `waiting_idle` runs a state machine with a sub-second threshold, so it always
-/// qualifies. An `active` control only qualifies once it has a transcript to read
-/// from: without one [`process_tmux_queue`] returns before doing anything, so
-/// polling it three times a second only spawns `tmux` to no purpose.
+/// qualifies. An `active` control only qualifies once it has a transcript to
+/// read or a TUI-ready gate (Claude) — without one [`process_tmux_queue`]
+/// returns before doing anything, so polling it three times a second only
+/// spawns `tmux` to no purpose.
 fn is_serviceable(control: &TmuxControl) -> bool {
     match control.status.as_str() {
         "waiting_idle" => true,
-        "active" => control.transcript_path.is_some(),
+        "active" => {
+            control.transcript_path.is_some() || providers::gates_terminal_input(&control.provider)
+        }
         _ => false,
     }
 }
@@ -367,10 +370,20 @@ async fn process_tmux_queue(
             return Ok(());
         }
     };
-    if control.transcript_path.is_none() {
+    // Claude (and any adapter that gates on the TUI) can deliver without a
+    // transcript; the others still need one to know when a turn is idle.
+    if control.transcript_path.is_none() && !providers::gates_terminal_input(&control.provider) {
         return Ok(());
     }
-    let active = control_turn_active(control);
+    let screen = if providers::gates_terminal_input(&control.provider) {
+        state.tmux.capture_text(&pane).await.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let active = match providers::terminal_input_blocked(&control.provider, &screen) {
+        Some(blocked) => blocked,
+        None => control_turn_active(control),
+    };
     if let Some(run_id) = control.run_id.as_deref() {
         let _ = state.db.update_run_status(
             run_id,
@@ -639,6 +652,17 @@ mod tests {
                 .map(|session| session.native_session_id.as_str()),
             Some("new-session")
         );
+    }
+
+    #[test]
+    fn claude_controls_are_serviceable_without_a_transcript() {
+        let mut control = tmux_control();
+        control.provider = "claude".into();
+        control.status = "active".into();
+        control.transcript_path = None;
+        assert!(is_serviceable(&control));
+        control.provider = "codex".into();
+        assert!(!is_serviceable(&control));
     }
 
     #[test]

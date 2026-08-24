@@ -100,6 +100,14 @@ pub(crate) trait ProviderAdapter: Sync {
         true
     }
 
+    /// When `Some`, the tmux queue uses the visible pane instead of the
+    /// transcript to decide whether the harness can accept the next prompt.
+    /// `None` keeps the transcript-only gate used by Codex and the other
+    /// adapters that do not implement a TUI ready check.
+    fn terminal_input_blocked(&self, _screen: &str) -> Option<bool> {
+        None
+    }
+
     /// A command that the harness renders in its own terminal UI instead of the
     /// conversation transcript. Codesk captures the pane afterwards so the run
     /// still gets an event, and dismisses the overlay so the pane stays
@@ -274,6 +282,14 @@ pub(crate) fn keep_terminal_parent_shell(provider: &str) -> bool {
 
 pub(crate) fn terminal_ready(provider: &str, screen: &str) -> bool {
     get(provider).is_none_or(|adapter| adapter.terminal_ready(screen))
+}
+
+pub(crate) fn terminal_input_blocked(provider: &str, screen: &str) -> Option<bool> {
+    get(provider).and_then(|adapter| adapter.terminal_input_blocked(screen))
+}
+
+pub(crate) fn gates_terminal_input(provider: &str) -> bool {
+    get(provider).is_some_and(|adapter| adapter.terminal_input_blocked("").is_some())
 }
 
 pub(crate) fn terminal_overlay_command(provider: &str, message: &str) -> Option<&'static str> {
