@@ -196,6 +196,7 @@ describe('normalizeState', () => {
     expect(settings.archivedRunKeys).toEqual([])
     expect(settings.hiddenAgentKeys).toEqual([])
     expect(settings.notifications).toBe(true)
+    expect(settings.theme).toBe('system')
   })
 
   it('preserves notifications when explicitly disabled', () => {

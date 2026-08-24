@@ -139,6 +139,7 @@ export const makeState = (overrides: Partial<AppState> = {}): AppState => ({
   providersByHost: {},
   discoveredAgentsByHost: {},
   settings: {
+    theme: 'system',
     notifications: true,
     pinnedSessionKeys: [],
     pinnedSessions: [],

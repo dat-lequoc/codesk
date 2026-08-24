@@ -139,6 +139,20 @@ describe('SessionScreen · steering an attached session', () => {
     )
   })
 
+  it('queues from the Queue button', async () => {
+    vi.mocked(api.externalSessionInput).mockResolvedValue({ ok: true, delivery: 'queue' })
+    mount(controlled())
+    await userEvent.type(composer(), 'after this turn')
+    await userEvent.click(screen.getByRole('button', { name: 'Queue' }))
+    await waitFor(() =>
+      expect(api.externalSessionInput).toHaveBeenCalledWith(
+        expect.anything(),
+        'after this turn',
+        'queue',
+      ),
+    )
+  })
+
   it('reports a send failure', async () => {
     vi.mocked(api.externalSessionInput).mockRejectedValue(new Error('tmux pane is gone'))
     mount(controlled())
@@ -154,7 +168,7 @@ describe('SessionScreen · resuming a detached session', () => {
     vi.mocked(api.resumeSession).mockResolvedValue(run)
     mount(makeSession({ id: 'session-a', status: 'idle' }))
     await userEvent.type(composer(), 'pick this back up')
-    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Resume conversation' }))
     await waitFor(() => expect(onStarted).toHaveBeenCalledWith(run))
   })
 
@@ -181,6 +195,31 @@ describe('SessionScreen · taking control of a terminal session', () => {
     mount(makeSession({ id: 'session-a', pid: 4242, tmuxName: 'codesk-a' }))
     await userEvent.click(screen.getByRole('button', { name: /Enable control/ }))
     await waitFor(() => expect(api.adoptExternalTmux).toHaveBeenCalled())
+  })
+
+  it('adopts then steers when the pane is known but not yet controlled', async () => {
+    vi.mocked(api.adoptExternalTmux).mockResolvedValue({
+      ok: true,
+      tmux_name: 'codesk-a',
+      tmux_access_command: 'tmux attach-session -t codesk-a',
+    })
+    vi.mocked(api.externalSessionInput).mockResolvedValue({ ok: true, delivery: 'steer' })
+    mount(
+      makeSession({
+        id: 'session-a',
+        pid: 4242,
+        tmuxName: 'codesk-a',
+        tmuxAccessCommand: 'tmux attach-session -t codesk-a',
+      }),
+    )
+    await userEvent.type(composer(), 'keep going')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(api.adoptExternalTmux).toHaveBeenCalled())
+    expect(api.externalSessionInput).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'session-a' }),
+      'keep going',
+      'steer',
+    )
   })
 
   it('reports a failure to take control', async () => {
@@ -232,10 +271,51 @@ describe('SessionScreen · queued prompts', () => {
 
 describe('SessionScreen · environment', () => {
   it('describes where the session is running', async () => {
-    mount(controlled())
+    mount(
+      controlled({
+        tmuxAccessCommand: 'tmux attach-session -t codesk-a',
+      }),
+    )
     await userEvent.click(screen.getByRole('button', { name: /Environment/ }))
     const panel = screen.getByText('Project').closest('div')!.parentElement!
     expect(within(panel).getByText('codesk')).toBeInTheDocument()
     expect(within(panel).getByText('This Mac')).toBeInTheDocument()
+    expect(within(panel).getByText('codesk-a')).toBeInTheDocument()
+    expect(within(panel).getByText('tmux attach-session -t codesk-a')).toBeInTheDocument()
+    expect(within(panel).queryByText('On host')).not.toBeInTheDocument()
+  })
+
+  it('shows the on-host tmux command for a remote session', async () => {
+    const remote = makeHost({
+      id: 'host-kortix',
+      name: 'kortix-prod',
+      type: 'ssh',
+      sshAlias: 'kortix-prod',
+    })
+    const hostCommand =
+      'tmux -S /root/.local/share/codesk/tmux/codesk.sock attach-session -t codesk-codex-4c92e1d5'
+    render(
+      <SessionScreen
+        session={controlled({
+          hostId: remote.id,
+          tmuxName: 'codesk-codex-4c92e1d5',
+          tmuxAccessCommand: `ssh -t 'kortix-prod' '${hostCommand}'`,
+          tmuxHostAccessCommand: hostCommand,
+        })}
+        messages={[]}
+        runEvents={[]}
+        project={project}
+        host={remote}
+        provider={makeProvider()}
+        onStarted={onStarted}
+        onError={onError}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /Environment/ }))
+    const panel = screen.getByText('Project').closest('div')!.parentElement!
+    expect(within(panel).getByText('kortix-prod')).toBeInTheDocument()
+    expect(within(panel).getByText('Access')).toBeInTheDocument()
+    expect(within(panel).getByText('On host')).toBeInTheDocument()
+    expect(within(panel).getByText(hostCommand)).toBeInTheDocument()
   })
 })

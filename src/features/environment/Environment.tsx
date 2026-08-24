@@ -53,39 +53,66 @@ export function EnvironmentRow({
 }
 
 const tmuxRow =
-  'grid min-w-0 grid-cols-[15px_43px_minmax(0,1fr)_auto] items-center gap-[5px] text-[9px] text-muted'
+  'grid min-w-0 grid-cols-[15px_48px_minmax(0,1fr)_auto] items-center gap-[5px] text-[9px] text-muted'
 const tmuxValue = 'min-w-0 truncate font-mono text-[10px] leading-tight text-fg-soft'
 
-export function TmuxDetails({ name, command }: { name?: string | null; command?: string | null }) {
-  if (!name && !command) return null
+function TmuxCommandRow({
+  label,
+  command,
+  copyLabel,
+}: {
+  label: string
+  command: string
+  copyLabel: string
+}) {
   return (
-    <div className="flex min-w-0 flex-col gap-[5px]">
-      {name && (
-        <div className={tmuxRow}>
-          <Terminal size={14} />
-          <span>tmux</span>
-          <strong className={tmuxValue}>{name}</strong>
-        </div>
-      )}
-      {command && (
-        <div className={tmuxRow}>
-          <Copy size={14} />
-          <span>Access</span>
-          <code className={cn(tmuxValue, 'block')} title={command}>
-            {command}
-          </code>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="size-[23px] rounded-sm"
-            title="Copy tmux access command"
-            aria-label="Copy tmux access command"
-            onClick={() => void navigator.clipboard.writeText(command)}
-          >
-            <Copy size={13} />
-          </Button>
-        </div>
-      )}
+    <div className={tmuxRow}>
+      <Copy size={14} />
+      <span>{label}</span>
+      <code className={cn(tmuxValue, 'block')} title={command}>
+        {command}
+      </code>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="size-[23px] rounded-sm"
+        title={copyLabel}
+        aria-label={copyLabel}
+        onClick={() => void navigator.clipboard.writeText(command)}
+      >
+        <Copy size={13} />
+      </Button>
+    </div>
+  )
+}
+
+export function TmuxDetails({
+  name,
+  command,
+  hostCommand,
+}: {
+  name?: string | null
+  command?: string | null
+  hostCommand?: string | null
+}) {
+  const onHost = hostCommand && hostCommand !== command ? hostCommand : null
+  return (
+    <div className="flex min-w-0 flex-col gap-[5px] px-3.5 py-1.5">
+      <div className={tmuxRow}>
+        <Terminal size={14} />
+        <span>tmux</span>
+        <strong className={tmuxValue}>{name || 'Not detected'}</strong>
+      </div>
+      {command ? (
+        <TmuxCommandRow label="Access" command={command} copyLabel="Copy tmux access command" />
+      ) : null}
+      {onHost ? (
+        <TmuxCommandRow
+          label="On host"
+          command={onHost}
+          copyLabel="Copy tmux command for this host"
+        />
+      ) : null}
     </div>
   )
 }

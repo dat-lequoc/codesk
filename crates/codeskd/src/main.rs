@@ -283,11 +283,14 @@ async fn project_sessions(
     let agents = cached_agents(&state, query.refresh)
         .await
         .map_err(api_error)?;
-    Ok(Json(
-        sessions::list(&project, &agents, query.limit)
-            .await
-            .map_err(api_error)?,
-    ))
+    let mut sessions = sessions::list(&project, &agents, query.limit)
+        .await
+        .map_err(api_error)?;
+    sessions::bind_detected_tmux_sessions(&state.db, &sessions).map_err(api_error)?;
+    let controls = state.db.tmux_controls().map_err(api_error)?;
+    let runs = state.db.runs().map_err(api_error)?;
+    sessions::apply_remembered_tmux(&mut sessions, &controls, &runs);
+    Ok(Json(sessions))
 }
 async fn project_session_messages(
     State(state): State<Arc<AppState>>,
@@ -529,18 +532,9 @@ async fn adopt_external_tmux(
 ) -> ApiResult<Json<serde_json::Value>> {
     let agent = external_agent(&state, pid).await.map_err(api_error)?;
     validate_tmux_request(&state, &agent, &request).map_err(api_error)?;
-    let pane_id = agent
-        .tmux_pane_id
-        .as_deref()
-        .ok_or_else(|| api_error("this process is not attached to a tmux pane"))?;
-    let pane = state
-        .tmux
-        .panes()
+    let pane = pane_for_agent(&state, &agent)
         .await
-        .map_err(api_error)?
-        .into_iter()
-        .find(|pane| pane.pane_id == pane_id && pane.tty == agent.tty.clone().unwrap_or_default())
-        .ok_or_else(|| api_error("the tmux pane is no longer available"))?;
+        .map_err(api_error)?;
     let now = chrono::Utc::now().to_rfc3339();
     let id = pane
         .control_id
@@ -600,9 +594,14 @@ async fn move_external_to_tmux(
             "this session is already running in tmux; enable control instead",
         ));
     }
-    if agent.transcript_path.is_none() {
-        return Err(api_error("the provider transcript is required"));
-    }
+    // A harness does not always keep its transcript open (newer Codex builds
+    // index through the state DB), so derive the path from the session id
+    // instead of demanding a live file descriptor.
+    let transcript_path = match agent.transcript_path.clone() {
+        Some(path) => path,
+        None => transcript_path_for_agent(&state, &agent, request.project_id.as_deref())
+            .map_err(api_error)?,
+    };
     let now = chrono::Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     state
@@ -613,7 +612,7 @@ async fn move_external_to_tmux(
             run_id: None,
             provider: agent.provider,
             native_session_id: agent.native_session_id,
-            transcript_path: agent.transcript_path,
+            transcript_path: Some(transcript_path),
             source_pid: agent.pid,
             source_pgid: agent.process_group_id,
             cwd: agent
@@ -674,18 +673,9 @@ async fn external_tmux_log(
     Query(query): Query<TmuxLogQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let agent = external_agent(&state, pid).await.map_err(api_error)?;
-    let pane_id = agent
-        .tmux_pane_id
-        .as_deref()
-        .ok_or_else(|| api_error("this process is not attached to a tmux pane"))?;
-    let pane = state
-        .tmux
-        .panes()
+    let pane = pane_for_agent(&state, &agent)
         .await
-        .map_err(api_error)?
-        .into_iter()
-        .find(|pane| pane.pane_id == pane_id)
-        .ok_or_else(|| api_error("the tmux pane is no longer available"))?;
+        .map_err(api_error)?;
     let lines = query.lines.unwrap_or(200).clamp(10, 2000);
     let text = state
         .tmux
@@ -701,6 +691,24 @@ async fn external_tmux_log(
         "text": text,
         "captured_at": chrono::Utc::now().to_rfc3339(),
     })))
+}
+
+async fn pane_for_agent(
+    state: &AppState,
+    agent: &model::DiscoveredAgent,
+) -> anyhow::Result<tmux::TmuxPane> {
+    let pane_id = agent
+        .tmux_pane_id
+        .as_deref()
+        .context("this process is not attached to a tmux pane")?;
+    let extra = discovery::tmux_sockets_from_pids(&[agent.pid]).await;
+    state
+        .tmux
+        .panes_with_extra(&extra)
+        .await?
+        .into_iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .context("the tmux pane is no longer available")
 }
 
 async fn external_agent(state: &AppState, pid: u32) -> anyhow::Result<model::DiscoveredAgent> {
@@ -733,6 +741,26 @@ fn validate_external_project(
             .is_some_and(|(left, right)| left == right);
     anyhow::ensure!(matches, "external session belongs to another project");
     Ok(())
+}
+
+fn transcript_path_for_agent(
+    state: &AppState,
+    agent: &model::DiscoveredAgent,
+    project_id: Option<&str>,
+) -> anyhow::Result<String> {
+    let session_id = agent
+        .native_session_id
+        .as_deref()
+        .context("the provider session id is still being discovered")?;
+    let project_id = project_id.context(
+        "the provider transcript is unknown; select the project so it can be resolved",
+    )?;
+    let project = state
+        .db
+        .project(project_id)?
+        .context("project not found")?;
+    let path = sessions::source_path(&project, &agent.provider, session_id)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn validate_tmux_request(
@@ -1095,7 +1123,7 @@ async fn install_service(port: u16) -> anyhow::Result<()> {
         let unit_dir = home.join(".config/systemd/user");
         tokio::fs::create_dir_all(&unit_dir).await?;
         let unit = format!(
-            "[Unit]\nDescription=Codesk execution daemon\nAfter=network.target\n\n[Service]\nExecStart={}\nEnvironment=CODESK_PORT={}\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=Codesk execution daemon\nAfter=network.target\n\n[Service]\nExecStart={}\nEnvironment=CODESK_PORT={}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
             target.display(),
             port
         );

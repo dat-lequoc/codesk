@@ -352,8 +352,15 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
                 .map(|session_id| (candidate.pid, (candidate.provider.to_string(), session_id)))
         })
         .collect::<HashMap<_, _>>();
+    let extra_sockets = tmux_sockets_from_pids(
+        &candidates
+            .iter()
+            .map(|candidate| candidate.pid)
+            .collect::<Vec<_>>(),
+    )
+    .await;
     let tmux = TmuxManager::new(data_root.to_path_buf());
-    let panes = tmux.panes().await.unwrap_or_default();
+    let panes = tmux.panes_with_extra(&extra_sockets).await.unwrap_or_default();
     let mut agents = Vec::new();
     for (root, members) in provider_process_roots(&candidates, &parents) {
         let pid = root.pid;
@@ -385,10 +392,22 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
                 .iter()
                 .find_map(|member| member.managed_run_id.clone())
         });
-        let pane = root
-            .tty
-            .as_deref()
-            .and_then(|tty| panes.iter().find(|pane| pane.tty == tty));
+        let pane = pane_for_process(root, &members, &parents, &panes);
+        if std::env::var_os("CODESK_DEBUG_DISCOVERY").is_some() {
+            eprintln!(
+                "discovery: pid={pid} provider={provider} tty={:?} member_ttys={:?} panes={:?} matched={:?}",
+                root.tty,
+                members
+                    .iter()
+                    .map(|member| member.tty.clone())
+                    .collect::<Vec<_>>(),
+                panes
+                    .iter()
+                    .map(|pane| (pane.session_name.clone(), pane.tty.clone(), pane.pane_pid))
+                    .collect::<Vec<_>>(),
+                pane.map(|pane| pane.session_name.clone()),
+            );
+        }
         // Linux reports a vanished cwd as `path (deleted)`. There is nothing
         // left to attach to or register as a project.
         if cwd.as_deref().is_some_and(is_deleted_cwd) {
@@ -497,6 +516,19 @@ pub async fn discover_agents(db: &Db, data_root: &Path) -> Result<Vec<Discovered
                     let _ = db.set_provider_session(run_id, session_id);
                 }
                 tmux_controlled = true;
+            } else {
+                let _ = remember_detected_tmux(
+                    db,
+                    pane,
+                    provider,
+                    pid,
+                    root.pgid,
+                    cwd.as_deref(),
+                    &root.command,
+                    native_session_id.as_deref(),
+                    transcript_path.as_deref(),
+                    managed_run_id.as_deref(),
+                );
             }
         }
         agents.push(DiscoveredAgent {
@@ -716,6 +748,151 @@ fn command_session_id(command: &str, provider: &str) -> Option<String> {
     providers::get(provider).and_then(|adapter| adapter.command_session_id(command))
 }
 
+fn remember_detected_tmux(
+    db: &Db,
+    pane: &tmux::TmuxPane,
+    provider: &str,
+    pid: u32,
+    pgid: i32,
+    cwd: Option<&str>,
+    command: &str,
+    native_session_id: Option<&str>,
+    transcript_path: Option<&str>,
+    managed_run_id: Option<&str>,
+) -> Result<()> {
+    let existing = pane
+        .control_id
+        .as_deref()
+        .and_then(|id| db.tmux_control(id).ok().flatten())
+        .or_else(|| {
+            db.tmux_control_for_pane(pane.socket_path.as_deref(), &pane.pane_id)
+                .ok()
+                .flatten()
+        })
+        .or_else(|| db.tmux_control_for_pid(pid).ok().flatten());
+    if existing.as_ref().is_some_and(|control| control.enabled) {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let access = tmux::access_command(
+        pane.socket_path.as_deref().map(Path::new),
+        &pane.session_name,
+    );
+    let mut control = existing.unwrap_or_else(|| TmuxControl {
+        id: Uuid::new_v4().to_string(),
+        project_id: None,
+        run_id: managed_run_id.map(str::to_string),
+        provider: provider.to_string(),
+        native_session_id: native_session_id.map(str::to_string),
+        transcript_path: transcript_path.map(str::to_string),
+        source_pid: pid,
+        source_pgid: pgid,
+        cwd: cwd.unwrap_or(&pane.current_path).to_string(),
+        original_command: command.to_string(),
+        socket_path: pane.socket_path.clone(),
+        pane_id: Some(pane.pane_id.clone()),
+        session_name: Some(pane.session_name.clone()),
+        access_command: Some(access.clone()),
+        owned: pane.owned,
+        enabled: false,
+        status: "detected".to_string(),
+        error: None,
+        queue_state: "ready".to_string(),
+        queue_state_at: now.clone(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    });
+    control.native_session_id = native_session_id
+        .map(str::to_string)
+        .or(control.native_session_id);
+    control.transcript_path = transcript_path
+        .map(str::to_string)
+        .or(control.transcript_path);
+    control.session_name = Some(pane.session_name.clone());
+    control.access_command = Some(access);
+    control.socket_path = pane.socket_path.clone();
+    control.pane_id = Some(pane.pane_id.clone());
+    control.source_pid = pid;
+    control.source_pgid = pgid;
+    control.status = "detected".to_string();
+    control.enabled = false;
+    control.updated_at = now;
+    db.upsert_tmux_control(&control)?;
+    Ok(())
+}
+
+fn pane_for_process<'a>(
+    root: &ProcessCandidate,
+    members: &[&ProcessCandidate],
+    parents: &HashMap<u32, u32>,
+    panes: &'a [tmux::TmuxPane],
+) -> Option<&'a tmux::TmuxPane> {
+    let mut ttys = Vec::new();
+    for candidate in std::iter::once(root).chain(members.iter().copied()) {
+        if let Some(tty) = candidate.tty.as_deref() {
+            if !ttys.iter().any(|existing| *existing == tty) {
+                ttys.push(tty);
+            }
+        }
+    }
+    for tty in ttys {
+        if let Some(pane) = panes.iter().find(|pane| pane.tty == tty) {
+            return Some(pane);
+        }
+    }
+    let mut current = root.pid;
+    for _ in 0..64 {
+        if let Some(pane) = panes.iter().find(|pane| pane.pane_pid == current) {
+            return Some(pane);
+        }
+        match parents.get(&current).copied() {
+            Some(parent) if parent > 1 && parent != current => current = parent,
+            _ => break,
+        }
+    }
+    None
+}
+
+// Only the Linux discovery path reads /proc environ; keep it compiling (and
+// unit-tested) on macOS too.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn tmux_socket_from_environ(bytes: &[u8]) -> Option<PathBuf> {
+    for entry in bytes.split(|byte| *byte == 0) {
+        let Ok(text) = std::str::from_utf8(entry) else {
+            continue;
+        };
+        let Some(value) = text.strip_prefix("TMUX=") else {
+            continue;
+        };
+        let socket = value.split(',').next().filter(|item| !item.is_empty())?;
+        return Some(PathBuf::from(socket));
+    }
+    None
+}
+
+pub(crate) async fn tmux_sockets_from_pids(pids: &[u32]) -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut sockets = Vec::new();
+        for pid in pids {
+            let Ok(bytes) = tokio::fs::read(format!("/proc/{pid}/environ")).await else {
+                continue;
+            };
+            if let Some(path) = tmux_socket_from_environ(&bytes) {
+                if !sockets.contains(&path) {
+                    sockets.push(path);
+                }
+            }
+        }
+        sockets
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pids;
+        Vec::new()
+    }
+}
+
 fn is_tmux_launch_wrapper(command: &str) -> bool {
     let first = command.split_whitespace().next().unwrap_or("");
     let basename = first.rsplit('/').next().unwrap_or(first);
@@ -766,6 +943,8 @@ pub fn process_group_alive(pgid: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -818,6 +997,62 @@ mod tests {
             "/home/me/.dsh/sessions/--repo--/session-dsh-1/session.jsonl.zstd",
             "dsh"
         ));
+    }
+
+    #[test]
+    fn matches_a_tmux_pane_by_child_tty_or_ancestor_pid() {
+        let pane = crate::tmux::TmuxPane {
+            socket_path: None,
+            pane_id: "%3".into(),
+            session_name: "work".into(),
+            tty: "pts/3".into(),
+            pane_pid: 40,
+            dead: false,
+            in_mode: false,
+            current_command: "zsh".into(),
+            current_path: "/repo".into(),
+            controlled: false,
+            control_id: None,
+            owned: false,
+        };
+        let root = ProcessCandidate {
+            pid: 50,
+            ppid: 40,
+            pgid: 50,
+            tty: Some("pts/9".into()),
+            command: "dsh".into(),
+            provider: "dsh",
+            managed_run_id: None,
+        };
+        let child = ProcessCandidate {
+            pid: 51,
+            ppid: 50,
+            pgid: 50,
+            tty: Some("pts/3".into()),
+            command: "dsh-worker".into(),
+            provider: "dsh",
+            managed_run_id: None,
+        };
+        let parents = HashMap::from([(50, 40), (51, 50), (40, 1)]);
+        assert_eq!(
+            pane_for_process(&root, &[&child], &parents, &[pane.clone()])
+                .map(|item| item.pane_id.as_str()),
+            Some("%3")
+        );
+        assert_eq!(
+            pane_for_process(&root, &[], &parents, std::slice::from_ref(&pane))
+                .map(|item| item.pane_id.as_str()),
+            Some("%3")
+        );
+    }
+
+    #[test]
+    fn reads_tmux_socket_path_from_process_environment() {
+        assert_eq!(
+            tmux_socket_from_environ(b"HOME=/root\0TMUX=/tmp/tmux-0/work,1234,0\0"),
+            Some(PathBuf::from("/tmp/tmux-0/work"))
+        );
+        assert_eq!(tmux_socket_from_environ(b"PATH=/bin\0"), None);
     }
 
     #[test]
@@ -963,6 +1198,14 @@ mod tests {
     #[test]
     fn correlates_kiro_resume_processes() {
         let session = "5feafb8f-cffe-4c25-a6c7-18b4084d5b5d";
+        assert_eq!(
+            command_session_id(&format!("codex resume {session} --yolo"), "codex").as_deref(),
+            Some(session)
+        );
+        assert_eq!(
+            command_session_id(&format!("/usr/bin/codex resume {session}"), "codex").as_deref(),
+            Some(session)
+        );
         assert_eq!(
             command_session_id(&format!("kiro-cli --resume-id {session}"), "kiro").as_deref(),
             Some(session)

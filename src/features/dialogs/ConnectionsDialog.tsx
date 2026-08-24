@@ -1,20 +1,33 @@
 // Extracted from App.tsx during the Tailwind/module refactor.
 
-import { Plus, Radio, RefreshCw, Square } from 'lucide-react'
+import { Monitor, Moon, Plus, Radio, RefreshCw, Square, Sun } from 'lucide-react'
 import { api } from '../../api'
 import { AppDialog } from '../../components/ui/app-dialog'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { StatusDot } from '../../components/ui/status-dot'
 import { ProviderIcon } from '../../components/ProviderIcon'
+import { cn } from '../../lib/cn'
+import type { ThemePreference } from '../../lib/theme'
 import type { DiscoveredAgent, Host } from '../../types'
 import { useEffect, useState } from 'react'
+
+const themeOptions: { value: ThemePreference; label: string; icon: typeof Sun }[] = [
+  { value: 'system', label: 'Auto', icon: Monitor },
+  { value: 'light', label: 'Light', icon: Sun },
+  { value: 'dark', label: 'Dark', icon: Moon },
+]
+
 export function ConnectionsDialog({
   hosts,
+  theme,
+  onThemeChange,
   onClose,
   onChanged,
 }: {
   hosts: Host[]
+  theme: ThemePreference
+  onThemeChange: (theme: ThemePreference) => void
   onClose: () => void
   onChanged: () => void
 }) {
@@ -43,8 +56,40 @@ export function ConnectionsDialog({
     }
   }
   return (
-    <AppDialog title="Connections" subtitle="Local and SSH execution hosts" onClose={onClose}>
-      <div className="scroll-thin max-h-[410px] overflow-auto">
+    <AppDialog
+      title="Settings"
+      subtitle="Appearance, local and SSH execution hosts"
+      onClose={onClose}
+    >
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-line-strong px-3.5 py-3">
+        <span>
+          <strong className="block text-sm">Appearance</strong>
+          <small className="mt-0.5 block text-muted">Auto follows the system setting</small>
+        </span>
+        <div
+          className="flex rounded-lg bg-ink-850 p-[3px]"
+          role="radiogroup"
+          aria-label="Appearance"
+        >
+          {themeOptions.map(({ value, label, icon: Icon }) => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={theme === value}
+              className={cn(
+                'flex h-[26px] items-center gap-1.5 rounded-md px-2.5 text-xs text-muted hover:text-fg',
+                theme === value && 'bg-raised text-fg shadow-[0_1px_2px_#0002]',
+              )}
+              onClick={() => onThemeChange(value)}
+            >
+              <Icon size={13} />
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="scroll-thin mt-2.5 max-h-[380px] overflow-auto">
         {hosts.map((host) => (
           <div className="my-2.5 rounded-xl border border-line-strong" key={host.id}>
             <div className="flex h-[68px] items-center gap-[11px] px-3.5">

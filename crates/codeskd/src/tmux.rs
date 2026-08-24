@@ -55,8 +55,30 @@ impl TmuxManager {
     }
 
     pub async fn panes(&self) -> Result<Vec<TmuxPane>> {
-        let mut panes = list_panes(None, false).await?;
-        panes.extend(list_panes(Some(&self.owned_socket()), true).await?);
+        self.panes_with_extra(&[]).await
+    }
+
+    /// Same as [`Self::panes`], plus any sockets discovered from a live process
+    /// (`TMUX=…`). Codesk otherwise only sees the default server and its own
+    /// socket, so a user session on `tmux -L` / `tmux -S` looks like a bare tty.
+    pub async fn panes_with_extra(&self, extra: &[PathBuf]) -> Result<Vec<TmuxPane>> {
+        let owned = self.owned_socket();
+        let mut sockets = discover_tmux_sockets().await;
+        for path in extra {
+            if !path.as_os_str().is_empty() && !sockets.iter().any(|existing| existing == path) {
+                sockets.push(path.clone());
+            }
+        }
+        let mut panes = Vec::new();
+        if sockets.is_empty() {
+            panes.extend(list_panes(None, false).await?);
+        }
+        for socket in &sockets {
+            panes.extend(list_panes(Some(socket), socket == &owned).await?);
+        }
+        if !sockets.iter().any(|socket| socket == &owned) {
+            panes.extend(list_panes(Some(&owned), true).await?);
+        }
         panes.sort_by(|left, right| {
             left.session_name
                 .cmp(&right.session_name)
@@ -481,6 +503,77 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+fn tmux_socket_directories(
+    uid: u32,
+    tmux_tmpdir: Option<&str>,
+    tmpdir: Option<&str>,
+    xdg_runtime: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let mut push = |root: PathBuf| {
+        if root.as_os_str().is_empty() {
+            return;
+        }
+        let directory = root.join(format!("tmux-{uid}"));
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    };
+    if let Some(value) = tmux_tmpdir {
+        push(PathBuf::from(value));
+    }
+    if let Some(value) = tmpdir {
+        push(PathBuf::from(value));
+    }
+    if let Some(value) = xdg_runtime {
+        push(PathBuf::from(value));
+    }
+    push(PathBuf::from("/tmp"));
+    push(PathBuf::from("/var/tmp"));
+    push(PathBuf::from(format!("/run/user/{uid}")));
+    directories
+}
+
+fn is_tmux_socket_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('.') && !name.ends_with(".lock")
+}
+
+async fn discover_tmux_sockets() -> Vec<PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let directories = tmux_socket_directories(
+        uid,
+        std::env::var("TMUX_TMPDIR").ok().as_deref(),
+        std::env::var("TMPDIR").ok().as_deref(),
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+    );
+    let mut sockets = Vec::new();
+    for directory in directories {
+        let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_tmux_socket_name(name) {
+                continue;
+            }
+            let path = entry.path();
+            if tokio::fs::metadata(&path)
+                .await
+                .is_ok_and(|metadata| metadata.is_dir())
+            {
+                continue;
+            }
+            sockets.push(path);
+        }
+    }
+    sockets.sort();
+    sockets.dedup();
+    sockets
+}
+
 async fn list_panes(socket: Option<&Path>, owned: bool) -> Result<Vec<TmuxPane>> {
     let format = "#{pane_id}\x1f#{session_name}\x1f#{pane_tty}\x1f#{pane_pid}\x1f#{pane_dead}\x1f#{pane_in_mode}\x1f#{pane_current_command}\x1f#{pane_current_path}\x1f#{@codesk_controlled}\x1f#{@codesk_control_id}";
     let output = tmux_command(socket)
@@ -500,7 +593,40 @@ async fn list_panes(socket: Option<&Path>, owned: bool) -> Result<Vec<TmuxPane>>
         .collect())
 }
 
+/// tmux escapes non-printable bytes as octal (`\037`) when its output is a
+/// pipe rather than a terminal — which it always is for a daemon. Undo that
+/// (and `\\`) so the 0x1f field separator survives the round trip.
+fn unescape_tmux_visual(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+            let digits = &bytes[index + 1..index + 4];
+            if digits.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
+                let value = digits
+                    .iter()
+                    .fold(0u32, |total, byte| total * 8 + u32::from(byte - b'0'));
+                if value <= 0xff {
+                    result.push(value as u8);
+                    index += 4;
+                    continue;
+                }
+            }
+        }
+        if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'\\') {
+            result.push(b'\\');
+            index += 2;
+            continue;
+        }
+        result.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
 fn parse_pane_line(line: &str, socket_path: Option<String>, owned: bool) -> Option<TmuxPane> {
+    let line = unescape_tmux_visual(line);
     let fields = line.split('\x1f').collect::<Vec<_>>();
     if fields.len() != 10 {
         return None;
@@ -589,6 +715,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_pane_lines_with_octal_escaped_separators() {
+        // tmux 3.4 on Linux pipes: `\037` instead of the raw 0x1f separator.
+        let escaped = "%0\\037codesk-codex-4c92e1d5\\037/dev/pts/3\\0373284414\\0370\\0370\\037node\\037/root/dev\\037\\037";
+        let pane = parse_pane_line(escaped, None, true).expect("escaped line parses");
+        assert_eq!(pane.pane_id, "%0");
+        assert_eq!(pane.session_name, "codesk-codex-4c92e1d5");
+        assert_eq!(pane.tty, "pts/3");
+        assert_eq!(pane.pane_pid, 3284414);
+        assert!(!pane.dead);
+        assert!(!pane.controlled);
+
+        // Raw separators (interactive tmux, macOS) must keep working.
+        let raw = "%1\u{1f}work\u{1f}/dev/ttys002\u{1f}77\u{1f}0\u{1f}0\u{1f}zsh\u{1f}/repo\u{1f}1\u{1f}control-1";
+        let pane = parse_pane_line(raw, Some("/tmp/s".into()), false).expect("raw line parses");
+        assert_eq!(pane.session_name, "work");
+        assert!(pane.controlled);
+        assert_eq!(pane.control_id.as_deref(), Some("control-1"));
+
+        // A literal backslash in a path arrives doubled and must be restored.
+        assert_eq!(unescape_tmux_visual("a\\\\b"), "a\\b");
+    }
+
+    #[test]
     fn access_commands_are_copyable_and_shell_safe() {
         assert_eq!(access_command(None, "work"), "tmux attach-session -t work");
         assert_eq!(
@@ -603,6 +752,19 @@ mod tests {
             shell_command("codex", &["hello\n世界's".into()]),
             "codex 'hello\n世界'\\''s'"
         );
+    }
+
+    #[test]
+    fn searches_standard_tmux_socket_directories() {
+        let directories =
+            tmux_socket_directories(1000, Some("/custom"), Some("/var/folders/tmp"), Some("/run/user/1000"));
+        assert!(directories.contains(&PathBuf::from("/custom/tmux-1000")));
+        assert!(directories.contains(&PathBuf::from("/var/folders/tmp/tmux-1000")));
+        assert!(directories.contains(&PathBuf::from("/run/user/1000/tmux-1000")));
+        assert!(directories.contains(&PathBuf::from("/tmp/tmux-1000")));
+        assert!(!is_tmux_socket_name("default.lock"));
+        assert!(is_tmux_socket_name("default"));
+        assert!(is_tmux_socket_name("work"));
     }
 
     #[test]

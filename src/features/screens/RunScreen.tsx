@@ -466,7 +466,11 @@ export function RunScreen({
               value={workspaceLabel}
             />
             <EnvironmentRow icon={<Folder size={16} />} label="Path" value={run.cwd} />
-            <TmuxDetails name={run.tmuxName} command={run.tmuxAccessCommand} />
+            <TmuxDetails
+              name={run.tmuxName}
+              command={run.tmuxAccessCommand}
+              hostCommand={run.tmuxHostAccessCommand}
+            />
             <div className={environmentActions}>
               <button onClick={() => api.openPath(run.hostId, run.cwd)}>Open folder</button>
               {run.worktreeId && !active.has(run.status) && (

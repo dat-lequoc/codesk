@@ -130,8 +130,17 @@ describe('ConnectionsDialog', () => {
   const show = (hosts = [local]) => {
     const onClose = vi.fn()
     const onChanged = vi.fn().mockResolvedValue(undefined)
-    render(<ConnectionsDialog hosts={hosts} onClose={onClose} onChanged={onChanged} />)
-    return { onClose, onChanged }
+    const onThemeChange = vi.fn()
+    render(
+      <ConnectionsDialog
+        hosts={hosts}
+        theme="system"
+        onThemeChange={onThemeChange}
+        onClose={onClose}
+        onChanged={onChanged}
+      />,
+    )
+    return { onClose, onChanged, onThemeChange }
   }
 
   beforeEach(() => {
@@ -142,6 +151,19 @@ describe('ConnectionsDialog', () => {
     show()
     expect(screen.getByText('This Mac')).toBeInTheDocument()
     expect(screen.getByText('Local daemon')).toBeInTheDocument()
+  })
+
+  it('offers the three appearance modes with the current one selected', () => {
+    show()
+    expect(screen.getByRole('radio', { name: 'Auto' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Light' })).not.toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Dark' })).not.toBeChecked()
+  })
+
+  it('reports an appearance change', async () => {
+    const { onThemeChange } = show()
+    await userEvent.click(screen.getByRole('radio', { name: 'Light' }))
+    expect(onThemeChange).toHaveBeenCalledWith('light')
   })
 
   it('lists an ssh host by its alias', () => {

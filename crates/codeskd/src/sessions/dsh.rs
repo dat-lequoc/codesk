@@ -145,6 +145,39 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
     }))
 }
 
+/// Live turn state has to come from the *latest* `turn/start` / `turn/end`, not
+/// the first 8 MB of the zstd stream. A long DSH session with bulky tool output
+/// otherwise looks "active" forever, and Move to tmux waits forever for idle.
+pub(super) fn dsh_turn_active(path: &Path) -> bool {
+    dsh_fold_turn_active(path).unwrap_or(false)
+}
+
+fn dsh_event_type(value: &Value) -> Option<&str> {
+    value["type"]
+        .as_str()
+        .filter(|item| *item != "dsh.event")
+        .or_else(|| value["event"]["type"].as_str())
+}
+
+fn dsh_fold_turn_active(path: &Path) -> Result<bool> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let decoder = zstd::stream::read::Decoder::new(file)
+        .with_context(|| format!("decompress {}", path.display()))?;
+    let reader = BufReader::new(decoder);
+    let mut active = false;
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match dsh_event_type(&value) {
+            Some("turn/start") => active = true,
+            Some("turn/end") => active = false,
+            _ => {}
+        }
+    }
+    Ok(active)
+}
+
 pub(super) fn dsh_values(path: &Path, max_bytes: u64) -> Result<Vec<Value>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let decoder = zstd::stream::read::Decoder::new(file)
@@ -398,6 +431,39 @@ mod tests {
             Some(1000)
         );
         assert!(!transcript_turn_active(&path, "dsh"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn turn_active_reads_the_end_of_a_large_dsh_transcript() {
+        let home = std::env::temp_dir().join(format!("codesk-dsh-turn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let path = home.join("session.jsonl.zstd");
+        let file = File::create(&path).unwrap();
+        let mut encoder = zstd::stream::write::Encoder::new(file, 1).unwrap();
+        writeln!(
+            encoder,
+            "{}",
+            json!({"type":"turn/start","seq":1,"data":{"turn":1}})
+        )
+        .unwrap();
+        writeln!(
+            encoder,
+            "{}",
+            json!({"type":"tool/result","seq":2,"data":{"text":"x".repeat(8 * 1024 * 1024 + 64)}})
+        )
+        .unwrap();
+        writeln!(
+            encoder,
+            "{}",
+            json!({"type":"turn/end","seq":3,"data":{"turn":1,"reason":{"kind":"completed"}}})
+        )
+        .unwrap();
+        encoder.finish().unwrap();
+        assert!(
+            !dsh_turn_active(&path),
+            "a completed turn after bulky tool output must count as idle"
+        );
         fs::remove_dir_all(home).unwrap();
     }
 }

@@ -1,6 +1,7 @@
 // Extracted from App.tsx during the Tailwind/module refactor.
 import type { AppState, DiscoveredAgent, FileEntry, Project } from '../types'
 import { normalizedFolder } from './keys'
+import { normalizeTheme } from './theme'
 
 export const empty: AppState = {
   hosts: [],
@@ -12,6 +13,7 @@ export const empty: AppState = {
   discoveredAgentsByHost: {},
   settings: {
     notifications: true,
+    theme: 'system' as const,
     pinnedSessionKeys: [],
     pinnedSessions: [],
     archivedSessionKeys: [],
@@ -88,6 +90,7 @@ export const normalizeState = (value: AppState) => ({
   drafts: value.drafts || [],
   settings: {
     notifications: value.settings?.notifications ?? true,
+    theme: normalizeTheme(value.settings?.theme),
     pinnedSessionKeys: value.settings?.pinnedSessionKeys || [],
     pinnedSessions: value.settings?.pinnedSessions || [],
     archivedSessionKeys: value.settings?.archivedSessionKeys || [],

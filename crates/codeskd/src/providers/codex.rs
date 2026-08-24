@@ -117,6 +117,20 @@ impl ProviderAdapter for Codex {
         support::command_tokens(&command.to_lowercase()).contains(&"codex")
     }
 
+    fn command_session_id(&self, command: &str) -> Option<String> {
+        let tokens = support::command_tokens(command);
+        for (index, token) in tokens.iter().enumerate() {
+            if !matches!(*token, "resume" | "fork" | "--resume") {
+                continue;
+            }
+            let value = tokens.get(index + 1)?;
+            if Uuid::parse_str(value).is_ok() {
+                return Some((*value).to_string());
+            }
+        }
+        None
+    }
+
     fn transcript_matches(&self, path: &str) -> bool {
         path.ends_with(".jsonl") && path.contains("/.codex/sessions/")
     }

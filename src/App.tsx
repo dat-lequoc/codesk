@@ -13,15 +13,11 @@ import { api } from './api'
 import type { AppState, DiscoveredAgent, Project, ProviderSession, Run } from './types'
 import { useLatest } from './hooks/useLatest'
 import { empty, observedAgents } from './lib/app-state'
-import {
-  projectKey,
-  recentFirst,
-  runRowKey,
-  sessionKey,
-  sessionNotificationKey,
-} from './lib/keys'
+import { projectKey, recentFirst, runRowKey, sessionKey, sessionNotificationKey } from './lib/keys'
 import { hiddenAgentKey } from './lib/observed'
 import { prepareNotifications } from './lib/notifications'
+import { applyTheme, rememberTheme, watchSystemTheme } from './lib/theme'
+import type { ThemePreference } from './lib/theme'
 import { useAppStatePolling } from './hooks/useAppStatePolling'
 import { useExternalTranscriptWatcher } from './hooks/useExternalTranscriptWatcher'
 import { useRunEventStream } from './hooks/useRunEventStream'
@@ -182,6 +178,22 @@ export function App() {
     if (!state.settings.notifications) return
     void prepareNotifications()
   }, [state.settings.notifications])
+  useEffect(() => {
+    applyTheme(state.settings.theme)
+    rememberTheme(state.settings.theme)
+    return watchSystemTheme(state.settings.theme)
+  }, [state.settings.theme])
+  const setTheme = async (theme: ThemePreference) => {
+    const prior = state.settings
+    setState((current) => ({ ...current, settings: { ...current.settings, theme } }))
+    try {
+      const saved = await api.updateSettings({ theme })
+      setState((current) => ({ ...current, settings: saved }))
+    } catch (cause) {
+      setState((current) => ({ ...current, settings: prior }))
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
   const archivedSessions = state.settings.archivedSessionKeys
     .map((key) => allSessions.find((item) => sessionKey(item) === key))
     .filter((item): item is ProviderSession => Boolean(item))
@@ -566,6 +578,8 @@ export function App() {
       {settings && (
         <ConnectionsDialog
           hosts={state.hosts}
+          theme={state.settings.theme}
+          onThemeChange={setTheme}
           onClose={() => setSettings(false)}
           onChanged={reload}
         />

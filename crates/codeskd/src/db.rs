@@ -419,7 +419,7 @@ impl Db {
     pub fn tmux_control_for_pid(&self, pid: u32) -> Result<Option<TmuxControl>> {
         Ok(self.lock()
             .query_row(
-                &format!("{TMUX_CONTROL_SELECT} WHERE source_pid=?1 AND enabled=1 ORDER BY updated_at DESC LIMIT 1"),
+                &format!("{TMUX_CONTROL_SELECT} WHERE source_pid=?1 ORDER BY enabled DESC, updated_at DESC LIMIT 1"),
                 [pid],
                 row_to_tmux_control,
             )
@@ -434,7 +434,7 @@ impl Db {
         let socket_key = socket_path.unwrap_or("");
         Ok(self.lock()
             .query_row(
-                &format!("{TMUX_CONTROL_SELECT} WHERE COALESCE(socket_path,'')=?1 AND pane_id=?2 AND enabled=1 ORDER BY updated_at DESC LIMIT 1"),
+                &format!("{TMUX_CONTROL_SELECT} WHERE COALESCE(socket_path,'')=?1 AND pane_id=?2 ORDER BY enabled DESC, updated_at DESC LIMIT 1"),
                 params![socket_key, pane_id],
                 row_to_tmux_control,
             )
@@ -759,6 +759,24 @@ mod tests {
         assert_eq!(replaced.transcript_path, None);
         assert_eq!(replaced.run_id, None);
 
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    }
+
+    #[test]
+    fn looks_up_a_detected_pane_that_is_not_yet_controlled() {
+        let path = std::env::temp_dir().join(format!("codeskd-detected-{}.db", Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        let mut control = tmux_control_fixture("detected-1", "codex");
+        control.enabled = false;
+        control.status = "detected".into();
+        control.native_session_id = Some("session-1".into());
+        db.upsert_tmux_control(&control).unwrap();
+        let found = db.tmux_control_for_pid(42).unwrap().unwrap();
+        assert_eq!(found.id, "detected-1");
+        assert_eq!(found.native_session_id.as_deref(), Some("session-1"));
         drop(db);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-shm"));

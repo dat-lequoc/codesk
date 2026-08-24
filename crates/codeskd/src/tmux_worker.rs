@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -272,6 +273,9 @@ fn select_recovered_tmux_session<'a>(
 }
 
 async fn process_tmux_move(state: &AppState, control: &TmuxControl) -> anyhow::Result<()> {
+    if adopt_existing_tmux_for_move(state, control).await? {
+        return Ok(());
+    }
     let active = control_turn_active(control);
     if active {
         if control.queue_state != "active" {
@@ -433,6 +437,78 @@ async fn process_tmux_queue(
         }
     }
     Ok(())
+}
+
+/// If discovery later finds the process already lives in tmux, take that pane
+/// instead of waiting to SIGTERM it. A missed socket/TTY match is what showed
+/// Move on a session that was already in tmux; killing it after idle is worse.
+async fn adopt_existing_tmux_for_move(
+    state: &AppState,
+    control: &TmuxControl,
+) -> anyhow::Result<bool> {
+    let agents = cached_agents(state, false).await.unwrap_or_default();
+    let Some(agent) = agents
+        .iter()
+        .find(|agent| agent.pid == control.source_pid)
+    else {
+        return Ok(false);
+    };
+    let Some(pane_id) = agent.tmux_pane_id.as_deref() else {
+        return Ok(false);
+    };
+    let panes = state.tmux.panes().await.unwrap_or_default();
+    let Some(pane) = panes.into_iter().find(|pane| {
+        pane.pane_id == pane_id
+            && agent
+                .tty
+                .as_deref()
+                .is_none_or(|tty| pane.tty == tty)
+    }) else {
+        return Ok(false);
+    };
+    state
+        .tmux
+        .enable_control(&pane, &control.id, &control.provider)
+        .await?;
+    let access =
+        tmux::access_command(pane.socket_path.as_deref().map(Path::new), &pane.session_name);
+    let now = chrono::Utc::now().to_rfc3339();
+    state.db.upsert_tmux_control(&TmuxControl {
+        id: control.id.clone(),
+        project_id: control.project_id.clone(),
+        run_id: control.run_id.clone(),
+        provider: control.provider.clone(),
+        native_session_id: agent
+            .native_session_id
+            .clone()
+            .or_else(|| control.native_session_id.clone()),
+        transcript_path: agent
+            .transcript_path
+            .clone()
+            .or_else(|| control.transcript_path.clone()),
+        source_pid: agent.pid,
+        source_pgid: agent.process_group_id,
+        cwd: agent
+            .cwd
+            .clone()
+            .unwrap_or_else(|| control.cwd.clone()),
+        original_command: control.original_command.clone(),
+        socket_path: pane.socket_path.clone(),
+        pane_id: Some(pane.pane_id.clone()),
+        session_name: Some(pane.session_name.clone()),
+        access_command: Some(access),
+        owned: pane.owned,
+        enabled: true,
+        status: "active".into(),
+        error: None,
+        queue_state: "ready".into(),
+        queue_state_at: now.clone(),
+        created_at: control.created_at.clone(),
+        updated_at: now,
+    })?;
+    state.db.update_tmux_queue_state(&control.id, "ready")?;
+    invalidate_discovery(state).await;
+    Ok(true)
 }
 
 fn control_turn_active(control: &TmuxControl) -> bool {

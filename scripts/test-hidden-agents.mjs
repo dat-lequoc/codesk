@@ -43,6 +43,20 @@ try {
   })
   assert.deepEqual(cleaned.hiddenAgentKeys, ['local:13:def'], 'prunes non-string keys')
 
+  assert.equal(reopened.state.settings.theme, 'system', 'theme defaults to system')
+  assert.equal(reopened.updateSettings({ theme: 'light' }).theme, 'light', 'theme persists light')
+  assert.equal(
+    reopened.updateSettings({ theme: 'solarized' }).theme,
+    'light',
+    'invalid theme values are ignored',
+  )
+  reopened.flushSync()
+  assert.equal(
+    new Store(dataDir).state.settings.theme,
+    'light',
+    'theme survives a reopen',
+  )
+
   const legacyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codesk-hidden-agents-legacy-'))
   await fs.writeFile(
     path.join(legacyDir, 'client-state.json'),
@@ -50,6 +64,7 @@ try {
   )
   const legacy = new Store(legacyDir)
   assert.deepEqual(legacy.state.settings.hiddenAgentKeys, [], 'legacy state gains an empty list')
+  assert.equal(legacy.state.settings.theme, 'system', 'legacy state gains the system theme')
   assert.deepEqual(
     legacy.state.settings.archivedRunKeys,
     ['local:old'],

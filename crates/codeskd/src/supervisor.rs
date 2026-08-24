@@ -92,7 +92,11 @@ impl Supervisor {
                         && control.status == "active"
                         && control.provider == request.provider
                         && control.native_session_id.as_deref() == Some(session_id)
-                });
+                }) || resume_already_running(
+                    &request.provider,
+                    session_id,
+                    process_command_lines(),
+                );
                 anyhow::ensure!(
                     !already_active,
                     "this provider session already has an active tmux writer; send input to the existing session"
@@ -903,6 +907,34 @@ fn workspace_prompt(prompt: &str, project: &Project, worktree: &Worktree) -> Str
     )
 }
 
+fn process_command_lines() -> Vec<String> {
+    std::process::Command::new("ps")
+        .args(["-ax", "-o", "args="])
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn resume_already_running(
+    provider: &str,
+    session_id: &str,
+    commands: impl IntoIterator<Item = impl AsRef<str>>,
+) -> bool {
+    commands.into_iter().any(|command| {
+        let command = command.as_ref();
+        providers::get(provider).is_some_and(|adapter| {
+            adapter.matches_command(command)
+                && adapter.command_session_id(command).as_deref() == Some(session_id)
+        })
+    })
+}
+
 pub(crate) fn process_alive(pgid: i32) -> bool {
     if pgid <= 0 {
         return false;
@@ -912,4 +944,24 @@ pub(crate) fn process_alive(pgid: i32) -> bool {
 }
 pub(crate) fn input_socket(run_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!("codesk-{run_id}.sock"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resume_already_running;
+
+    #[test]
+    fn resume_sees_a_live_codex_command_line() {
+        let session = "01a02d7b-fb6b-7693-92cf-1d548d170538";
+        assert!(resume_already_running(
+            "codex",
+            session,
+            [format!("/usr/bin/codex resume {session} --yolo")],
+        ));
+        assert!(!resume_already_running(
+            "codex",
+            session,
+            ["codex resume 00000000-0000-0000-0000-000000000000 --yolo"],
+        ));
+    }
 }

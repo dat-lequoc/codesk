@@ -92,6 +92,60 @@
     color-scheme: dark;
   }
 
+  /* -------------------------------------------------------------------------
+     Light theme.
+
+     Components only ever reference the token variables, so light mode is a
+     re-aim of the same ramp: the ink scale inverts (backgrounds go light,
+     text goes dark) and each accent trades its dark-tinted 950 backdrop for
+     a pale tint while the 400/500 text-and-fill steps darken enough to hold
+     contrast on white. `src/lib/theme.ts` toggles this class on <html>.
+  ------------------------------------------------------------------------- */
+  :root.light {
+    color-scheme: light;
+
+    --color-ink-975: #ffffff;
+    --color-ink-950: #f8faf9;
+    --color-ink-900: #f2f4f3;
+    --color-ink-850: #ecefed;
+    --color-ink-800: #e8ebe9;
+    --color-ink-750: #e1e5e3;
+    --color-ink-700: #dadedc;
+    --color-ink-650: #d0d5d2;
+    --color-ink-600: #c6ccc9;
+    --color-ink-500: #b4bab7;
+    --color-ink-400: #929894;
+    --color-ink-300: #676d6a;
+    --color-ink-200: #515754;
+    --color-ink-100: #343837;
+    --color-ink-50: #171918;
+
+    --color-grass-400: #1f8f5b;
+    --color-grass-500: #1c9e63;
+    --color-grass-600: #17744b;
+    --color-grass-950: #dcf2e6;
+
+    --color-ember-400: #c25e12;
+    --color-ember-500: #d1660f;
+    --color-ember-600: #a84f08;
+    --color-ember-950: #faeadb;
+
+    --color-amber-signal-400: #a3781a;
+    --color-amber-signal-500: #b08114;
+    --color-amber-signal-600: #8a6410;
+    --color-amber-signal-950: #f6edd4;
+
+    --color-scarlet-400: #d33a30;
+    --color-scarlet-500: #cc2f2f;
+    --color-scarlet-600: #a92222;
+    --color-scarlet-950: #fbe4e2;
+
+    --color-azure-400: #2b6cbe;
+    --color-azure-500: #2e6fbd;
+    --color-azure-600: #245793;
+    --color-azure-950: #e2ecf8;
+  }
+
   *,
   ::before,
   ::after {

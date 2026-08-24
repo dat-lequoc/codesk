@@ -11,8 +11,9 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::{
-    model::{DiscoveredAgent, Project, ProviderSession, SessionMessage},
-    providers,
+    db::Db,
+    model::{DiscoveredAgent, Project, ProviderSession, Run, SessionMessage, TmuxControl},
+    providers, tmux,
 };
 
 mod agy;
@@ -34,7 +35,7 @@ pub(crate) use pi::index_pi;
 use agy::{agy_transcript_path, agy_workspace_paths, parse_agy_messages};
 use claude::{claude_project_directories, claude_user_text};
 use codex::{codex_rollout_matches_project, codex_rollout_path, parse_codex_history_event};
-use dsh::{dsh_project_directory, dsh_session_files, dsh_values, parse_dsh_messages};
+use dsh::{dsh_project_directory, dsh_session_files, dsh_turn_active, dsh_values, parse_dsh_messages};
 
 const MAX_SESSIONS_PER_PROVIDER: usize = 50;
 /// Newest indexed sessions checked when a discovered process has to be matched to
@@ -121,7 +122,7 @@ fn list_sync(
                 })
             })
             .or_else(|| {
-                unique_active_session_id(project, &agent.provider, &result)
+                unique_live_session_id(project, &agent.provider, &result)
                     .ok()
                     .flatten()
             });
@@ -167,15 +168,104 @@ fn list_sync(
     Ok(result)
 }
 
+/// Attach a remembered pane name / access command after the live process is gone.
+/// Environment reads these fields; without this, a detached Codex chat looks like
+/// it never had tmux.
+pub fn apply_remembered_tmux(
+    sessions: &mut [ProviderSession],
+    controls: &[TmuxControl],
+    runs: &[Run],
+) {
+    for session in sessions.iter_mut() {
+        if session.tmux_name.is_some() {
+            continue;
+        }
+        if let Some(control) = controls.iter().find(|control| {
+            control.provider == session.provider
+                && control.native_session_id.as_deref() == Some(session.native_session_id.as_str())
+                && control.session_name.is_some()
+        }) {
+            session.tmux_name = control.session_name.clone();
+            session.tmux_access_command = remembered_access_command(control);
+            session.tmux_owned = control.owned;
+            continue;
+        }
+        if let Some(run) = runs.iter().find(|run| {
+            run.provider == session.provider
+                && run.project_id == session.project_id
+                && run.provider_session_id.as_deref() == Some(session.native_session_id.as_str())
+                && run.tmux_name.is_some()
+        }) {
+            session.tmux_name = run.tmux_name.clone();
+            session.tmux_access_command = run.tmux_access_command.clone().or_else(|| {
+                run.tmux_name
+                    .as_deref()
+                    .map(|name| tmux::access_command(None, name))
+            });
+            session.tmux_owned = true;
+        }
+    }
+}
+
+fn remembered_access_command(control: &TmuxControl) -> Option<String> {
+    control.access_command.clone().or_else(|| {
+        control
+            .session_name
+            .as_deref()
+            .map(|name| tmux::access_command(control.socket_path.as_deref().map(Path::new), name))
+    })
+}
+
+/// Keep a detected pane tied to the conversation it was overlaid on, so
+/// Environment still has the attach command after the process exits.
+pub fn bind_detected_tmux_sessions(db: &Db, sessions: &[ProviderSession]) -> Result<()> {
+    let controls = db.tmux_controls()?;
+    for session in sessions {
+        let Some(pid) = session.pid else {
+            continue;
+        };
+        let Some(control) = controls.iter().find(|control| {
+            control.source_pid == pid
+                && control.provider == session.provider
+                && (control.native_session_id.is_none()
+                    || control.native_session_id.as_deref()
+                        == Some(session.native_session_id.as_str()))
+        }) else {
+            continue;
+        };
+        let access = session
+            .tmux_access_command
+            .clone()
+            .or_else(|| remembered_access_command(control));
+        if control.native_session_id.as_deref() == Some(session.native_session_id.as_str())
+            && control.session_name.is_some()
+            && control.access_command.is_some()
+        {
+            continue;
+        }
+        let mut updated = control.clone();
+        updated.native_session_id = Some(session.native_session_id.clone());
+        if updated.session_name.is_none() {
+            updated.session_name = session.tmux_name.clone();
+        }
+        if updated.access_command.is_none() {
+            updated.access_command = access;
+        }
+        updated.updated_at = chrono::Utc::now().to_rfc3339();
+        db.upsert_tmux_control(&updated)?;
+    }
+    Ok(())
+}
+
 /// Resolves the conversation a discovered process is working on when the process
 /// itself does not say. Harnesses differ here: Codex keeps its rollout file open,
 /// so `lsof` alone identifies the session, while Kiro appends to its transcript
-/// and closes it again, leaving no file descriptor to follow. For those, the
-/// live session is the indexed one whose transcript still has an unfinished
-/// turn. Ambiguity is never guessed away: two active transcripts attribute
-/// nothing, because a wrong attribution shows a running badge on the wrong
-/// conversation and points steering at the wrong pane.
-fn unique_active_session_id(
+/// and closes it again, leaving no file descriptor to follow.
+///
+/// Prefer the unique in-progress turn. After the turn ends the process is still
+/// sitting in tmux, so the unique recently written transcript is the live pane.
+/// Ambiguity is never guessed away: two recent transcripts attribute nothing.
+fn unique_live_session_id(
     project: &Project,
     provider: &str,
     indexed: &[ProviderSession],
@@ -192,18 +282,42 @@ fn unique_active_session_id(
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     candidates.truncate(ACTIVE_SESSION_SCAN_LIMIT);
-    let active = candidates
-        .into_iter()
-        .filter_map(|session| {
-            let path = source_path(project, provider, &session.native_session_id).ok()?;
-            let writing = fs::metadata(&path)
-                .and_then(|metadata| metadata.modified())
-                .is_ok_and(|modified| modified >= cutoff);
-            (writing && adapter.transcript_turn_active(&path))
-                .then(|| session.native_session_id.clone())
-        })
-        .collect::<Vec<_>>();
-    Ok((active.len() == 1).then(|| active[0].clone()))
+    let mut recent_active = Vec::new();
+    let mut recent_idle = Vec::new();
+    for session in candidates {
+        let Ok(path) = source_path(project, provider, &session.native_session_id) else {
+            continue;
+        };
+        let writing = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified >= cutoff);
+        if !writing {
+            continue;
+        }
+        if adapter.transcript_turn_active(&path) {
+            recent_active.push(session.native_session_id.clone());
+        } else {
+            recent_idle.push(session.native_session_id.clone());
+        }
+    }
+    Ok(attribute_discovered_session_id(
+        &recent_active,
+        &recent_idle,
+    ))
+}
+
+fn attribute_discovered_session_id(
+    recent_active: &[String],
+    recent_idle: &[String],
+) -> Option<String> {
+    match recent_active {
+        [id] => Some(id.clone()),
+        [] => match recent_idle {
+            [id] => Some(id.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(crate) fn transcript_turn_active(path: &Path, provider: &str) -> bool {
@@ -239,17 +353,7 @@ pub(crate) fn transcript_turn_active(path: &Path, provider: &str) -> bool {
 
 fn scan_transcript_turn_active(path: &Path, provider: &str) -> bool {
     if provider == "dsh" {
-        return dsh_values(path, MAX_TRANSCRIPT_BYTES)
-            .map(|values| {
-                values
-                    .into_iter()
-                    .fold(false, |active, value| match value["type"].as_str() {
-                        Some("turn/start") => true,
-                        Some("turn/end") => false,
-                        _ => active,
-                    })
-            })
-            .unwrap_or(false);
+        return dsh_turn_active(path);
     }
     latest_jsonl_status(path, |value| match provider {
         "codex" => {
@@ -971,6 +1075,136 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn remembers_tmux_access_after_the_process_detaches() {
+        let mut sessions = vec![ProviderSession {
+            id: "codex:session-1".into(),
+            provider: "codex".into(),
+            native_session_id: "session-1".into(),
+            project_id: "project-1".into(),
+            cwd: "/dev".into(),
+            title: "plugin supervisor".into(),
+            created_at: "2026-08-23T00:00:00Z".into(),
+            updated_at: "2026-08-23T00:00:00Z".into(),
+            status: "idle".into(),
+            pid: None,
+            managed_run_id: None,
+            model: None,
+            effort: None,
+            input_available: false,
+            input_transport: None,
+            tmux_name: None,
+            tmux_access_command: None,
+            tmux_controlled: false,
+            tmux_owned: false,
+        }];
+        let control = TmuxControl {
+            id: "detected-1".into(),
+            project_id: Some("project-1".into()),
+            run_id: None,
+            provider: "codex".into(),
+            native_session_id: Some("session-1".into()),
+            transcript_path: None,
+            source_pid: 99,
+            source_pgid: 99,
+            cwd: "/dev".into(),
+            original_command: "codex --yolo".into(),
+            socket_path: None,
+            pane_id: Some("%3".into()),
+            session_name: Some("work".into()),
+            access_command: Some("tmux attach-session -t work".into()),
+            owned: false,
+            enabled: false,
+            status: "detected".into(),
+            error: None,
+            queue_state: "ready".into(),
+            queue_state_at: "2026-08-23T00:00:00Z".into(),
+            created_at: "2026-08-23T00:00:00Z".into(),
+            updated_at: "2026-08-23T00:00:00Z".into(),
+        };
+        apply_remembered_tmux(&mut sessions, &[control], &[]);
+        assert_eq!(sessions[0].tmux_name.as_deref(), Some("work"));
+        assert_eq!(
+            sessions[0].tmux_access_command.as_deref(),
+            Some("tmux attach-session -t work")
+        );
+    }
+
+    #[test]
+    fn synthesizes_an_access_command_from_a_remembered_session_name() {
+        let mut sessions = vec![ProviderSession {
+            id: "codex:session-1".into(),
+            provider: "codex".into(),
+            native_session_id: "session-1".into(),
+            project_id: "project-1".into(),
+            cwd: "/dev".into(),
+            title: "plugin supervisor".into(),
+            created_at: "2026-08-23T00:00:00Z".into(),
+            updated_at: "2026-08-23T00:00:00Z".into(),
+            status: "idle".into(),
+            pid: None,
+            managed_run_id: None,
+            model: None,
+            effort: None,
+            input_available: false,
+            input_transport: None,
+            tmux_name: None,
+            tmux_access_command: None,
+            tmux_controlled: false,
+            tmux_owned: false,
+        }];
+        let control = TmuxControl {
+            id: "detected-1".into(),
+            project_id: Some("project-1".into()),
+            run_id: None,
+            provider: "codex".into(),
+            native_session_id: Some("session-1".into()),
+            transcript_path: None,
+            source_pid: 99,
+            source_pgid: 99,
+            cwd: "/dev".into(),
+            original_command: "codex --yolo".into(),
+            socket_path: None,
+            pane_id: Some("%3".into()),
+            session_name: Some("dev".into()),
+            access_command: None,
+            owned: false,
+            enabled: false,
+            status: "detected".into(),
+            error: None,
+            queue_state: "ready".into(),
+            queue_state_at: "2026-08-23T00:00:00Z".into(),
+            created_at: "2026-08-23T00:00:00Z".into(),
+            updated_at: "2026-08-23T00:00:00Z".into(),
+        };
+        apply_remembered_tmux(&mut sessions, &[control], &[]);
+        assert_eq!(sessions[0].tmux_name.as_deref(), Some("dev"));
+        assert_eq!(
+            sessions[0].tmux_access_command.as_deref(),
+            Some("tmux attach-session -t dev")
+        );
+    }
+
+    #[test]
+    fn attributes_a_live_pane_to_the_unique_recent_idle_transcript() {
+        assert_eq!(
+            attribute_discovered_session_id(&[], &["session-1".into()]).as_deref(),
+            Some("session-1")
+        );
+        assert_eq!(
+            attribute_discovered_session_id(&["running".into()], &["idle".into()]).as_deref(),
+            Some("running")
+        );
+        assert_eq!(
+            attribute_discovered_session_id(&[], &["a".into(), "b".into()]),
+            None
+        );
+        assert_eq!(
+            attribute_discovered_session_id(&["a".into(), "b".into()], &["c".into()]),
+            None
+        );
+    }
 
     #[test]
     fn project_scope_requires_the_exact_working_directory() {

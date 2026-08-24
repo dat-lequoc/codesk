@@ -57,6 +57,9 @@ export function ObservedScreen({
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState(false)
   const [moving, setMoving] = useState(false)
+  useEffect(() => {
+    if (agent.tmux_session_name || agent.tmux_controlled) setMoving(false)
+  }, [agent.tmux_session_name, agent.tmux_controlled])
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
   const [logOpen, setLogOpen] = useState(false)
   const [log, setLog] = useState<{ text: string; capturedAt: string } | null>(null)
@@ -190,7 +193,11 @@ export function ObservedScreen({
         </dl>
         {(agent.tmux_session_name || agent.tmux_access_command) && (
           <div className="mx-auto mt-2 w-[min(650px,100%)] rounded-lg border border-line-strong bg-ink-700 px-3 py-2.5">
-            <TmuxDetails name={agent.tmux_session_name} command={agent.tmux_access_command} />
+            <TmuxDetails
+              name={agent.tmux_session_name}
+              command={agent.tmux_access_command}
+              hostCommand={agent.tmux_host_access_command}
+            />
           </div>
         )}
         <div className="mt-3 flex items-center justify-center gap-2">

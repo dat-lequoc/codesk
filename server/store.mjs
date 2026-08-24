@@ -8,7 +8,7 @@ const defaults = {
   hosts: [{ id: 'local', name: localHostName, type: 'local', daemonPort: 4243, status: 'checking', createdAt: new Date().toISOString() }],
   drafts: [],
   navigationByHost: {},
-  settings: { notifications: true, pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [], archivedRunKeys: [], hiddenAgentKeys: [] },
+  settings: { notifications: true, theme: 'system', pinnedSessionKeys: [], pinnedSessions: [], archivedSessionKeys: [], archivedSessions: [], archivedRunKeys: [], hiddenAgentKeys: [] },
 }
 
 export class Store {
@@ -58,6 +58,7 @@ export class Store {
     if (!Array.isArray(this.state.settings.archivedSessions)) this.state.settings.archivedSessions = []
     if (!Array.isArray(this.state.settings.archivedRunKeys)) this.state.settings.archivedRunKeys = []
     if (!Array.isArray(this.state.settings.hiddenAgentKeys)) this.state.settings.hiddenAgentKeys = []
+    if (!['system', 'light', 'dark'].includes(this.state.settings.theme)) this.state.settings.theme = 'system'
     if (draftsChanged) this.save()
   }
   /// Persist soon, not now. Every mutation used to rewrite the full document
@@ -107,6 +108,7 @@ export class Store {
   }
   updateSettings(changes) {
     if (typeof changes.notifications === 'boolean') this.state.settings.notifications = changes.notifications
+    if (['system', 'light', 'dark'].includes(changes.theme)) this.state.settings.theme = changes.theme
     if (Array.isArray(changes.pinnedSessionKeys)) this.state.settings.pinnedSessionKeys = [...new Set(changes.pinnedSessionKeys.filter((key) => typeof key === 'string'))]
     if (Array.isArray(changes.pinnedSessions)) {
       const allowed = new Set(this.state.settings.pinnedSessionKeys)

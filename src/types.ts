@@ -121,6 +121,7 @@ export type Run = {
   inputTransport?: 'tmux' | null
   tmuxName?: string | null
   tmuxAccessCommand?: string | null
+  tmuxHostAccessCommand?: string | null
 }
 
 export type AppState = {
@@ -132,6 +133,8 @@ export type AppState = {
   providersByHost: Record<string, Provider[]>
   settings: {
     notifications: boolean
+    /// Palette preference; `system` follows the OS appearance.
+    theme: 'system' | 'light' | 'dark'
     pinnedSessionKeys: string[]
     pinnedSessions: ProviderSession[]
     archivedSessionKeys: string[]
@@ -177,6 +180,7 @@ export type ProviderSession = {
   inputTransport?: 'resume' | 'acp' | 'api' | 'tmux' | null
   tmuxName?: string | null
   tmuxAccessCommand?: string | null
+  tmuxHostAccessCommand?: string | null
   tmuxControlled?: boolean
   tmuxOwned?: boolean
   model?: string | null
@@ -253,6 +257,7 @@ export type DiscoveredAgent = {
   tmux_pane_id?: string | null
   tmux_session_name?: string | null
   tmux_access_command?: string | null
+  tmux_host_access_command?: string | null
   tmux_controlled?: boolean
   tmux_owned?: boolean
 }

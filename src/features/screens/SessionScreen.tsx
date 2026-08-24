@@ -125,6 +125,9 @@ export function SessionScreen({
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState<'adopt' | 'move' | null>(null)
   const [moving, setMoving] = useState(false)
+  useEffect(() => {
+    if (session.tmuxName || session.tmuxControlled) setMoving(false)
+  }, [session.tmuxName, session.tmuxControlled])
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
   const hasQueued = queued.length > 0
   const onStartedRef = useLatest(onStarted)
@@ -157,13 +160,21 @@ export function SessionScreen({
     host?.status === 'online' &&
     session.inputTransport === 'tmux' &&
     session.tmuxControlled === true
+  // A live pane that is not adopted yet still has a name. Sending should take
+  // control and deliver, instead of hiding Queue/Resume behind Enable control.
+  const canAdoptAndSend =
+    attached &&
+    host?.status === 'online' &&
+    Boolean(session.tmuxName) &&
+    session.tmuxControlled !== true
   const canResume =
     !attached &&
     session.status !== 'running' &&
     host?.status === 'online' &&
     provider?.available === true &&
     provider.resume
-  const canSend = canUseAttachedSession || canResume
+  const canQueue = canUseAttachedSession || canAdoptAndSend
+  const canSend = canUseAttachedSession || canAdoptAndSend || canResume
   const [models, setModels] = useState(() => kiroModelCatalog.get(session.hostId) || [])
   const modelsRequested = useRef(false)
   // A terminal-driven session reports its live model and effort on the harness
@@ -229,7 +240,8 @@ export function SessionScreen({
     submitting.current = true
     setBusy(true)
     try {
-      if (canUseAttachedSession) {
+      if (canUseAttachedSession || canAdoptAndSend) {
+        if (canAdoptAndSend) await api.adoptExternalTmux(session)
         // A session backed by a Codesk-managed run must go through the run
         // input API; the external-session path refuses managed writers.
         if (session.managedRunId) {
@@ -289,7 +301,7 @@ export function SessionScreen({
       chooseCommand(commandSuggestions[selectedCommandIndex])
       return
     }
-    if (event.key === 'Tab' && canUseAttachedSession) {
+    if (event.key === 'Tab' && canQueue) {
       event.preventDefault()
       void submitMessage('queue')
       return
@@ -480,7 +492,11 @@ export function SessionScreen({
               value={host?.name}
             />
             <EnvironmentRow icon={<FolderGit2 size={16} />} label="Project" value={project?.name} />
-            <TmuxDetails name={session.tmuxName} command={session.tmuxAccessCommand} />
+            <TmuxDetails
+              name={session.tmuxName}
+              command={session.tmuxAccessCommand}
+              hostCommand={session.tmuxHostAccessCommand}
+            />
           </EnvironmentPopover>
         )}
         {selectedActivity && (
@@ -616,7 +632,7 @@ export function SessionScreen({
               onChange={(event) => setMessage(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               placeholder={
-                canUseAttachedSession
+                canQueue
                   ? `Steer this ${providerName(session.provider)} session`
                   : `Continue this ${providerName(session.provider)} conversation`
               }
@@ -629,35 +645,46 @@ export function SessionScreen({
               >
                 <Plus size={18} />
               </button>
-              {canUseAttachedSession && (
+              {canQueue && (
                 <>
                   <span className={deliveryMode}>
                     <Send size={13} />
                     Enter · Steer
                   </span>
-                  <span className={cn(deliveryMode, deliveryModeQueue)}>
+                  <button
+                    type="button"
+                    className={cn(deliveryMode, deliveryModeQueue)}
+                    disabled={!message.trim() || busy}
+                    onClick={() => void submitMessage('queue')}
+                  >
                     <ListPlus size={13} />
-                    Tab · Queue
-                  </span>
+                    Queue
+                  </button>
                 </>
               )}
               <span className="flex-1" />
               <small className={composerHint}>
-                {canUseAttachedSession
+                {canQueue
                   ? [commandContext.currentModel, commandContext.currentEffort]
                       .filter(Boolean)
                       .join(' · ') || session.tmuxName
-                  : `Resume · ${provider?.name}`}
+                  : provider?.name}
               </small>
               <button
-                className={cn(sendButton, sendButtonSmall)}
-                aria-label="Send message"
+                type="submit"
+                className={cn(
+                  sendButton,
+                  sendButtonSmall,
+                  canResume && 'w-auto gap-1.5 px-2.5',
+                )}
+                aria-label={canResume ? 'Resume conversation' : 'Send message'}
                 disabled={!message.trim() || busy}
                 title={
-                  canUseAttachedSession ? 'Steer now (Tab queues instead)' : 'Continue conversation'
+                  canQueue ? 'Steer now (Tab queues instead)' : 'Continue conversation'
                 }
               >
                 {busy ? <RefreshCw className="animate-spin" size={15} /> : <Send size={17} />}
+                {canResume ? 'Resume' : null}
               </button>
             </ComposerFooter>
           </ComposerFrame>
