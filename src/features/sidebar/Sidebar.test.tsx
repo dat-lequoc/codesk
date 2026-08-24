@@ -44,6 +44,7 @@ const setup = (state: AppState, overrides: Record<string, unknown> = {}) => {
     onRegisterFolder: vi.fn().mockResolvedValue(undefined),
     onSettings: vi.fn(),
     onArchives: vi.fn(),
+    onJumpToUnread: vi.fn(),
   }
   const props = {
     state,
@@ -117,7 +118,27 @@ describe('Sidebar — notifications', () => {
 
   it('labels the bell with the unread count', () => {
     setup(baseState(), { unreadKeys: new Set(['run:1', 'run:2']) })
-    expect(screen.getByRole('button', { name: '2 unread agent updates' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '2 unread agent updates — click to open' }),
+    ).toBeInTheDocument()
+  })
+
+  it('jumps to the unread conversation instead of opening archives', async () => {
+    const { onJumpToUnread, onArchives } = setup(baseState(), {
+      unreadKeys: new Set(['run:1']),
+    })
+    await userEvent.click(
+      screen.getByRole('button', { name: '1 unread agent updates — click to open' }),
+    )
+    expect(onJumpToUnread).toHaveBeenCalledOnce()
+    expect(onArchives).not.toHaveBeenCalled()
+  })
+
+  it('opens archives from the bell when nothing is unread', async () => {
+    const { onJumpToUnread, onArchives } = setup(baseState())
+    await userEvent.click(screen.getByRole('button', { name: 'Notifications' }))
+    expect(onArchives).toHaveBeenCalledOnce()
+    expect(onJumpToUnread).not.toHaveBeenCalled()
   })
 
   it('caps the badge at 9+', () => {

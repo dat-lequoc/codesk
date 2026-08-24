@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import { makeRun, makeSession, makeState, resetIds } from '../test/factories'
-import { sessionNotificationKey } from './keys'
+import { sessionKey, sessionNotificationKey } from './keys'
 import { reconcileUnreadKeys } from './notifications'
 
 beforeEach(resetIds)
@@ -39,15 +39,41 @@ describe('reconcileUnreadKeys', () => {
     expect(reconcileUnreadKeys(new Set([key]), makeState({ runs: [run] }))).toEqual(new Set([key]))
   })
 
-  it('keeps unread badges on pinned and archived conversations', () => {
+  it('keeps unread badges on pinned conversations', () => {
     const pinned = makeSession({ hostId: 'host-a', provider: 'codex', nativeSessionId: 'pin' })
+    const base = makeState()
+    const state = makeState({
+      settings: { ...base.settings, pinnedSessions: [pinned] },
+    })
+    const keys = new Set([sessionNotificationKey(pinned)])
+    expect(reconcileUnreadKeys(keys, state)).toEqual(keys)
+  })
+
+  // Archiving is the user saying they are done with the conversation, so the
+  // bell must not keep counting it — nothing visible would explain the badge.
+  it('drops unread badges on archived conversations', () => {
     const archived = makeSession({ hostId: 'host-a', provider: 'codex', nativeSessionId: 'arc' })
     const base = makeState()
     const state = makeState({
-      settings: { ...base.settings, pinnedSessions: [pinned], archivedSessions: [archived] },
+      settings: {
+        ...base.settings,
+        archivedSessionKeys: [sessionKey(archived)],
+        archivedSessions: [archived],
+      },
     })
-    const keys = new Set([sessionNotificationKey(pinned), sessionNotificationKey(archived)])
-    expect(reconcileUnreadKeys(keys, state)).toEqual(keys)
+    expect(reconcileUnreadKeys(new Set([sessionNotificationKey(archived)]), state)).toEqual(
+      new Set(),
+    )
+  })
+
+  it('drops the unread badge of an archived run instead of promoting it', () => {
+    const run = makeRun({ id: 'run-1', hostId: 'host-a', provider: 'codex', sessionId: 'n1' })
+    const base = makeState()
+    const state = makeState({
+      runs: [run],
+      settings: { ...base.settings, archivedRunKeys: [`${run.hostId}:${run.id}`] },
+    })
+    expect(reconcileUnreadKeys(new Set(['run:run-1']), state)).toEqual(new Set())
   })
 
   it('collapses two run keys that resolve to the same session', () => {

@@ -90,6 +90,7 @@ export function Sidebar({
   onRegisterFolder,
   onSettings,
   onArchives,
+  onJumpToUnread,
 }: {
   state: AppState
   runs: Run[]
@@ -126,6 +127,7 @@ export function Sidebar({
   onRegisterFolder: (hostId: string, path: string) => Promise<void>
   onSettings: () => void
   onArchives: () => void
+  onJumpToUnread: () => void
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(loadExpandedProjects)
   const [projectItemLimits, setProjectItemLimits] = useState<Map<string, number>>(() => new Map())
@@ -452,13 +454,22 @@ export function Sidebar({
         <button className={iconButton} title="Search conversations" onClick={openSearch}>
           <Search size={17} />
         </button>
-        {/* The badge is live status; opening archives is the closest thing to
-            a notification list until a dedicated center exists. */}
+        {/* With unread updates the bell jumps straight to the conversation the
+            badge counts; otherwise archives is the closest thing to a
+            notification list until a dedicated center exists. */}
         <button
           className={cn(iconButton, 'relative')}
-          title={unreadCount ? `${unreadCount} unread agent updates` : 'Notifications'}
-          aria-label={unreadCount ? `${unreadCount} unread agent updates` : 'Notifications'}
-          onClick={onArchives}
+          title={
+            unreadCount
+              ? `${unreadCount} unread agent updates — click to open`
+              : 'Notifications'
+          }
+          aria-label={
+            unreadCount
+              ? `${unreadCount} unread agent updates — click to open`
+              : 'Notifications'
+          }
+          onClick={unreadCount ? onJumpToUnread : onArchives}
         >
           <Bell size={17} />
           {unreadCount > 0 && (

@@ -125,9 +125,10 @@ export function SessionScreen({
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState<'adopt' | 'move' | null>(null)
   const [moving, setMoving] = useState(false)
-  useEffect(() => {
-    if (session.tmuxName || session.tmuxControlled) setMoving(false)
-  }, [session.tmuxName, session.tmuxControlled])
+  // Adjust during render instead of in an effect: the move finished the moment
+  // the session reports a tmux name, and an effect would paint the stale
+  // "Moving to tmux" banner for one extra frame.
+  if (moving && (session.tmuxName || session.tmuxControlled)) setMoving(false)
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
   const hasQueued = queued.length > 0
   const onStartedRef = useLatest(onStarted)

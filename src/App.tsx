@@ -13,7 +13,14 @@ import { api } from './api'
 import type { AppState, DiscoveredAgent, Project, ProviderSession, Run } from './types'
 import { useLatest } from './hooks/useLatest'
 import { empty, observedAgents } from './lib/app-state'
-import { projectKey, recentFirst, runRowKey, sessionKey, sessionNotificationKey } from './lib/keys'
+import {
+  projectKey,
+  recentFirst,
+  runNotificationKeys,
+  runRowKey,
+  sessionKey,
+  sessionNotificationKey,
+} from './lib/keys'
 import { hiddenAgentKey } from './lib/observed'
 import { prepareNotifications } from './lib/notifications'
 import { applyTheme, rememberTheme, watchSystemTheme } from './lib/theme'
@@ -277,7 +284,13 @@ export function App() {
       pinnedSessions,
     }
     setState((current) => ({ ...current, settings: nextSettings }))
-    if (!isArchived && selectedSessionKey === key) setSelectedSessionKey(null)
+    if (!isArchived) {
+      // Archiving dismisses the conversation, its unread badge included; the
+      // reconciler would drop the key on the next poll anyway, but the bell
+      // should not keep counting for those seconds.
+      readSession(nextSession)
+      if (selectedSessionKey === key) setSelectedSessionKey(null)
+    }
     try {
       const saved = await api.updateSettings({
         archivedSessionKeys,
@@ -306,6 +319,7 @@ export function App() {
     const prior = state.settings
     const nextSettings = { ...prior, archivedRunKeys }
     setState((current) => ({ ...current, settings: nextSettings }))
+    if (!isArchived) readRun(nextRun)
     const deselect = !isArchived && selectedId === nextRun.id
     if (deselect) setSelectedId(null)
     try {
@@ -491,6 +505,34 @@ export function App() {
         }}
         onSettings={() => setSettings(true)}
         onArchives={() => setArchives(true)}
+        onJumpToUnread={() => {
+          // The badge is only useful if it can point at the thing it counts.
+          // Resolve the first unread key to its conversation and open it; keys
+          // that resolve to nothing are stale, so drop them instead of leaving
+          // a ghost badge nothing in the sidebar explains.
+          const stale: string[] = []
+          for (const key of unreadKeys) {
+            const unreadSession = allSessions.find(
+              (item) => sessionNotificationKey(item) === key,
+            )
+            if (unreadSession) {
+              readSession(unreadSession)
+              selectSession(unreadSession)
+              if (stale.length) clearUnread(stale)
+              return
+            }
+            const unreadRun = state.runs.find((item) => runNotificationKeys(item).includes(key))
+            if (unreadRun) {
+              readRun(unreadRun)
+              selectRun(unreadRun)
+              if (stale.length) clearUnread(stale)
+              return
+            }
+            stale.push(key)
+          }
+          if (stale.length) clearUnread(stale)
+          setArchives(true)
+        }}
       />
       <section className="min-h-0 min-w-0 bg-canvas">
         {session ? (

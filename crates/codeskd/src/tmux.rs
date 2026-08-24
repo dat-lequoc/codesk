@@ -214,6 +214,11 @@ impl TmuxManager {
             ],
         )
         .await?;
+        // Harness TUIs (Codex among them) treat keys arriving in the same burst
+        // as a paste as pasted text, so an immediate Enter becomes a newline in
+        // the composer and the prompt silently never submits. Let the paste
+        // burst window close before pressing Enter.
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         run_tmux(socket, &["send-keys", "-t", &pane.pane_id, "Enter"]).await?;
         Ok(())
     }

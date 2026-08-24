@@ -57,9 +57,10 @@ export function ObservedScreen({
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState(false)
   const [moving, setMoving] = useState(false)
-  useEffect(() => {
-    if (agent.tmux_session_name || agent.tmux_controlled) setMoving(false)
-  }, [agent.tmux_session_name, agent.tmux_controlled])
+  // Adjust during render instead of in an effect: the move finished the moment
+  // the agent reports a tmux session, and an effect would paint the stale
+  // "Moving to tmux" state for one extra frame.
+  if (moving && (agent.tmux_session_name || agent.tmux_controlled)) setMoving(false)
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
   const [logOpen, setLogOpen] = useState(false)
   const [log, setLog] = useState<{ text: string; capturedAt: string } | null>(null)
