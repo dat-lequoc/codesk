@@ -263,17 +263,12 @@ describe('SessionScreen · taking control of a terminal session', () => {
 
 describe('SessionScreen · queued prompts', () => {
   it('lists a managed run queue from run events', () => {
-    mount(
-      controlled({ managedRunId: 'run-managed' }),
-      [],
-      makeProvider(),
-      [
-        makeEvent({
-          kind: 'queue.added',
-          payload: { queue_id: 'q-run', text: 'after compact' },
-        }),
-      ],
-    )
+    mount(controlled({ managedRunId: 'run-managed' }), [], makeProvider(), [
+      makeEvent({
+        kind: 'queue.added',
+        payload: { queue_id: 'q-run', text: 'after compact' },
+      }),
+    ])
     expect(screen.getByText('1 queued')).toBeInTheDocument()
     expect(screen.getByText(/after compact/)).toBeInTheDocument()
   })
@@ -329,10 +324,10 @@ describe('SessionScreen · environment', () => {
 
   it('shows the on-host tmux command for a remote session', async () => {
     const remote = makeHost({
-      id: 'host-kortix',
-      name: 'kortix-prod',
+      id: 'host-vps-2',
+      name: 'vps-2',
       type: 'ssh',
-      sshAlias: 'kortix-prod',
+      sshAlias: 'vps-2',
     })
     const hostCommand =
       'tmux -S /root/.local/share/codesk/tmux/codesk.sock attach-session -t codesk-codex-4c92e1d5'
@@ -341,7 +336,7 @@ describe('SessionScreen · environment', () => {
         session={controlled({
           hostId: remote.id,
           tmuxName: 'codesk-codex-4c92e1d5',
-          tmuxAccessCommand: `ssh -t 'kortix-prod' '${hostCommand}'`,
+          tmuxAccessCommand: `ssh -t 'vps-2' '${hostCommand}'`,
           tmuxHostAccessCommand: hostCommand,
         })}
         messages={[]}
@@ -355,7 +350,7 @@ describe('SessionScreen · environment', () => {
     )
     await userEvent.click(screen.getByRole('button', { name: /Environment/ }))
     const panel = screen.getByText('Project').closest('div')!.parentElement!
-    expect(within(panel).getByText('kortix-prod')).toBeInTheDocument()
+    expect(within(panel).getByText('vps-2')).toBeInTheDocument()
     expect(within(panel).getByText('Access')).toBeInTheDocument()
     expect(within(panel).getByText('On host')).toBeInTheDocument()
     expect(within(panel).getByText(hostCommand)).toBeInTheDocument()

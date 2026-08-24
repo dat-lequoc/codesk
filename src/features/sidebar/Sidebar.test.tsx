@@ -415,7 +415,7 @@ describe('Sidebar — observed sessions', () => {
   })
 
   it('groups detached agents under their host and marks remotes', async () => {
-    const remote = makeHost({ id: 'host-b', name: 'quocd2', type: 'ssh', status: 'online' })
+    const remote = makeHost({ id: 'host-b', name: 'vps-1', type: 'ssh', status: 'online' })
     const localAgent = makeAgent({ pid: 71, process_group_id: 71, cwd: '/home/dev/scratch' })
     const remoteAgent = makeAgent({ pid: 77, process_group_id: 77, cwd: '/srv/elsewhere' })
     setup(
@@ -427,7 +427,7 @@ describe('Sidebar — observed sessions', () => {
     await userEvent.click(screen.getByRole('button', { name: /Outside your projects/ }))
     const section = screen.getByLabelText('Agents outside your projects')
     expect(within(section).getByText('This Mac')).toBeInTheDocument()
-    expect(within(section).getByText('quocd2')).toBeInTheDocument()
+    expect(within(section).getByText('vps-1')).toBeInTheDocument()
     expect(within(section).getByText('· remote')).toBeInTheDocument()
     expect(within(section).getByText('Codex · scratch')).toBeInTheDocument()
     expect(within(section).getByText('Codex · elsewhere')).toBeInTheDocument()

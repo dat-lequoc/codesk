@@ -1,7 +1,7 @@
 // Live test: connecting an SSH host that has no codeskd must install and start
 // the daemon automatically, with no manual install step.
 //
-//   CODESK_BOOTSTRAP_TARGET=kortix-prod CODESK_BOOTSTRAP_PEER=quocd2 \
+//   CODESK_BOOTSTRAP_TARGET=vps-2 CODESK_BOOTSTRAP_PEER=vps-1 \
 //     node scripts/test-remote-bootstrap-live.mjs
 //
 // The target must be reachable by `ssh <alias>`; the test repeatedly removes

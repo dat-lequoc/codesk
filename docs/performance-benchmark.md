@@ -9,7 +9,7 @@ The reference run used:
 - macOS 26.5 (25F71), Apple Silicon `Mac17,2`, 16 GB RAM;
 - the packaged debug application installed at `/Applications/Codesk.app`;
 - the local gateway on `127.0.0.1:4242` and local `codeskd` on `127.0.0.1:4243`;
-- one configured remote host, `quocd2`, connected through the app-managed SSH tunnel;
+- one configured remote host, `vps-1`, connected through the app-managed SSH tunnel;
 - the main window visible, no active provider turn, navigation loaded, and caches warm;
 - at least 30 seconds of settling time after launch before sampling.
 
@@ -61,12 +61,12 @@ Treat memory as a trend rather than a hard gate because WebKit varies with windo
 Run from the repository root:
 
 ```bash
-rtk npm ci
-rtk npm run check
-rtk npm test
-rtk npm run desktop:build -- --debug --bundles app
-rtk ditto target/debug/bundle/macos/Codesk.app /Applications/Codesk.app
-rtk open -a /Applications/Codesk.app
+npm ci
+npm run check
+npm test
+npm run desktop:build -- --debug --bundles app
+ditto target/debug/bundle/macos/Codesk.app /Applications/Codesk.app
+open -a /Applications/Codesk.app
 ```
 
 Wait for the local and remote hosts to show online, open the same project and conversation used for the comparison, then leave the app untouched for at least 30 seconds. Keep window visibility, project count, remote-host count, and active-run state identical between revisions.
@@ -74,14 +74,14 @@ Wait for the local and remote hosts to show online, open the same project and co
 ### 2. Inventory the process set
 
 ```bash
-rtk ps -axo pid=,ppid=,lstart=,%cpu=,rss=,command= | rg 'codesk|Codesk|WebKit'
-rtk pgrep -afil 'codesk|Codesk|WebKit'
+ps -axo pid=,ppid=,lstart=,%cpu=,rss=,command= | rg 'codesk|Codesk|WebKit'
+pgrep -afil 'codesk|Codesk|WebKit'
 ```
 
 Record the PIDs for the components listed in [What belongs in the measurement](#what-belongs-in-the-measurement). Confirm that the gateway is the parent of the local daemon and app-owned SSH tunnel:
 
 ```bash
-rtk ps -p <DESKTOP_PID>,<WEBKIT_GPU_PID>,<WEBKIT_NETWORK_PID>,<WEBKIT_CONTENT_PID>,<GATEWAY_PID>,<DAEMON_PID>,<SSH_PID> -o pid=,ppid=,%cpu=,rss=,command=
+ps -p <DESKTOP_PID>,<WEBKIT_GPU_PID>,<WEBKIT_NETWORK_PID>,<WEBKIT_CONTENT_PID>,<GATEWAY_PID>,<DAEMON_PID>,<SSH_PID> -o pid=,ppid=,%cpu=,rss=,command=
 ```
 
 If several stale Codesk SSH tunnels exist, count only the tunnel whose parent is the current gateway. Stale tunnels should be investigated separately rather than added to the current app result.
@@ -91,7 +91,7 @@ If several stale Codesk SSH tunnels exist, count only the tunnel whose parent is
 Take two `top` samples 10 seconds apart. Add one `-pid` argument for each PID in the recorded process set:
 
 ```bash
-rtk top -l 2 -s 10 \
+top -l 2 -s 10 \
   -pid <DESKTOP_PID> \
   -pid <WEBKIT_GPU_PID> \
   -pid <WEBKIT_NETWORK_PID> \
@@ -113,7 +113,7 @@ Repeat this command three times and report the median run. Do not interact with 
 For a quick diagnosis of a process that remains busy, sample it for five seconds:
 
 ```bash
-rtk sample <PID> 5 1
+sample <PID> 5 1
 ```
 
 ### 4. Measure gateway endpoint latency
@@ -121,7 +121,7 @@ rtk sample <PID> 5 1
 The following command performs five warm-ups, then reports median and p95 latency from 50 sequential requests to each cached endpoint:
 
 ```bash
-rtk node --input-type=module <<'NODE'
+node --input-type=module <<'NODE'
 const origin = 'http://127.0.0.1:4242'
 const endpoints = ['/api/state', '/api/navigation']
 const percentile = (values, fraction) => values[Math.min(values.length - 1, Math.floor(values.length * fraction))]
@@ -152,23 +152,24 @@ Benchmark cached responses separately from an intentionally cold refresh. `/api/
 Check that the local daemon responds and that the gateway sees every configured host:
 
 ```bash
-rtk curl -fsS http://127.0.0.1:4243/v1/health
-rtk curl -fsS http://127.0.0.1:4242/api/navigation
-rtk ssh quocd2 'curl -fsS http://127.0.0.1:4243/v1/health'
+curl -fsS http://127.0.0.1:4243/v1/health
+curl -fsS http://127.0.0.1:4242/api/navigation
+ssh vps-1 'curl -fsS http://127.0.0.1:4243/v1/health'
 ```
 
-Exercise daemon discovery twice. The first request may scan processes; the second should use the 60-second cache:
+Exercise daemon discovery twice. The first request may scan processes; the second should use the 60-second cache. Every daemon route except `/v1/health` needs the token from the daemon's data directory:
 
 ```bash
-rtk curl -fsS -o /dev/null -w 'cold discovery: %{time_total}s\n' http://127.0.0.1:4243/v1/agents/discover
-rtk curl -fsS -o /dev/null -w 'cached discovery: %{time_total}s\n' http://127.0.0.1:4243/v1/agents/discover
+TOKEN=$(cat "$HOME/Library/Application Support/Codesk/token")
+curl -fsS -H "Authorization: Bearer $TOKEN" -o /dev/null -w 'cold discovery: %{time_total}s\n' http://127.0.0.1:4243/v1/agents/discover
+curl -fsS -H "Authorization: Bearer $TOKEN" -o /dev/null -w 'cached discovery: %{time_total}s\n' http://127.0.0.1:4243/v1/agents/discover
 ```
 
 Use IDs from `/api/navigation` to test a representative local and remote project. Run each request twice so the second value represents a warm session index:
 
 ```bash
-rtk curl -fsS -o /dev/null -w 'sessions: %{time_total}s\n' 'http://127.0.0.1:4242/api/projects/<HOST_ID>/<PROJECT_ID>/sessions?limit=50'
-rtk curl -fsS -o /dev/null -w 'sessions cached: %{time_total}s\n' 'http://127.0.0.1:4242/api/projects/<HOST_ID>/<PROJECT_ID>/sessions?limit=50'
+curl -fsS -o /dev/null -w 'sessions: %{time_total}s\n' 'http://127.0.0.1:4242/api/projects/<HOST_ID>/<PROJECT_ID>/sessions?limit=50'
+curl -fsS -o /dev/null -w 'sessions cached: %{time_total}s\n' 'http://127.0.0.1:4242/api/projects/<HOST_ID>/<PROJECT_ID>/sessions?limit=50'
 ```
 
 Confirm that titles, timestamps, running/idle status, and the newest transcript messages are correct. A fast but stale or incomplete session list is a failure.
@@ -181,7 +182,7 @@ Use one running provider session and one idle historical session:
 2. Append a new message to an idle historical provider session. With the conversation selected and the window visible, it should appear within 15 seconds.
 3. Hide or minimize Codesk for at least 30 seconds. CPU should fall rather than continuing foreground polling.
 4. Restore the window. State and the selected conversation should refresh immediately.
-5. Disconnect and reconnect `quocd2`. The host and sessions should recover without restarting the desktop app.
+5. Disconnect and reconnect `vps-1`. The host and sessions should recover without restarting the desktop app.
 
 Take a screenshot showing the final conversation state and online host status. Store the path in the benchmark notes together with the revision and measurements.
 
@@ -319,7 +320,7 @@ it fails.
 CPU, context switches, wakeups, and endpoint latency are reliable non-privileged regression signals, but they are not direct watt measurements. Apple's `powermetrics` requires administrator access:
 
 ```bash
-rtk sudo powermetrics --samplers tasks,cpu_power,gpu_power -i 1000 -n 30
+sudo powermetrics --samplers tasks,cpu_power,gpu_power -i 1000 -n 30
 ```
 
 Run it only when administrator access is available. Compare builds on battery or on the same power adapter, at similar charge and temperature, with identical display brightness and workload. Do not mix its whole-system watt figures with the process-scoped CPU figures above.

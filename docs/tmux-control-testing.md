@@ -20,10 +20,10 @@ Codesk uses tmux as the single-writer transport for interactive harness sessions
 Run:
 
 ```sh
-rtk cargo test -p codeskd
-rtk npm run check
-rtk npm run build
-rtk npm test
+cargo test -p codeskd
+npm run check
+npm run build
+npm test
 ```
 
 The Rust suite covers:
@@ -83,7 +83,7 @@ Expected Environment values:
 - an access command shaped like:
 
   ```sh
-  ssh -t quocd2 'tmux -S <remote-data-dir>/tmux/codesk.sock attach-session -t <name>'
+  ssh -t vps-1 'tmux -S <remote-data-dir>/tmux/codesk.sock attach-session -t <name>'
   ```
 
 After queuing a prompt, restart the SSH tunnel or desktop gateway. The queued row must remain in the remote daemon's SQLite database and deliver after the active remote turn completes.

@@ -7,6 +7,18 @@ src-tauri/binaries/codeskd
 .DS_Store
 *.log
 
+# Credentials. Nothing here is expected in the repo; these patterns exist so an
+# accidental local key or environment file cannot be committed by reflex.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
 # Local QA captures and generated handoff files
 artifacts/
 Screenshot *.png

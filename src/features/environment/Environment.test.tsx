@@ -24,7 +24,7 @@ describe('TmuxDetails', () => {
     render(
       <TmuxDetails
         name="codesk-codex-4c92e1d5"
-        command={`ssh -t 'kortix-prod' '${hostCommand}'`}
+        command={`ssh -t 'vps-2' '${hostCommand}'`}
         hostCommand={hostCommand}
       />,
     )
@@ -52,7 +52,7 @@ describe('TmuxDetails', () => {
     render(
       <TmuxDetails
         name="work"
-        command="ssh -t 'kortix-prod' 'tmux -S /tmp/codesk.sock attach-session -t work'"
+        command="ssh -t 'vps-2' 'tmux -S /tmp/codesk.sock attach-session -t work'"
         hostCommand={hostCommand}
       />,
     )
