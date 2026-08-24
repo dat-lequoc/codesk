@@ -133,13 +133,16 @@ Provider IDs and stored session/run records remain stable. New capability fields
 
 - `codeskd` listens on a loopback TCP port (default 4243).
 - The desktop application starts it on demand or connects to an existing per-user service.
-- Loopback binding restricts access to processes on the same machine.
+- Loopback binding keeps the port off the network, but it is not a user boundary: on a shared host every local account can reach 127.0.0.1, and these routes start processes and read files.
+- Every route except `/v1/health` requires the bearer token `codeskd` writes to `<data dir>/token` at mode 0600, so reaching the daemon means being able to read that file. `CODESK_TOKEN` pins the value when a supervisor needs to choose it.
+- Requests carrying an `Origin` header are refused, because the only legitimate callers are the gateway and the desktop shell — never a page the user happened to visit.
 
 ### 3.2 Remote MVP
 
 - `codeskd` listens only on a loopback TCP port on the VPS.
 - The client uses the user's OpenSSH alias and host-key policy.
 - The client creates a local forward to the daemon endpoint.
+- The client reads the remote daemon's token over that SSH session once the tunnel is healthy, so SSH access is what grants API access.
 - SSH `ControlMaster`/`ControlPersist`, keepalives, bounded exponential backoff, and jitter reduce reconnect latency.
 - The application recreates the tunnel when the network path changes.
 - The protocol reconnect is independent from the SSH process reconnect.

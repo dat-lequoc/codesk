@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { spawn } from 'node:child_process'
+import { daemonAuth } from './daemon-token.mjs'
 
 const exec = promisify(execFile)
 const root = await mkdtemp(join(tmpdir(), 'codesk-kiro-model-live-'))
@@ -20,7 +21,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const request = async (path, options = {}) => {
   const response = await fetch(`${base}${path}`, {
     ...options,
-    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+    headers: { 'content-type': 'application/json', ...daemonAuth(root), ...(options.headers || {}) },
   })
   const text = await response.text()
   let body

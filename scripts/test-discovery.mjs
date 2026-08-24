@@ -2,11 +2,12 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { daemonAuth } from './daemon-token.mjs'
 
 const root = process.cwd(); const binary = path.join(root, 'target/debug/codeskd'); const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'codesk-discovery-')); const data = path.join(temp, 'data'); const repos = path.join(temp, 'repos'); const port = 4900 + Math.floor(Math.random() * 80); const base = `http://127.0.0.1:${port}`
 await fs.mkdir(path.join(repos, 'alpha', '.git'), { recursive: true }); await fs.mkdir(path.join(repos, 'nested', 'beta', '.git'), { recursive: true }); await fs.mkdir(path.join(repos, 'plain'), { recursive: true })
 let daemon = spawn(binary, [], { env: { ...process.env, CODESK_DATA_DIR: data, CODESK_PORT: String(port) }, stdio: 'ignore' })
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); async function request(route, options) { const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...options?.headers } }); const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`); return body }
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); async function request(route, options) { const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...daemonAuth(data), ...options?.headers } }); const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`); return body }
 try {
   for (let i=0;i<60;i++){try{await request('/v1/health');break}catch{await wait(100)}}
   const files = await request(`/v1/files?path=${encodeURIComponent(repos)}`); if (!files.current_path.endsWith('/repos') || !files.parent_path || !files.home_path || !files.entries.some((entry) => entry.name === 'alpha' && entry.is_git)) throw new Error('folder browser did not return navigable Git project listing')

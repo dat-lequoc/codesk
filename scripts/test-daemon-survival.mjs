@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { daemonAuth } from './daemon-token.mjs'
 
 const root = process.cwd()
 const binary = path.join(root, 'target/debug/codeskd')
@@ -12,7 +13,7 @@ let daemon
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 async function request(route, options) {
-  const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...options?.headers } })
+  const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...daemonAuth(dataDir), ...options?.headers } })
   const body = await response.json()
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
   return body

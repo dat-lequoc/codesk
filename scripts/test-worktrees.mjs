@@ -3,12 +3,13 @@ import { promisify } from 'node:util'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { daemonAuth } from './daemon-token.mjs'
 
 const exec = promisify(execFile)
 const root = process.cwd(); const binary = path.join(root, 'target/debug/codeskd'); const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'codesk-worktree-')); const repo = path.join(temp, 'repo'); const data = path.join(temp, 'data'); const port = 4700 + Math.floor(Math.random() * 200); const base = `http://127.0.0.1:${port}`
 await fs.mkdir(repo); await exec('git', ['init', '-b', 'main'], { cwd: repo }); await exec('git', ['config', 'user.email', 'codesk@example.test'], { cwd: repo }); await exec('git', ['config', 'user.name', 'Codesk Test'], { cwd: repo }); await fs.writeFile(path.join(repo, 'README.md'), '# test\n'); await exec('git', ['add', '.'], { cwd: repo }); await exec('git', ['commit', '-m', 'initial'], { cwd: repo })
 let daemon = spawn(binary, [], { env: { ...process.env, CODESK_DATA_DIR: data, CODESK_PORT: String(port) }, stdio: 'ignore' })
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); async function request(route, options) { const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...options?.headers } }); const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`); return body }
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); async function request(route, options) { const response = await fetch(`${base}${route}`, { ...options, headers: { 'content-type': 'application/json', ...daemonAuth(data), ...options?.headers } }); const body = await response.json(); if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`); return body }
 try {
   for (let i=0;i<60;i++){try{await request('/v1/health');break}catch{await wait(100)}}
   const project=await request('/v1/projects',{method:'POST',body:JSON.stringify({name:'worktree-test',path:repo})})

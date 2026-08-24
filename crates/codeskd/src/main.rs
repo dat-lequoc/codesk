@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(default_data_root);
     tokio::fs::create_dir_all(&data_root).await?;
+    let token = Arc::new(load_token(&data_root, env::var("CODESK_TOKEN").ok()).await?);
     let db = Db::open(&data_root.join("codesk.db"))?;
     let supervisor = Supervisor::new(db.clone(), data_root.clone());
     let tmux = TmuxManager::new(data_root.clone());
@@ -220,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/runs/{id}/kill", post(kill))
         .route("/v1/events", get(events))
         .route("/v1/events/ws", get(events_ws))
+        .layer(middleware::from_fn_with_state(token, require_token))
         .layer(middleware::from_fn(refuse_browser_callers))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -232,6 +234,82 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%address,"codeskd listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// The shared secret every caller but `/v1/health` must present.
+///
+/// Loopback is not a user boundary. On a shared Linux host every account can
+/// reach 127.0.0.1, and these routes start processes and read files, so the
+/// port alone cannot be the credential. The token file is 0600 inside the data
+/// directory, which makes "can read this file" mean "is this user" — the
+/// boundary the daemon actually wants.
+///
+/// A `pinned` value (from `CODESK_TOKEN`) wins so a supervisor can choose it;
+/// otherwise an existing token is reused and a new one is minted on first start.
+async fn load_token(data_root: &std::path::Path, pinned: Option<String>) -> anyhow::Result<String> {
+    let path = data_root.join("token");
+    if let Some(pinned) = pinned
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        write_token(&path, &pinned).await?;
+        return Ok(pinned);
+    }
+    if let Ok(existing) = tokio::fs::read_to_string(&path).await {
+        let existing = existing.trim().to_string();
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+    }
+    let minted = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    write_token(&path, &minted).await?;
+    Ok(minted)
+}
+
+async fn write_token(path: &std::path::Path, token: &str) -> anyhow::Result<()> {
+    tokio::fs::write(path, token)
+        .await
+        .with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+    }
+    Ok(())
+}
+
+async fn require_token(
+    State(expected): State<Arc<String>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    // Health stays open: the desktop shell probes it to decide whether the
+    // daemon needs replacing, before it could know any token, and it discloses
+    // only a version string.
+    if request.uri().path() == "/v1/health" {
+        return Ok(next.run(request).await);
+    }
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if !secrets_match(presented.as_bytes(), expected.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
+/// Comparison that does not return early on the first differing byte, so the
+/// time it takes says nothing about how much of the token was correct.
+fn secrets_match(presented: &[u8], expected: &[u8]) -> bool {
+    presented.len() == expected.len()
+        && presented
+            .iter()
+            .zip(expected)
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
 }
 
 /// The daemon's only callers are the gateway and the desktop shell, neither of
@@ -1207,5 +1285,68 @@ async fn install_service(port: u16) -> anyhow::Result<()> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         anyhow::bail!("service installation is unsupported on this platform")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_token, secrets_match};
+
+    fn scratch() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("codeskd-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[tokio::test]
+    async fn token_is_minted_once_and_reused_by_later_starts() {
+        let root = scratch();
+        let first = load_token(&root, None).await.unwrap();
+        assert_eq!(first.len(), 64, "a minted token should be 256 bits of hex");
+        let second = load_token(&root, None).await.unwrap();
+        assert_eq!(
+            first, second,
+            "a restart must keep the token the gateway already read"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(root.join("token"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the token is the credential");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_pinned_token_replaces_whatever_is_on_disk() {
+        let root = scratch();
+        let minted = load_token(&root, None).await.unwrap();
+        let pinned = load_token(&root, Some("  chosen-by-supervisor  ".into()))
+            .await
+            .unwrap();
+        assert_eq!(pinned, "chosen-by-supervisor");
+        assert_ne!(pinned, minted);
+        assert_eq!(
+            std::fs::read_to_string(root.join("token")).unwrap(),
+            "chosen-by-supervisor",
+            "a peer reading the file must see the token actually in force"
+        );
+        // An empty override is a supervisor that simply did not set the
+        // variable, not a request for an empty password.
+        let fallback = load_token(&root, Some("   ".into())).await.unwrap();
+        assert_eq!(fallback, "chosen-by-supervisor");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn secrets_match_rejects_prefixes_and_length_mismatches() {
+        assert!(secrets_match(b"abc123", b"abc123"));
+        assert!(!secrets_match(b"abc", b"abc123"));
+        assert!(!secrets_match(b"abc123", b"abc"));
+        assert!(!secrets_match(b"", b"abc123"));
+        assert!(!secrets_match(b"abc124", b"abc123"));
     }
 }

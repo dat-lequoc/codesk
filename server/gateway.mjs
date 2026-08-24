@@ -43,6 +43,9 @@ export class Gateway {
     this.eventFailures = new Map()
     this.bootstrapping = new Set()
     this.bootstrapAttempts = new Map()
+    // Daemon tokens are read from each host at connect time and kept here
+    // rather than on the host record, which is persisted to disk.
+    this.tokens = new Map()
     this.shuttingDown = false
     this.onDaemonEvent = null
     this.onHostOnline = null
@@ -55,6 +58,21 @@ export class Gateway {
 
   endpoint(host) { return `http://127.0.0.1:${host.localPort || host.daemonPort}` }
 
+  // Everything but /v1/health needs the daemon's token. A daemon predating
+  // token auth ignores the header, so an unread token still lets an older
+  // remote work until it is upgraded.
+  authHeaders(hostId) {
+    const token = this.tokens.get(hostId)
+    return token ? { authorization: `Bearer ${token}` } : {}
+  }
+
+  async loadRemoteToken(host) {
+    try {
+      const { stdout } = await execFileAsync('ssh', [...sshOptions, host.sshAlias, remoteShell(`cat "$HOME/.local/share/codesk/token" 2>/dev/null || cat "$HOME/Library/Application Support/Codesk/token" 2>/dev/null || true`)], { timeout: 15000, maxBuffer: 64 * 1024 })
+      this.tokens.set(host.id, stdout.trim())
+    } catch { this.tokens.delete(host.id) }
+  }
+
   async ensureLocal() {
     const host = this.host('local')
     // A previous ensureLocal may still be mid-spawn or have a retry timer
@@ -65,7 +83,7 @@ export class Gateway {
     if (this.processes.has(host.id)) return
     const configuredBinary = process.env.CODESK_DAEMON_BINARY
     const binary = configuredBinary && fs.existsSync(configuredBinary) ? configuredBinary : path.resolve(process.cwd(), 'target/debug/codeskd')
-    if (await this.health(host)) return this.markOnline(host)
+    if (await this.health(host)) { this.tokens.set(host.id, readLocalToken()); return this.markOnline(host) }
     if (this.shuttingDown || this.processes.has(host.id)) return
     // codeskd is ours, so it must not outlive this gateway. The watchdog it
     // starts from CODESK_OWNER_PID covers the case where we are SIGKILLed and
@@ -76,7 +94,7 @@ export class Gateway {
     // Restarting a daemon we are deliberately stopping would undo shutdown, so
     // the respawn is conditional on still being alive.
     child.on('exit', () => { this.processes.delete(host.id); if (this.shuttingDown) return; this.markOffline(host, 'Local daemon stopped'); clearTimeout(this.pollers.get('ensure:local')); this.pollers.set('ensure:local', setTimeout(() => this.ensureLocal(), 1500)) })
-    for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (this.shuttingDown) return; if (await this.health(host)) { this.markOnline(host); return } }
+    for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (this.shuttingDown) return; if (await this.health(host)) { this.tokens.set(host.id, readLocalToken()); this.markOnline(host); return } }
     this.markOffline(host, host.error || 'Local daemon did not start')
   }
 
@@ -176,7 +194,9 @@ export class Gateway {
       this.markOffline(host, error || 'SSH tunnel disconnected')
       this.scheduleReconnect(host.id)
     })
-    for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (await this.health(host)) return this.markOnline(host); if (child.exitCode !== null) return }
+    // The token has to be in hand before markOnline, which immediately opens
+    // the event WebSocket and would otherwise be rejected.
+    for (let attempt = 0; attempt < 30; attempt++) { await sleep(200); if (await this.health(host)) { await this.loadRemoteToken(host); return this.markOnline(host) } if (child.exitCode !== null) return }
     child.kill('SIGTERM')
     // SSH itself is fine, so the host is reachable and only the daemon is
     // missing or stopped. Provision it here instead of asking the user to run
@@ -369,7 +389,7 @@ export class Gateway {
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return
     const endpoint = this.endpoint(host).replace(/^http/, 'ws')
     const cursor = this.cursors.get(hostId) || 0
-    const socket = new WebSocket(`${endpoint}/v1/events/ws?after=${cursor}`)
+    const socket = new WebSocket(`${endpoint}/v1/events/ws?after=${cursor}`, { headers: this.authHeaders(hostId) })
     this.eventSockets.set(hostId, socket)
     socket.on('open', () => this.eventFailures.set(hostId, 0))
     socket.on('message', (payload) => {
@@ -420,12 +440,23 @@ export class Gateway {
     const host = this.host(hostId)
     if (!host) throw new Error('Host not found')
     if (host.status !== 'online') throw new Error(`${host.name} is not connected`)
-    const response = await fetch(`${this.endpoint(host)}${daemonPath}`, { ...options, headers: { 'content-type': 'application/json', ...options.headers }, signal: AbortSignal.timeout(options.timeout || 15000) })
+    const response = await fetch(`${this.endpoint(host)}${daemonPath}`, { ...options, headers: { 'content-type': 'application/json', ...this.authHeaders(hostId), ...options.headers }, signal: AbortSignal.timeout(options.timeout || 15000) })
     const text = await response.text()
     const body = text ? JSON.parse(text) : null
     if (!response.ok) throw new Error(body?.error || `Daemon request failed (${response.status})`)
     return body
   }
+}
+
+// Mirrors the daemon's own default_data_root, which is where it writes the
+// 0600 token file.
+function localDataRoot() {
+  if (process.env.CODESK_DATA_DIR) return process.env.CODESK_DATA_DIR
+  const home = os.homedir()
+  return process.platform === 'darwin' ? path.join(home, 'Library/Application Support/Codesk') : path.join(home, '.local/share/codesk')
+}
+function readLocalToken() {
+  try { return fs.readFileSync(path.join(localDataRoot(), 'token'), 'utf8').trim() } catch { return '' }
 }
 
 // A login shell would source the remote user's rc files, which frequently
