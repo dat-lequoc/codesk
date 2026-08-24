@@ -34,6 +34,17 @@ describe('TmuxDetails', () => {
     expect(screen.getByLabelText('Copy tmux command for this host')).toBeInTheDocument()
   })
 
+  it('explains an absent pane instead of reporting a failed detection', () => {
+    render(<TmuxDetails emptyLabel="No live process" note="Sending resumes this conversation" />)
+    expect(screen.getByText('No live process')).toBeInTheDocument()
+    expect(screen.getByText('Sending resumes this conversation')).toBeInTheDocument()
+  })
+
+  it('keeps the note for the pane it describes out of a controlled session', () => {
+    render(<TmuxDetails name="codesk-a" note="Sending resumes this conversation" />)
+    expect(screen.queryByText('Sending resumes this conversation')).not.toBeInTheDocument()
+  })
+
   it('copies the on-host command', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal('navigator', { clipboard: { writeText } })

@@ -90,10 +90,17 @@ export function TmuxDetails({
   name,
   command,
   hostCommand,
+  emptyLabel = 'Not detected',
+  note,
 }: {
   name?: string | null
   command?: string | null
   hostCommand?: string | null
+  /// Shown in place of a pane name. "Not detected" reads as a fault, which is
+  /// wrong for a conversation whose process has simply exited.
+  emptyLabel?: string
+  /// One line of context for that absence, such as what sending will do.
+  note?: string
 }) {
   const onHost = hostCommand && hostCommand !== command ? hostCommand : null
   return (
@@ -101,8 +108,11 @@ export function TmuxDetails({
       <div className={tmuxRow}>
         <Terminal size={14} />
         <span>tmux</span>
-        <strong className={tmuxValue}>{name || 'Not detected'}</strong>
+        <strong className={tmuxValue}>{name || emptyLabel}</strong>
       </div>
+      {!name && note ? (
+        <small className="pl-[68px] text-[9px] leading-tight text-muted">{note}</small>
+      ) : null}
       {command ? (
         <TmuxCommandRow label="Access" command={command} copyLabel="Copy tmux access command" />
       ) : null}

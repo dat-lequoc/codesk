@@ -497,6 +497,13 @@ export function SessionScreen({
               name={session.tmuxName}
               command={session.tmuxAccessCommand}
               hostCommand={session.tmuxHostAccessCommand}
+              // A dormant transcript has no pane because its process exited,
+              // not because detection failed — and there is nothing to move
+              // into tmux, which is what "Not detected" invites you to try.
+              emptyLabel={!attached && host?.status === 'online' ? 'No live process' : undefined}
+              note={
+                !attached && canResume ? 'Sending resumes this conversation' : undefined
+              }
             />
           </EnvironmentPopover>
         )}

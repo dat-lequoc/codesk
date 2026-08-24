@@ -247,6 +247,18 @@ describe('SessionScreen · taking control of a terminal session', () => {
     mount(controlled())
     expect(screen.queryByText(/Move to tmux|Enable control/)).not.toBeInTheDocument()
   })
+
+  it('offers no tmux move for a conversation whose process has exited', () => {
+    mount(makeSession({ id: 'session-a', status: 'idle' }))
+    expect(screen.queryByText(/Move to tmux|Enable control/)).not.toBeInTheDocument()
+  })
+
+  it('reports an absent process rather than a failed tmux detection', async () => {
+    mount(makeSession({ id: 'session-a', status: 'idle' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Environment' }))
+    expect(screen.getByText('No live process')).toBeInTheDocument()
+    expect(screen.getByText('Sending resumes this conversation')).toBeInTheDocument()
+  })
 })
 
 describe('SessionScreen · queued prompts', () => {
