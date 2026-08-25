@@ -13,6 +13,9 @@
   },
   "homepage": "https://github.com/dat-lequoc/codesk",
   "type": "module",
+  "bin": {
+    "codesk": "bin/codesk.mjs"
+  },
   "engines": {
     "node": ">=22"
   },
