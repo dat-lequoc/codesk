@@ -68,6 +68,9 @@ export type Provider = {
   queued_input?: boolean
   turn_rewind?: boolean
   provider_responses?: boolean
+  // Whether Codesk can read and change the model and reasoning effort of a
+  // terminal-controlled session of this provider.
+  model_picker?: boolean
   runner?: 'stdio' | 'acp' | 'codex_app_server' | 'dsh_web'
   limitations?: string[]
 }

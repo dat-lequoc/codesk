@@ -89,6 +89,7 @@ import {
   ComposerInput,
   SlashCommandMenu,
 } from '../composer/Composer'
+import { ModelMenu } from '../composer/ModelMenu'
 import { FilePreviewPanel } from '../dialogs/FilePreviewPanel'
 import { EnvironmentPopover, EnvironmentRow, TmuxDetails } from '../environment/Environment'
 import { ConversationMessage } from '../thread/Markdown'
@@ -187,6 +188,11 @@ export function SessionScreen({
   const canSend = canUseAttachedSession || canAdoptAndSend || canResume
   const [models, setModels] = useState(() => kiroModelCatalog.get(session.hostId) || [])
   const modelsRequested = useRef(false)
+  // What the harness reported after a change made here, held until the next
+  // discovery scan reports the same thing on the session itself.
+  const [applied, setApplied] = useState<{ model?: string; effort?: string } | null>(null)
+  if (applied && session.model === applied.model && session.effort === applied.effort)
+    setApplied(null)
   // A terminal-driven session reports its live model and effort on the harness
   // status line, which is more current than anything replayed from events.
   const commandContext = useMemo(() => {
@@ -194,11 +200,19 @@ export function SessionScreen({
     return {
       ...base,
       models: models.length ? models : base.models,
-      currentModel: session.model || base.currentModel,
-      currentEffort: session.effort || base.currentEffort,
+      currentModel: applied?.model || session.model || base.currentModel,
+      currentEffort: applied?.effort || session.effort || base.currentEffort,
       modelsPending: session.provider === 'kiro' && Boolean(session.managedRunId),
     }
-  }, [runEvents, models, session.model, session.effort, session.provider, session.managedRunId])
+  }, [
+    runEvents,
+    models,
+    applied,
+    session.model,
+    session.effort,
+    session.provider,
+    session.managedRunId,
+  ])
   // Kiro exposes no non-interactive model listing, so the catalog is read from
   // its picker the first time the operator actually asks for `/model`.
   useEffect(() => {
@@ -690,13 +704,26 @@ export function SessionScreen({
                 </>
               )}
               <span className="flex-1" />
-              <small className={composerHint}>
-                {canQueue
-                  ? [commandContext.currentModel, commandContext.currentEffort]
-                      .filter(Boolean)
-                      .join(' · ') || session.tmuxName
-                  : provider?.name}
-              </small>
+              {canUseAttachedSession && session.managedRunId && provider?.model_picker ? (
+                <ModelMenu
+                  hostId={session.hostId}
+                  runId={session.managedRunId}
+                  provider={session.provider}
+                  model={commandContext.currentModel}
+                  effort={commandContext.currentEffort}
+                  fallback={session.tmuxName}
+                  disabled={busy}
+                  onApplied={setApplied}
+                />
+              ) : (
+                <small className={composerHint}>
+                  {canQueue
+                    ? [commandContext.currentModel, commandContext.currentEffort]
+                        .filter(Boolean)
+                        .join(' · ') || session.tmuxName
+                    : provider?.name}
+                </small>
+              )}
               <button
                 type="submit"
                 className={cn(sendButton, sendButtonSmall, canResume && 'w-auto gap-1.5 px-2.5')}

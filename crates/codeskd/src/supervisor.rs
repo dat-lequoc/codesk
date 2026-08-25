@@ -23,7 +23,7 @@ use crate::{
         Event, ExternalQueuedInput, Project, Run, RunnerSpec, StartRunRequest, TmuxControl,
         Worktree,
     },
-    providers,
+    providers::{self, ModelControl, TerminalStatus, codex},
     tmux::{TmuxManager, TmuxPane},
     worktrees,
 };
@@ -424,34 +424,74 @@ impl Supervisor {
         }
     }
 
-    /// Read a terminal-driven harness's model catalog by opening its picker,
-    /// paging through it, and dismissing it again. Kiro shows only eight rows at
-    /// a time and exposes no non-interactive listing, so paging is the only way
-    /// to see the full catalog from a tmux-controlled session.
-    pub async fn provider_models(&self, run_id: &str) -> Result<Vec<Value>> {
+    /// A tmux-controlled run whose harness can be driven through its own model
+    /// picker, with the pane confirmed idle so the keystrokes cannot land in a
+    /// turn that is still running.
+    async fn model_control_pane(
+        &self,
+        run_id: &str,
+    ) -> Result<(Run, TmuxPane, ModelControl, TerminalStatus)> {
         let run = self.db.run(run_id)?.context("run not found")?;
-        anyhow::ensure!(
-            run.provider == "kiro",
-            "model discovery is only implemented for Kiro terminals"
-        );
-        let control = self
+        let control = providers::model_control(&run.provider).with_context(|| {
+            format!("{} does not expose a model picker to Codesk", run.provider)
+        })?;
+        let tmux_control = self
             .db
             .tmux_control_for_run(run_id)?
             .context("this run is not attached to a tmux pane")?;
-        let pane = self.tmux_pane(&control).await?;
-        let screen = self.tmux.capture_text(&pane).await?;
+        let pane = self.tmux_pane(&tmux_control).await?;
+        let mut screen = self.tmux.capture_text(&pane).await?;
+        // An attempt that failed part-way leaves a picker covering the status
+        // line, which would read as a busy harness forever.
+        if providers::terminal_picker_open(&run.provider, &screen) {
+            self.close_overlay(&run.provider, &pane).await;
+            self.await_ready(&run.provider, &pane).await;
+            screen = self.tmux.capture_text(&pane).await?;
+        }
         anyhow::ensure!(
             providers::terminal_ready(&run.provider, &screen),
             "the harness is busy; wait for the current turn to finish"
         );
-        self.tmux.send_prompt(&pane, "/model").await?;
+        // Read the live model from the same screen that proved the pane idle.
+        // Once a picker is open the status line is covered, so this is the last
+        // chance to see it.
+        let status = providers::parse_terminal_status(&run.provider, &screen).unwrap_or_default();
+        Ok((run, pane, control, status))
+    }
+
+    /// The model catalog, the reasoning levels, and what the session is running
+    /// right now — everything the composer needs to offer a change.
+    pub async fn provider_models(&self, run_id: &str) -> Result<Value> {
+        let (run, pane, control, status) = self.model_control_pane(run_id).await?;
+        let models = match control {
+            ModelControl::Command => self.paged_catalog(&run.provider, &pane).await?,
+            ModelControl::NumberedPicker => self.numbered_catalog(&run.provider, &pane).await?,
+        };
+        anyhow::ensure!(!models.is_empty(), "the model picker returned no models");
+        let efforts = providers::effort_levels(&run.provider)
+            .iter()
+            .map(|level| json!({"id": level.id, "label": level.label}))
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "models": models,
+            "efforts": efforts,
+            "model": status.model,
+            "effort": status.effort,
+        }))
+    }
+
+    /// Read a catalog that only shows a few rows at a time by walking the
+    /// picker down one row at a time. Kiro shows eight rows and exposes no
+    /// non-interactive listing, so paging is the only way to see all of them.
+    async fn paged_catalog(&self, provider: &str, pane: &TmuxPane) -> Result<Vec<Value>> {
+        self.tmux.send_prompt(pane, "/model").await?;
         let mut models: Vec<Value> = Vec::new();
         let mut expected = None;
         let mut unchanged = 0;
         for _ in 0..80 {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let screen = self.tmux.capture_text(&pane).await.unwrap_or_default();
-            let page = providers::parse_model_page(&run.provider, &screen);
+            let screen = self.tmux.capture_text(pane).await.unwrap_or_default();
+            let page = providers::parse_model_page(provider, &screen);
             let before = models.len();
             for model in page.models {
                 let id = model.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -482,11 +522,225 @@ impl Supervisor {
                 }
                 _ => unchanged = 0,
             }
-            self.tmux.send_key(&pane, "Down").await?;
+            self.tmux.send_key(pane, "Down").await?;
         }
-        self.tmux.send_key(&pane, "Escape").await?;
-        anyhow::ensure!(!models.is_empty(), "the model picker returned no models");
+        self.tmux.send_key(pane, "Escape").await?;
+        self.await_ready(provider, pane).await;
         Ok(models)
+    }
+
+    /// Read a catalog that fits on one page, then leave the picker as it was
+    /// found. Codex's page lists every model at once, so it only has to be
+    /// opened, read, and dismissed.
+    async fn numbered_catalog(&self, provider: &str, pane: &TmuxPane) -> Result<Vec<Value>> {
+        self.tmux.send_prompt(pane, "/model").await?;
+        let mut models = Vec::new();
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let screen = self.tmux.capture_text(pane).await.unwrap_or_default();
+            models = providers::parse_model_page(provider, &screen).models;
+            if !models.is_empty() {
+                break;
+            }
+        }
+        self.tmux.send_key(pane, "Escape").await?;
+        self.await_ready(provider, pane).await;
+        Ok(models)
+    }
+
+    /// Wait for the composer to come back after a picker was dismissed. A pane
+    /// that is still painting the closing overlay reads as a busy harness, and
+    /// the next call would be refused for the wrong reason.
+    async fn await_ready(&self, provider: &str, pane: &TmuxPane) {
+        for _ in 0..25 {
+            let screen = self.tmux.capture_text(pane).await.unwrap_or_default();
+            if providers::terminal_ready(provider, &screen) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Change a terminal-driven harness's model, its reasoning effort, or both,
+    /// then answer with what the harness itself reports afterwards rather than
+    /// with what was asked for.
+    pub async fn set_provider_model(
+        &self,
+        run_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<Value> {
+        anyhow::ensure!(
+            model.is_some() || effort.is_some(),
+            "no model or effort was requested"
+        );
+        let (run, pane, control, live) = self.model_control_pane(run_id).await?;
+        if let Some(effort) = effort {
+            anyhow::ensure!(
+                providers::effort_levels(&run.provider)
+                    .iter()
+                    .any(|level| level.id == effort),
+                "{} does not offer the reasoning level {effort}",
+                run.provider
+            );
+        }
+        // A picker asks for a reasoning level with every model change and
+        // offers the new model's default, so a model-only change would quietly
+        // reset it. Ask for the level already in use instead.
+        let effort = match (control, effort) {
+            (ModelControl::NumberedPicker, None) => carried_effort(&run.provider, &live),
+            _ => effort,
+        };
+        let walked = match control {
+            ModelControl::Command => self.change_by_command(&pane, model, effort).await,
+            ModelControl::NumberedPicker => self.change_by_picker(&pane, model, effort).await,
+        };
+        // A refused command or a half-walked picker leaves an overlay on
+        // screen, and the next prompt would be typed into it.
+        if let Err(error) = walked {
+            self.close_overlay(&run.provider, &pane).await;
+            return Err(error);
+        }
+        let status = self
+            .settled_status(&run.provider, &pane, model, effort)
+            .await;
+        if !status_matches(&status, model, effort) {
+            self.close_overlay(&run.provider, &pane).await;
+            anyhow::bail!(
+                "{} did not apply the change and still reports {} {}",
+                run.provider,
+                status.model.as_deref().unwrap_or("an unknown model"),
+                status.effort.as_deref().unwrap_or_default()
+            );
+        }
+        Ok(json!({"model": status.model, "effort": status.effort}))
+    }
+
+    /// Leave the pane steerable whatever happened. A picker can be three pages
+    /// deep and each Escape only walks back one of them.
+    async fn close_overlay(&self, provider: &str, pane: &TmuxPane) {
+        for _ in 0..4 {
+            let screen = self.tmux.capture_text(pane).await.unwrap_or_default();
+            if !providers::terminal_picker_open(provider, &screen) {
+                return;
+            }
+            let _ = self.tmux.send_key(pane, "Escape").await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Kiro takes the new value as an argument and applies it immediately.
+    async fn change_by_command(
+        &self,
+        pane: &TmuxPane,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<()> {
+        for command in [
+            model.map(|model| format!("/model {model}")),
+            effort.map(|effort| format!("/effort {effort}")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.tmux.send_prompt(pane, &command).await?;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        Ok(())
+    }
+
+    /// Codex only exposes model and effort through one `/model` picker, and it
+    /// always walks the model page into a reasoning page. An effort-only change
+    /// therefore re-picks the model already in use, and a model-only change
+    /// re-picks the reasoning level already in use.
+    async fn change_by_picker(
+        &self,
+        pane: &TmuxPane,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<()> {
+        self.tmux.send_prompt(pane, "/model").await?;
+        let rows = self.picker_page(pane, codex::MODEL_HEADING).await?;
+        let row = match model {
+            Some(model) => codex::row_number(&rows, model)
+                .with_context(|| format!("Codex does not offer the model {model}"))?,
+            None => codex::unchanged_row(&rows)
+                .context("the model picker does not mark the model in use")?,
+        };
+        self.pick_row(pane, &rows, row).await?;
+
+        let rows = self.picker_page(pane, codex::REASONING_HEADING).await?;
+        let Some(effort) = effort else {
+            let row = codex::unchanged_row(&rows)
+                .context("the reasoning picker does not mark the level in use")?;
+            return self.pick_row(pane, &rows, row).await;
+        };
+        let label = codex::effort_label(effort)
+            .with_context(|| format!("Codex does not offer the reasoning level {effort}"))?;
+        if let Some(row) = codex::row_number(&rows, label) {
+            return self.pick_row(pane, &rows, row).await;
+        }
+        // Max and Ultra live behind a submenu.
+        let more = codex::more_reasoning_row(&rows)
+            .with_context(|| format!("the reasoning picker does not list {label}"))?;
+        self.pick_row(pane, &rows, more).await?;
+        let rows = self.picker_page(pane, codex::ADVANCED_HEADING).await?;
+        let row = codex::row_number(&rows, label)
+            .with_context(|| format!("the reasoning picker does not list {label}"))?;
+        self.pick_row(pane, &rows, row).await
+    }
+
+    async fn picker_page(&self, pane: &TmuxPane, heading: &str) -> Result<Vec<codex::PickerRow>> {
+        for _ in 0..25 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let screen = self.tmux.capture_text(pane).await.unwrap_or_default();
+            let rows = codex::parse_picker_page(&screen, heading);
+            if !rows.is_empty() {
+                return Ok(rows);
+            }
+        }
+        anyhow::bail!("the picker never showed its \"{heading}\" page")
+    }
+
+    /// Typing a row's number selects it outright. Rows past nine cannot be
+    /// typed as one keystroke, so those are reached by walking the cursor.
+    async fn pick_row(
+        &self,
+        pane: &TmuxPane,
+        rows: &[codex::PickerRow],
+        target: usize,
+    ) -> Result<()> {
+        if target <= 9 {
+            return self.tmux.send_key(pane, &target.to_string()).await;
+        }
+        let cursor = codex::selected_row(rows).unwrap_or(1);
+        let key = if target > cursor { "Down" } else { "Up" };
+        for _ in 0..cursor.abs_diff(target) {
+            self.tmux.send_key(pane, key).await?;
+        }
+        self.tmux.send_key(pane, "Enter").await
+    }
+
+    /// Wait for the harness's own status line to show the change.
+    async fn settled_status(
+        &self,
+        provider: &str,
+        pane: &TmuxPane,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> TerminalStatus {
+        let mut status = TerminalStatus::default();
+        for _ in 0..25 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let screen = self.tmux.capture_text(pane).await.unwrap_or_default();
+            if let Some(current) = providers::parse_terminal_status(provider, &screen) {
+                status = current;
+                if status_matches(&status, model, effort) {
+                    break;
+                }
+            }
+        }
+        status
     }
 
     pub async fn input(
@@ -921,6 +1175,24 @@ fn process_command_lines() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The reasoning level to re-affirm on the new model's page, which is the one
+/// the session is on. A session that was never given a level reports `default`
+/// rather than a level, and that is left to the picker's own cursor.
+fn carried_effort<'a>(provider: &str, live: &'a TerminalStatus) -> Option<&'a str> {
+    let effort = live.effort.as_deref()?;
+    providers::effort_levels(provider)
+        .iter()
+        .any(|level| level.id == effort)
+        .then_some(effort)
+}
+
+/// Whether the harness now reports the model and effort that were requested.
+/// A value that was not requested is left alone and never has to match.
+fn status_matches(status: &TerminalStatus, model: Option<&str>, effort: Option<&str>) -> bool {
+    model.is_none_or(|model| status.model.as_deref() == Some(model))
+        && effort.is_none_or(|effort| status.effort.as_deref() == Some(effort))
 }
 
 fn resume_already_running(

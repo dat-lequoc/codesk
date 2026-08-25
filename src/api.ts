@@ -277,7 +277,15 @@ export const api = {
         credit_multiplier?: number | null
         active?: boolean
       }>
+      efforts?: Array<{ id: string; label: string }>
+      model?: string | null
+      effort?: string | null
     }>(`/api/runs/${hostId}/${runId}/models`, { method: 'POST', body: '{}' }),
+  setProviderModel: (hostId: string, runId: string, change: { model?: string; effort?: string }) =>
+    request<{ model?: string | null; effort?: string | null }>(
+      `/api/runs/${hostId}/${runId}/model`,
+      { method: 'POST', body: JSON.stringify(change) },
+    ),
   startQueued: (hostId: string, id: string) =>
     request(`/api/runs/${hostId}/${id}/queue/start`, { method: 'POST', body: '{}' }),
   removeQueued: (hostId: string, id: string, queueId: string) =>

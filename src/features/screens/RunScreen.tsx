@@ -75,6 +75,7 @@ import {
   ComposerInput,
   SlashCommandMenu,
 } from '../composer/Composer'
+import { ModelMenu } from '../composer/ModelMenu'
 import { ConfirmDialog } from '../dialogs/ConfirmDialog'
 import type { AppDialogRequest } from '../dialogs/ConfirmDialog'
 import { FilePreviewPanel } from '../dialogs/FilePreviewPanel'
@@ -256,6 +257,10 @@ export function RunScreen({
     ? activityEntries.find((entry) => entry.id === selectedActivityId) || null
     : null
   const commandContext = useMemo(() => kiroCommandContext(branchEvents), [branchEvents])
+  // A run reports the model it was started with, and events only carry a change
+  // the harness announced. What the picker applied is the newer truth, so it
+  // stays until the run screen is left.
+  const [applied, setApplied] = useState<{ model?: string; effort?: string } | null>(null)
   const commandSuggestions = useMemo(
     () =>
       run.provider === 'kiro'
@@ -734,15 +739,31 @@ export function RunScreen({
               </>
             )}
             <span className="flex-1" />
-            <small className={composerHint}>
-              {run.provider === 'kiro'
-                ? [commandContext.currentModel || run.model || 'Kiro', commandContext.currentEffort]
-                    .filter(Boolean)
-                    .join(' · ')
-                : tmuxRun
-                  ? run.tmuxName
-                  : run.model || provider?.name}
-            </small>
+            {tmuxRun && provider?.model_picker && active.has(run.status) ? (
+              <ModelMenu
+                hostId={run.hostId}
+                runId={run.id}
+                provider={run.provider}
+                model={applied?.model || commandContext.currentModel || run.model}
+                effort={applied?.effort || commandContext.currentEffort}
+                fallback={run.tmuxName}
+                disabled={sending}
+                onApplied={setApplied}
+              />
+            ) : (
+              <small className={composerHint}>
+                {run.provider === 'kiro'
+                  ? [
+                      commandContext.currentModel || run.model || 'Kiro',
+                      commandContext.currentEffort,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : tmuxRun
+                    ? run.tmuxName
+                    : run.model || provider?.name}
+              </small>
+            )}
             {!active.has(run.status) && run.sessionId && provider?.fork && (
               <button
                 type="button"

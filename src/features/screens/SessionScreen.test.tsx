@@ -26,6 +26,7 @@ vi.mock('../../api', () => ({
     adoptExternalTmux: vi.fn(),
     moveExternalToTmux: vi.fn(),
     providerModels: vi.fn(),
+    setProviderModel: vi.fn(),
     file: vi.fn(),
   },
 }))
@@ -315,6 +316,50 @@ describe('SessionScreen · queued prompts', () => {
     mount(controlled())
     await waitFor(() => expect(onStarted).toHaveBeenCalledWith(run))
     expect(api.removeExternalQueued).toHaveBeenCalledWith('host-local', 4242, 'q1')
+  })
+})
+
+describe('SessionScreen · model and effort', () => {
+  it('offers the harness picker for a controlled session and shows what it is running', async () => {
+    vi.mocked(api.providerModels).mockResolvedValue({
+      models: [{ id: 'gpt-5.6-terra', description: 'Balanced agentic coding model.' }],
+      efforts: [{ id: 'xhigh', label: 'Extra high' }],
+    })
+    mount(
+      controlled({ managedRunId: 'run-managed', model: 'gpt-5.6-sol', effort: 'high' }),
+      [],
+      makeProvider({ model_picker: true }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /gpt-5.6-sol · high/ }))
+    expect(await screen.findByRole('menuitemradio', { name: /gpt-5.6-terra/ })).toBeInTheDocument()
+  })
+
+  // The status line is the only live source, and it is only readable while
+  // Codesk drives the pane.
+  it('shows a plain hint when the harness exposes no picker', () => {
+    mount(
+      controlled({ managedRunId: 'run-managed', model: 'claude-sonnet-5', effort: 'high' }),
+      [],
+      makeProvider({ model_picker: false }),
+    )
+    expect(screen.getByText('claude-sonnet-5 · high')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /claude-sonnet-5/ })).not.toBeInTheDocument()
+  })
+
+  it('reports the change on the composer until the session catches up', async () => {
+    vi.mocked(api.providerModels).mockResolvedValue({
+      models: [{ id: 'gpt-5.6-terra', description: 'Balanced agentic coding model.' }],
+      efforts: [],
+    })
+    vi.mocked(api.setProviderModel).mockResolvedValue({ model: 'gpt-5.6-terra', effort: 'high' })
+    mount(
+      controlled({ managedRunId: 'run-managed', model: 'gpt-5.6-sol', effort: 'high' }),
+      [],
+      makeProvider({ model_picker: true }),
+    )
+    await userEvent.click(screen.getByRole('button', { name: /gpt-5.6-sol · high/ }))
+    await userEvent.click(await screen.findByRole('menuitemradio', { name: /gpt-5.6-terra/ }))
+    expect(await screen.findByRole('button', { name: /gpt-5.6-terra · high/ })).toBeInTheDocument()
   })
 })
 

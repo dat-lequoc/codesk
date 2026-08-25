@@ -80,7 +80,8 @@ try {
     return match?.model && match.effort ? match : false
   }, 60000)
 
-  const { models } = await request(`/v1/runs/${runId}/models`, { method: 'POST', body: '{}' })
+  const catalog = await request(`/v1/runs/${runId}/models`, { method: 'POST', body: '{}' })
+  const models = catalog.models
   // Kiro shows only eight rows per page, so anything at or below that means the
   // picker was never paged past the first screen.
   if (!Array.isArray(models) || models.length <= 8) throw new Error(`model catalog was not fully paged: ${JSON.stringify(models.map((model) => model.id))}`)
@@ -89,13 +90,22 @@ try {
   if (!models.some((model) => model.id === session.model)) {
     throw new Error(`catalog omits the running model ${session.model}: ${models.map((model) => model.id).join(', ')}`)
   }
+  // The composer offers the levels the harness reports, not a hardcoded list.
+  const efforts = (catalog.efforts || []).map((item) => item.id)
+  for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    if (!efforts.includes(level)) throw new Error(`missing reasoning level ${level}: ${JSON.stringify(catalog.efforts)}`)
+  }
+  if (catalog.model !== session.model) {
+    throw new Error(`the catalog reports a different live model than the session: ${catalog.model} !== ${session.model}`)
+  }
 
   // Switching must take effect on the harness and be visible again as state.
   const target = models.find((model) => model.id !== session.model && !model.id.startsWith('auto'))
-  await request(`/v1/runs/${runId}/input`, {
+  const appliedModel = await request(`/v1/runs/${runId}/model`, {
     method: 'POST',
-    body: JSON.stringify({ message: `/model ${target.id}`, delivery: 'steer', request_id: crypto.randomUUID() }),
+    body: JSON.stringify({ model: target.id }),
   })
+  if (appliedModel.model !== target.id) throw new Error(`model did not change: ${JSON.stringify(appliedModel)}`)
   const switched = await waitFor(async () => {
     const sessions = await request(`/v1/projects/${project.id}/sessions?refresh=true&limit=30`)
     const match = sessions.find((item) => item.native_session_id === activeRun.provider_session_id)
@@ -103,10 +113,12 @@ try {
   }, 60000)
 
   const effort = session.effort === 'high' ? 'medium' : 'high'
-  await request(`/v1/runs/${runId}/input`, {
+  const appliedEffort = await request(`/v1/runs/${runId}/model`, {
     method: 'POST',
-    body: JSON.stringify({ message: `/effort ${effort}`, delivery: 'steer', request_id: crypto.randomUUID() }),
+    body: JSON.stringify({ effort }),
   })
+  if (appliedEffort.effort !== effort) throw new Error(`effort did not change: ${JSON.stringify(appliedEffort)}`)
+  if (appliedEffort.model !== target.id) throw new Error(`changing the effort moved the model: ${JSON.stringify(appliedEffort)}`)
   await waitFor(async () => {
     const sessions = await request(`/v1/projects/${project.id}/sessions?refresh=true&limit=30`)
     const match = sessions.find((item) => item.native_session_id === activeRun.provider_session_id)

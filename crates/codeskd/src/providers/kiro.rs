@@ -14,7 +14,10 @@ use crate::{
     sessions,
 };
 
-use super::{ModelPage, ProviderAdapter, ProviderDescriptor, RunnerKind, TerminalStatus, support};
+use super::{
+    EffortLevel, ModelControl, ModelPage, ProviderAdapter, ProviderDescriptor, RunnerKind,
+    TerminalStatus, support,
+};
 
 pub(crate) struct Kiro;
 pub(crate) static ADAPTER: Kiro = Kiro;
@@ -119,6 +122,14 @@ impl ProviderAdapter for Kiro {
 
     fn parse_model_page(&self, screen: &str) -> ModelPage {
         parse_model_page(screen)
+    }
+
+    fn effort_levels(&self) -> &'static [EffortLevel] {
+        &EFFORT_LEVELS
+    }
+
+    fn model_control(&self) -> Option<ModelControl> {
+        Some(ModelControl::Command)
     }
 
     fn encode_input(
@@ -297,7 +308,30 @@ pub(crate) fn parse_usage_screen(screen: &str) -> Option<Value> {
     Some(payload)
 }
 
-pub(crate) const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// Kiro names its reasoning levels the same way on the status line and in
+/// `/effort`, so the picker shows the harness's own wording.
+pub(crate) static EFFORT_LEVELS: [EffortLevel; 5] = [
+    EffortLevel {
+        id: "low",
+        label: "low",
+    },
+    EffortLevel {
+        id: "medium",
+        label: "medium",
+    },
+    EffortLevel {
+        id: "high",
+        label: "high",
+    },
+    EffortLevel {
+        id: "xhigh",
+        label: "xhigh",
+    },
+    EffortLevel {
+        id: "max",
+        label: "max",
+    },
+];
 
 /// Kiro paints a persistent status line above the composer, for example
 /// `trusted · claude-opus-5 · xhigh · ◔ 4%    ~/proj/codesk · (main)`.
@@ -314,9 +348,12 @@ pub(crate) fn parse_status_line(screen: &str) -> Option<TerminalStatus> {
             .map(|field| field.split("  ").next().unwrap_or_default().trim())
             .filter(|field| !field.is_empty())
             .collect::<Vec<_>>();
-        let effort_index = fields
+        let Some(effort_index) = fields
             .iter()
-            .position(|field| EFFORT_LEVELS.contains(field))?;
+            .position(|field| EFFORT_LEVELS.iter().any(|level| level.id == *field))
+        else {
+            continue;
+        };
         if effort_index == 0 {
             continue;
         }

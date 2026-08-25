@@ -211,6 +211,9 @@ pub struct AdapterCapability {
     pub queued_input: bool,
     pub turn_rewind: bool,
     pub provider_responses: bool,
+    /// Whether Codesk can read and change this harness's model and reasoning
+    /// effort by driving the harness's own picker.
+    pub model_picker: bool,
     pub runner: String,
     pub limitations: Vec<String>,
 }

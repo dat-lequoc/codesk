@@ -214,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/runs/{id}/input", post(input))
         .route("/v1/runs/{id}/response", post(provider_response))
         .route("/v1/runs/{id}/models", post(provider_models))
+        .route("/v1/runs/{id}/model", post(set_provider_model))
         .route("/v1/runs/{id}/queue/start", post(start_queued))
         .route("/v1/runs/{id}/queue/{queue_id}", delete(remove_queued))
         .route("/v1/runs/{id}/interrupt", post(interrupt))
@@ -1035,12 +1036,35 @@ async fn provider_models(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let models = state
+    let catalog = state
         .supervisor
         .provider_models(&id)
         .await
         .map_err(api_error)?;
-    Ok(Json(json!({"models":models})))
+    Ok(Json(catalog))
+}
+#[derive(Deserialize)]
+struct SetModelRequest {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+async fn set_provider_model(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<SetModelRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let status = state
+        .supervisor
+        .set_provider_model(&id, request.model.as_deref(), request.effort.as_deref())
+        .await
+        .map_err(api_error)?;
+    // Sessions carry the model read during discovery, which is cached for a
+    // minute. Drop it so the change shows up on the next scan instead of
+    // waiting out the TTL.
+    invalidate_discovery(&state).await;
+    Ok(Json(status))
 }
 async fn start_queued(
     State(state): State<Arc<AppState>>,

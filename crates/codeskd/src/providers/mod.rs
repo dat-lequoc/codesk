@@ -38,6 +38,25 @@ pub(crate) struct TerminalStatus {
     pub context_percentage: Option<f64>,
 }
 
+/// One reasoning level a harness accepts, carrying the label its own picker
+/// shows so Codesk does not invent names the operator has never seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EffortLevel {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+/// How a terminal-driven harness lets Codesk change its model and effort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelControl {
+    /// `/model <id>` and `/effort <level>` accept an argument and apply
+    /// immediately, and the catalog picker scrolls a few rows at a time.
+    Command,
+    /// A single `/model` picker walks a numbered model page into a numbered
+    /// reasoning page, and a row is chosen by typing its number.
+    NumberedPicker,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunnerKind {
     Stdio,
@@ -115,6 +134,14 @@ pub(crate) trait ProviderAdapter: Sync {
         None
     }
 
+    /// Whether the pane is showing a picker Codesk drives, which Escape walks
+    /// back out of. An abandoned picker covers the composer, so it has to be
+    /// closed before the pane takes a prompt again — but only a picker may be
+    /// escaped, since the same key quits some startup dialogs.
+    fn terminal_picker_open(&self, _screen: &str) -> bool {
+        false
+    }
+
     /// A command that the harness renders in its own terminal UI instead of the
     /// conversation transcript. Codesk captures the pane afterwards so the run
     /// still gets an event, and dismisses the overlay so the pane stays
@@ -137,6 +164,16 @@ pub(crate) trait ProviderAdapter: Sync {
     /// Parse one visible page of the harness's interactive model picker.
     fn parse_model_page(&self, _screen: &str) -> ModelPage {
         ModelPage::default()
+    }
+
+    /// The reasoning levels this harness accepts, in the order it lists them.
+    fn effort_levels(&self) -> &'static [EffortLevel] {
+        &[]
+    }
+
+    /// `None` when Codesk can read the model but not change it.
+    fn model_control(&self) -> Option<ModelControl> {
+        None
     }
 
     fn encode_initial_prompt(&self, _prompt: &str) -> Option<String> {
@@ -256,6 +293,7 @@ pub(crate) fn capabilities() -> Vec<AdapterCapability> {
                 queued_input: descriptor.queued_input,
                 turn_rewind: descriptor.turn_rewind,
                 provider_responses: descriptor.provider_responses,
+                model_picker: adapter.model_control().is_some(),
                 runner: descriptor.runner.as_str().into(),
                 limitations: descriptor
                     .limitations
@@ -295,6 +333,10 @@ pub(crate) fn terminal_startup_key(provider: &str, screen: &str) -> Option<&'sta
     get(provider).and_then(|adapter| adapter.terminal_startup_key(screen))
 }
 
+pub(crate) fn terminal_picker_open(provider: &str, screen: &str) -> bool {
+    get(provider).is_some_and(|adapter| adapter.terminal_picker_open(screen))
+}
+
 pub(crate) fn terminal_input_blocked(provider: &str, screen: &str) -> Option<bool> {
     get(provider).and_then(|adapter| adapter.terminal_input_blocked(screen))
 }
@@ -319,6 +361,14 @@ pub(crate) fn parse_model_page(provider: &str, screen: &str) -> ModelPage {
     get(provider)
         .map(|adapter| adapter.parse_model_page(screen))
         .unwrap_or_default()
+}
+
+pub(crate) fn effort_levels(provider: &str) -> &'static [EffortLevel] {
+    get(provider).map_or(&[], |adapter| adapter.effort_levels())
+}
+
+pub(crate) fn model_control(provider: &str) -> Option<ModelControl> {
+    get(provider).and_then(|adapter| adapter.model_control())
 }
 
 pub(crate) fn encode_initial_prompt(provider: &str, prompt: &str) -> Option<String> {
