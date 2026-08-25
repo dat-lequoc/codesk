@@ -13,18 +13,19 @@ import { registerRoutes } from './routes.mjs'
 // visit reaching a loopback port that can drive their agents, so it is refused
 // rather than merely denied a readable response. Callers with no `Origin` at
 // all — the desktop shell, scripts, tests — are not browsers and pass through.
-const allowedOrigin = (origin) =>
-  Boolean(origin) &&
-  (Boolean(process.env.CODESK_WEB_MODE) ||
-    origin.startsWith('tauri://') ||
-    origin.startsWith('http://tauri.localhost') ||
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))
+const allowedOrigin = (origin, req) =>
+  !origin ||
+  Boolean(process.env.CODESK_WEB_MODE) ||
+  origin.startsWith('tauri://') ||
+  origin.startsWith('http://tauri.localhost') ||
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
+  (req?.headers?.host && origin.includes(req.headers.host))
 
 const app = express(); const server = http.createServer(app); const store = new Store()
 // The same rule has to be enforced here separately: WebSocket handshakes are
 // exempt from CORS, so without this check any page could open /ws and read the
 // live event stream regardless of what the HTTP layer allows.
-const wss = new WebSocketServer({ server, path: '/ws', verifyClient: ({ origin }) => !origin || allowedOrigin(origin) })
+const wss = new WebSocketServer({ server, path: '/ws', verifyClient: ({ origin, req }) => allowedOrigin(origin, req) })
 // Clients that stop reading accumulate frames in the ws send buffer without
 // bound. Skipping them instead of queueing is safe: the UI re-fetches state on
 // reconnect and polls periodically, so a dropped frame heals itself.
@@ -45,7 +46,7 @@ app.use((req, res, next) => {
   // Omitting the allow-origin header only stops the page from reading the
   // reply; the request still ran. Mutating routes start agents and install
   // daemons, so a foreign origin has to be turned away before that happens.
-  if (origin && !allowedOrigin(origin)) return res.status(403).json({ error: 'Cross-origin requests are not allowed' })
+  if (origin && !allowedOrigin(origin, req)) return res.status(403).json({ error: 'Cross-origin requests are not allowed' })
   if (origin) {
     res.setHeader('Access-Control-Allow-Origin', origin)
     res.setHeader('Vary', 'Origin')

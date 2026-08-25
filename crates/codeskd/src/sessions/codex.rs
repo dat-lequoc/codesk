@@ -178,7 +178,7 @@ pub(crate) fn codex_messages_for_project(
     let codex_root = home_dir().join(".codex");
     if let Some(path) = codex_rollout_path(&codex_root, native_session_id)? {
         if path.is_file() && codex_rollout_matches_project(&path, project)? {
-            return parse_messages(&path, "codex", after);
+            return parse_messages(&path, "codex", after, None, None);
         }
     }
     if codex_thread_matches_project(&codex_root, native_session_id, project)? {
@@ -698,7 +698,7 @@ mod tests {
         )
         .unwrap();
 
-        let messages = parse_messages(&path, "codex", None).unwrap();
+        let messages = parse_messages(&path, "codex", None, None, None).unwrap();
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].kind, "tool");

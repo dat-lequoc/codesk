@@ -584,7 +584,7 @@ mod tests {
             transcript
         );
 
-        let messages = parse_messages(&transcript, "agy", None).unwrap();
+        let messages = parse_messages(&transcript, "agy", None, None, None).unwrap();
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].text, "Inspect the project");
         assert!(messages.iter().any(|message| message.kind == "reasoning"));

@@ -7,7 +7,19 @@ const args = process.argv.slice(2)
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 if (args[0] === 'web') {
-  console.log('Starting Codesk web mode on port 4000...')
+  const port = process.env.PORT || '4000'
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(600) })
+    if (res.ok) {
+      const data = await res.json()
+      if (data.service === 'codesk-gateway') {
+        console.log(`Codesk web mode is already running at http://127.0.0.1:${port}`)
+        process.exit(0)
+      }
+    }
+  } catch {}
+
+  console.log(`Starting Codesk web mode on port ${port}...`)
   const p = spawn('npm', ['run', 'start:web'], {
     cwd: root,
     stdio: 'inherit',

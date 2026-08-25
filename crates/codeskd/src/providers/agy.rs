@@ -136,8 +136,17 @@ impl ProviderAdapter for Antigravity {
         project: &Project,
         native_session_id: &str,
         after: Option<&str>,
+        before: Option<&str>,
+        limit: Option<usize>,
     ) -> Result<Vec<SessionMessage>> {
-        sessions::file_messages_for_project(project, DESCRIPTOR.id, native_session_id, after)
+        sessions::file_messages_for_project(
+            project,
+            DESCRIPTOR.id,
+            native_session_id,
+            after,
+            before,
+            limit,
+        )
     }
     fn transcript_turn_active(&self, path: &Path) -> bool {
         sessions::transcript_turn_active(path, DESCRIPTOR.id)

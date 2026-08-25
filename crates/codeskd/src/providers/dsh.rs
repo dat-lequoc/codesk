@@ -59,25 +59,12 @@ impl ProviderAdapter for Dsh {
     }
     fn build_terminal(
         &self,
-        request: &StartRunRequest,
+        _request: &StartRunRequest,
         _session_key: &str,
         _cwd: &str,
     ) -> Result<Option<support::CommandSpec>> {
-        let mut args = vec!["--profile".into(), "tui".into()];
-        if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
-            args.extend([
-                "--resume".into(),
-                support::require_resume_session(request)?.into(),
-            ]);
-        }
-        if let Some(model) = support::model(request) {
-            args.extend(["--model".into(), model.into()]);
-        }
-        Ok(Some(support::CommandSpec {
-            command: support::provider_command("dsh")?,
-            args,
-            session_id: request.resume_session_id.clone(),
-        }))
+        // DSH runs as an integrated web/HTTP service with RunnerKind::DshWeb, not a TUI process.
+        Ok(None)
     }
     fn encode_input(
         &self,
@@ -107,7 +94,10 @@ impl ProviderAdapter for Dsh {
     }
     fn matches_command(&self, command: &str) -> bool {
         let lower = command.to_lowercase();
-        support::command_tokens(&lower).contains(&"dsh") || lower.contains("@deepseek-ai/dsh")
+        support::command_tokens(&lower).contains(&"dsh")
+            || lower.contains("@deepseek-ai/dsh")
+            || lower.contains("deepseek-harness")
+            || (lower.contains("apps/cli/src/bin.ts") && lower.contains("web"))
     }
     fn transcript_matches(&self, path: &str) -> bool {
         path.ends_with("/session.jsonl.zstd") && path.contains("/.dsh/sessions/")
@@ -128,8 +118,17 @@ impl ProviderAdapter for Dsh {
         project: &Project,
         native_session_id: &str,
         after: Option<&str>,
+        before: Option<&str>,
+        limit: Option<usize>,
     ) -> Result<Vec<SessionMessage>> {
-        sessions::file_messages_for_project(project, DESCRIPTOR.id, native_session_id, after)
+        sessions::file_messages_for_project(
+            project,
+            DESCRIPTOR.id,
+            native_session_id,
+            after,
+            before,
+            limit,
+        )
     }
     fn transcript_turn_active(&self, path: &Path) -> bool {
         sessions::transcript_turn_active(path, DESCRIPTOR.id)
