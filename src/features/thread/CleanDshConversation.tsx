@@ -100,8 +100,10 @@ export function ProducedFilesCard({
 }
 
 /** Clean Todo List Card. */
-export function TodoCard({ todos }: { todos: TodoItemData[] }) {
-  const [open, setOpen] = useState(true)
+export function TodoCard({ todos, defaultOpen }: { todos: TodoItemData[]; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(
+    () => defaultOpen ?? todos.some((t) => t.status === 'in_progress'),
+  )
   if (!todos || !todos.length) return null
 
   const completedCount = todos.filter((t) => t.status === 'completed').length

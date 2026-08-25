@@ -1,4 +1,5 @@
 import express from 'express'
+import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { WebSocketServer } from 'ws'
@@ -13,13 +14,23 @@ import { registerRoutes } from './routes.mjs'
 // visit reaching a loopback port that can drive their agents, so it is refused
 // rather than merely denied a readable response. Callers with no `Origin` at
 // all — the desktop shell, scripts, tests — are not browsers and pass through.
-const allowedOrigin = (origin, req) =>
-  !origin ||
-  Boolean(process.env.CODESK_WEB_MODE) ||
-  origin.startsWith('tauri://') ||
-  origin.startsWith('http://tauri.localhost') ||
-  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
-  (req?.headers?.host && origin.includes(req.headers.host))
+const allowedOrigin = (origin, req) => {
+  if (!origin) return true
+  if (
+    origin.startsWith('tauri://') ||
+    origin.startsWith('http://tauri.localhost') ||
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+  ) {
+    return true
+  }
+  if (req?.headers?.host) {
+    try {
+      const url = new URL(origin)
+      if (url.host === req.headers.host) return true
+    } catch {}
+  }
+  return false
+}
 
 const app = express(); const server = http.createServer(app); const store = new Store()
 // The same rule has to be enforced here separately: WebSocket handshakes are
@@ -121,8 +132,17 @@ registerRoutes(app, { store, gateway, broadcast, stateCache, mappers, ownership:
 
 if (process.env.CODESK_WEB_MODE) {
   const dist = path.join(process.cwd(), 'dist')
-  app.use(express.static(dist))
-  app.use((req, res) => res.sendFile(path.join(dist, 'index.html')))
+  if (fs.existsSync(dist)) {
+    app.use(express.static(dist))
+    app.use((req, res) => res.sendFile(path.join(dist, 'index.html')))
+  } else {
+    app.use((req, res) => {
+      res
+        .status(503)
+        .type('text/plain')
+        .send('Codesk Web UI is not built yet. Please run "npm run build" first.')
+    })
+  }
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => void stop(`received ${signal}`))

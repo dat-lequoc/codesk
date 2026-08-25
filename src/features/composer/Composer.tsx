@@ -52,13 +52,10 @@ export function ComposerInput({
 }) {
   const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     if (onAttach && e.clipboardData.files.length > 0) {
-      const files = e.clipboardData.files
-      const hasImage = Array.from(files).some((f) => f.type.startsWith('image/'))
-      if (hasImage) {
-        e.preventDefault()
-      }
-      const loaded = await processAttachmentFiles(files)
+      e.preventDefault()
+      const loaded = await processAttachmentFiles(e.clipboardData.files)
       if (loaded.length) onAttach(loaded)
+      return
     }
     onPaste?.(e)
   }

@@ -23,6 +23,7 @@ if (args[0] === 'web') {
   const p = spawn('npm', ['run', 'start:web'], {
     cwd: root,
     stdio: 'inherit',
+    env: { ...process.env, PORT: String(port) },
   })
   p.on('exit', (code) => process.exit(code || 0))
 } else {

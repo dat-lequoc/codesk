@@ -1,5 +1,5 @@
 export const SESSION_PAGE_SIZE = 50
-export const STATE_TTL_MS = 3_000
+export const STATE_TTL_MS = 10_000
 
 export function createStateCache({ store, gateway, broadcast, mappers }) {
   const { mapRun, mapSession, mapAgent } = mappers

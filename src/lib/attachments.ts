@@ -13,6 +13,65 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+const TEXT_EXTENSIONS = new Set([
+  'txt',
+  'md',
+  'markdown',
+  'json',
+  'js',
+  'jsx',
+  'ts',
+  'tsx',
+  'py',
+  'rs',
+  'c',
+  'cpp',
+  'h',
+  'hpp',
+  'cs',
+  'go',
+  'java',
+  'kt',
+  'rb',
+  'php',
+  'sh',
+  'bash',
+  'zsh',
+  'yaml',
+  'yml',
+  'toml',
+  'xml',
+  'html',
+  'css',
+  'scss',
+  'sass',
+  'less',
+  'sql',
+  'csv',
+  'tsv',
+  'log',
+  'env',
+  'diff',
+  'patch',
+  'dockerfile',
+  'makefile',
+])
+
+function isTextFile(file: File): boolean {
+  if (file.type.startsWith('text/')) return true
+  if (
+    file.type === 'application/json' ||
+    file.type === 'application/javascript' ||
+    file.type === 'application/typescript' ||
+    file.type === 'application/xml' ||
+    file.type === 'application/x-yaml'
+  ) {
+    return true
+  }
+  const ext = file.name.split('.').pop()?.toLowerCase() || ''
+  return TEXT_EXTENSIONS.has(ext)
+}
+
 export async function processAttachmentFiles(
   files: FileList | File[],
 ): Promise<ComposerAttachment[]> {
@@ -36,12 +95,12 @@ export async function processAttachmentFiles(
         type: file.type,
         dataUrl,
       })
-    } else {
+    } else if (isTextFile(file)) {
       const text = await new Promise<string>((resolve) => {
         const reader = new FileReader()
         reader.onload = () => resolve((reader.result as string) || '')
         reader.onerror = () => resolve('')
-        reader.readAsText(file.slice(0, 100_000))
+        reader.readAsText(file.slice(0, 250_000))
       })
       loaded.push({
         id,
@@ -49,6 +108,13 @@ export async function processAttachmentFiles(
         size: file.size,
         type: file.type || 'text/plain',
         text,
+      })
+    } else {
+      loaded.push({
+        id,
+        name: file.name,
+        size: file.size,
+        type: file.type || 'application/octet-stream',
       })
     }
   }

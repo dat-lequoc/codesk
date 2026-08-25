@@ -117,6 +117,14 @@ export function useThreadScroll(key: string, contentKey: string, options?: Threa
     setIsAtBottom(true)
   }
 
+  const adjustScrollTopBy = (delta: number) => {
+    const element = scroll.current
+    if (!element || delta <= 0) return
+    element.scrollTop += delta
+  }
+
+  const getScrollHeight = () => scroll.current?.scrollHeight ?? 0
+
   const saved = recallThreadScroll(key)
   const startAtEnd = !saved || saved.following
   return {
@@ -127,5 +135,7 @@ export function useThreadScroll(key: string, contentKey: string, options?: Threa
     savedTop: saved?.top ?? 0,
     isAtBottom,
     scrollToBottom,
+    adjustScrollTopBy,
+    getScrollHeight,
   }
 }

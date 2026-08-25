@@ -58,9 +58,10 @@ export function useSessionMessagesPoller({
         oldestTimestamp,
         PAGE_SIZE,
       )
+      const supportsPaging = sessionProviderId === 'dsh'
       setHasEarlierBySession((prev) => ({
         ...prev,
-        [selectedSessionKey]: incoming.length >= PAGE_SIZE,
+        [selectedSessionKey]: supportsPaging && incoming.length >= PAGE_SIZE,
       }))
       if (incoming.length > 0) {
         setSessionMessages((prev) => {
@@ -120,9 +121,10 @@ export function useSessionMessagesPoller({
           if (!existing) {
             const updated = { ...current, [selectedSessionKey]: mergeSessionMessages([], incoming) }
             sessionMessagesRef.current = updated
+            const supportsPaging = sessionProviderId === 'dsh'
             setHasEarlierBySession((prev) => ({
               ...prev,
-              [selectedSessionKey]: incoming.length >= PAGE_SIZE,
+              [selectedSessionKey]: supportsPaging && incoming.length >= PAGE_SIZE,
             }))
             return updated
           }

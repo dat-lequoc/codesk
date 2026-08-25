@@ -438,6 +438,7 @@ function InputRequestCard({
 export const ThreadEvent = memo(function ThreadEvent({
   event,
   run,
+  cleanView = false,
   durationMs,
   resolved,
   canRewind,
@@ -445,6 +446,7 @@ export const ThreadEvent = memo(function ThreadEvent({
 }: {
   event: RunEvent
   run: Run
+  cleanView?: boolean
   durationMs?: number
   resolved: boolean
   canRewind: boolean
@@ -587,6 +589,7 @@ export const ThreadEvent = memo(function ThreadEvent({
     )
   if (event.kind === 'user.message') {
     if (
+      cleanView &&
       isContextInjectionMessage({
         id: event.event_id,
         text,

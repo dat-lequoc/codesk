@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { formatFileSize, formatPromptWithAttachments, type ComposerAttachment } from './attachments'
+import {
+  formatFileSize,
+  formatPromptWithAttachments,
+  processAttachmentFiles,
+  type ComposerAttachment,
+} from './attachments'
 
 describe('attachments utils', () => {
   it('formats file sizes nicely', () => {
@@ -10,6 +15,18 @@ describe('attachments utils', () => {
 
   it('formats prompt with no attachments', () => {
     expect(formatPromptWithAttachments('hello', [])).toBe('hello')
+  })
+
+  it('processes text and binary files appropriately', async () => {
+    const textFile = new File(['console.log("hello world")'], 'app.ts', { type: 'text/typescript' })
+    const binFile = new File(['\x00\x01\x02\x03'], 'data.bin', { type: 'application/octet-stream' })
+
+    const loaded = await processAttachmentFiles([textFile, binFile])
+    expect(loaded).toHaveLength(2)
+    expect(loaded[0].name).toBe('app.ts')
+    expect(loaded[0].text).toBe('console.log("hello world")')
+    expect(loaded[1].name).toBe('data.bin')
+    expect(loaded[1].text).toBeUndefined()
   })
 
   it('formats prompt with image and text attachments', () => {

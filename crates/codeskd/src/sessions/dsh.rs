@@ -296,13 +296,12 @@ pub(super) fn parse_dsh_messages(
                     || text.starts_with("Current runtime context")
                     || text.starts_with("The approval policy changed")
                     || text.starts_with("Additional instructions from:");
-                let meaningful = meaningful_user_text(text.clone());
-                if (!meaningful.is_empty() || is_context_injection) && include(&timestamp) {
+                if (!text.trim().is_empty() || is_context_injection) && include(&timestamp) {
                     messages.push(SessionMessage {
                         id: format!("dsh-{seq}"),
                         timestamp,
                         role: "user".to_string(),
-                        text: if is_context_injection { text } else { meaningful },
+                        text,
                         kind: "message".to_string(),
                         meta: if is_context_injection {
                             Some(json!({
@@ -525,7 +524,7 @@ mod tests {
         let values = [
             json!({"type":"session","version":0,"id":session_id,"createdAt":1786840000000_i64,"cwd":project_path}),
             json!({"type":"turn/start","seq":1,"time":1786840000100_i64,"data":{"turn":1}}),
-            json!({"type":"user/message","seq":2,"time":1786840000200_i64,"data":{"content":[{"type":"text","text":"Inspect package.json"}],"source":{"kind":"user","rpcId":"prompt-1"},"role":"user","id":"user-1"}}),
+            json!({"type":"user/message","seq":2,"time":1786840000200_i64,"data":{"content":[{"type":"text","text":"# Review PR\nInspect /home/ubuntu/package.json\nLine 3"}],"source":{"kind":"user","rpcId":"prompt-1"},"role":"user","id":"user-1"}}),
             json!({"type":"session/title","seq":3,"time":1786840000300_i64,"data":{"title":"Inspect the package"}}),
             json!({"type":"tool/call","seq":4,"time":1786840000400_i64,"data":{"turn":1,"step":1,"callId":"call-1","name":"read","arguments":"{\"file_path\":\"package.json\"}"}}),
             json!({"type":"tool/result","seq":5,"time":1786840000500_i64,"data":{"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":"call-1"},"content":[{"type":"tool-result","toolCallId":"call-1","content":[{"type":"text","text":"codesk"}],"isError":false}],"role":"user","id":"result-1"}}}),
@@ -550,6 +549,10 @@ mod tests {
         );
         let messages = parse_messages(&path, "dsh", None, None, None).unwrap();
         assert_eq!(messages[0].role, "user");
+        assert_eq!(
+            messages[0].text,
+            "# Review PR\nInspect /home/ubuntu/package.json\nLine 3"
+        );
         assert!(messages.iter().any(|message| message.kind == "tool"));
         assert!(messages.iter().any(|message| message.kind == "tool_output"));
         assert!(

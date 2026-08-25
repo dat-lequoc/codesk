@@ -459,6 +459,7 @@ export function RunScreen({
                 <ThreadEvent
                   event={item}
                   run={run}
+                  cleanView={cleanView}
                   durationMs={durations.get(item.event_id)}
                   resolved={
                     item.payload.rpc_id !== undefined &&

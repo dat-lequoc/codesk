@@ -2,6 +2,7 @@ import { memo } from 'react'
 import { Archive, Circle } from 'lucide-react'
 import { Spinner } from '../../components/ui/spinner'
 import { cn } from '../../lib/cn'
+import { active } from '../../lib/events'
 import { relative } from '../../lib/format'
 import { providerName } from '../../lib/providers'
 import type { Run } from '../../types'
@@ -21,6 +22,11 @@ export const RunRow = memo(function RunRow({
   onSelect: (run: Run) => void
   onArchive: (run: Run) => void
 }) {
+  const isWorking =
+    run.status === 'running' || run.status === 'starting' || run.status === 'interrupting'
+  const isWaiting = run.status === 'waiting_for_input'
+  const isActive = active.has(run.status)
+
   return (
     <div className="group relative flex min-h-7 min-w-0">
       <button
@@ -31,13 +37,19 @@ export const RunRow = memo(function RunRow({
         <span
           className={cn(
             recentStatus,
-            run.status === 'running' || run.status === 'starting' ? 'text-grass-400' : 'text-muted',
+            isWorking && 'text-grass-400',
+            isWaiting && 'text-azure-400',
+            !isActive && 'text-muted',
           )}
         >
-          {run.status === 'running' || run.status === 'starting' ? (
+          {isWorking ? (
             <Spinner />
           ) : (
-            <Circle size={7} fill="currentColor" />
+            <Circle
+              size={7}
+              fill="currentColor"
+              className={isWaiting ? 'animate-pulse' : undefined}
+            />
           )}
         </span>
         <span className={rowTitle}>

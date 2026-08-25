@@ -112,7 +112,7 @@ import { ConversationMessage, MarkdownContent } from '../thread/Markdown'
 import { UsageCard } from '../thread/ThreadEvent'
 import { VirtualTimeline, virtualRowEstimate } from '../thread/VirtualTimeline'
 import { useThreadScroll } from '../../hooks/useThreadScroll'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 export function SessionScreen({
   session,
@@ -420,17 +420,41 @@ export function SessionScreen({
   // follow-bottom keys on the tail's identity and content, not just length.
   const lastMessage = messages.at(-1)
   const followKey = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.text?.length ?? 0}:${session.status}`
-  const { scroll, onScroll, startAtEnd, savedTop, isAtBottom, scrollToBottom } = useThreadScroll(
-    threadScrollKeyForSession(session),
-    followKey,
-    {
-      ready: messages.length > 0 || messagesLoaded,
-      onAtEnd: () => {
-        if (session.status === 'running') return
-        markSessionFinishSeen(sessionNotificationKey(session))
-      },
+  const {
+    scroll,
+    onScroll,
+    startAtEnd,
+    savedTop,
+    isAtBottom,
+    scrollToBottom,
+    adjustScrollTopBy,
+    getScrollHeight,
+  } = useThreadScroll(threadScrollKeyForSession(session), followKey, {
+    ready: messages.length > 0 || messagesLoaded,
+    onAtEnd: () => {
+      if (session.status === 'running') return
+      markSessionFinishSeen(sessionNotificationKey(session))
     },
-  )
+  })
+  const prevScrollHeightRef = useRef<number | null>(null)
+
+  const handleLoadEarlier = () => {
+    if (!onLoadEarlier) return
+    prevScrollHeightRef.current = getScrollHeight()
+    onLoadEarlier()
+  }
+
+  useLayoutEffect(() => {
+    if (prevScrollHeightRef.current !== null) {
+      const currentHeight = getScrollHeight()
+      const delta = currentHeight - prevScrollHeightRef.current
+      if (delta > 0) {
+        adjustScrollTopBy(delta)
+      }
+      prevScrollHeightRef.current = null
+    }
+  }, [messages.length, adjustScrollTopBy, getScrollHeight])
+
   const openFile = (href: string) => {
     setSelectedActivityId(null)
     filePreview.open(href)
@@ -503,7 +527,7 @@ export function SessionScreen({
                   <div className="flex justify-center my-3">
                     <button
                       type="button"
-                      onClick={onLoadEarlier}
+                      onClick={handleLoadEarlier}
                       disabled={loadingEarlier}
                       className="flex items-center gap-2 rounded-lg border border-line-strong bg-ink-750 px-3.5 py-1.5 text-xs font-medium text-fg-soft hover:bg-ink-700 hover:text-fg hover:border-azure-500/40 transition-colors disabled:opacity-50 cursor-pointer shadow-xs"
                       aria-label="Load earlier messages"
@@ -571,22 +595,28 @@ export function SessionScreen({
                   }
                   if (item.role === 'assistant') {
                     const todos = extractTodosFromMessage(item)
-                    if (todos) {
-                      return <TodoCard todos={todos} />
-                    }
                     const goal = extractGoalFromMessage(item)
-                    if (goal) {
-                      return <GoalCard goal={goal} />
-                    }
-                    if (item.kind === 'tool' || item.kind === 'file_change') {
+                    const isTool = item.kind === 'tool' || item.kind === 'file_change'
+                    if (todos || goal || isTool) {
                       return (
-                        <CleanToolCard
-                          tool={item.meta?.tool || (item.kind === 'file_change' ? 'edit' : 'tool')}
-                          command={item.meta?.command ? String(item.meta.command) : undefined}
-                          output={item.meta?.output ? String(item.meta.output) : undefined}
-                          status={item.meta?.status}
-                          onOpenFile={openFile}
-                        />
+                        <div className="space-y-1.5 my-2">
+                          {todos && <TodoCard todos={todos} />}
+                          {goal && <GoalCard goal={goal} />}
+                          {isTool && (
+                            <CleanToolCard
+                              tool={
+                                item.meta?.tool || (item.kind === 'file_change' ? 'edit' : 'tool')
+                              }
+                              command={item.meta?.command ? String(item.meta.command) : undefined}
+                              output={item.meta?.output ? String(item.meta.output) : undefined}
+                              status={item.meta?.status}
+                              onOpenFile={openFile}
+                            />
+                          )}
+                          {item.text ? (
+                            <ConversationMessage author={item.role} text={item.text} />
+                          ) : null}
+                        </div>
                       )
                     }
                   }

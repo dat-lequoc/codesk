@@ -44,7 +44,7 @@ describe('CleanDshConversation components', () => {
     expect(openFile).toHaveBeenCalledWith('/home/ubuntu/src/App.tsx')
   })
 
-  it('renders TodoCard with status counts and task list', () => {
+  it('renders TodoCard with in-progress task expanded by default', () => {
     const todos = [
       { content: 'Task 1 done', status: 'completed' as const },
       { content: 'Task 2 active', status: 'in_progress' as const },
@@ -59,6 +59,22 @@ describe('CleanDshConversation components', () => {
     expect(screen.getByText('Task 1 done')).toBeInTheDocument()
     expect(screen.getByText('Task 2 active')).toBeInTheDocument()
     expect(screen.getByText('Task 3 pending')).toBeInTheDocument()
+  })
+
+  it('renders TodoCard collapsed when all tasks completed and expands on click', async () => {
+    const todos = [
+      { content: 'Task 1 done', status: 'completed' as const },
+      { content: 'Task 2 done', status: 'completed' as const },
+    ]
+    render(<TodoCard todos={todos} />)
+
+    expect(screen.getByText('To-dos')).toBeInTheDocument()
+    expect(screen.getByText('2 done')).toBeInTheDocument()
+    expect(screen.queryByText('Task 1 done')).not.toBeInTheDocument()
+
+    // Click to expand
+    await userEvent.click(screen.getByRole('button', { name: /To-dos/ }))
+    expect(screen.getByText('Task 1 done')).toBeInTheDocument()
   })
 
   it('renders GoalCard with objective and action', () => {
