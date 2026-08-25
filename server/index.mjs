@@ -1,5 +1,6 @@
 import express from 'express'
 import http from 'node:http'
+import path from 'node:path'
 import { WebSocketServer } from 'ws'
 import { Store } from './store.mjs'
 import { Gateway } from './gateway.mjs'
@@ -14,7 +15,8 @@ import { registerRoutes } from './routes.mjs'
 // all — the desktop shell, scripts, tests — are not browsers and pass through.
 const allowedOrigin = (origin) =>
   Boolean(origin) &&
-  (origin.startsWith('tauri://') ||
+  (Boolean(process.env.CODESK_WEB_MODE) ||
+    origin.startsWith('tauri://') ||
     origin.startsWith('http://tauri.localhost') ||
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))
 
@@ -116,6 +118,12 @@ ownerWatchdog.unref?.()
 
 registerRoutes(app, { store, gateway, broadcast, stateCache, mappers, ownership: { owners, ownerAlive, stop } })
 
+if (process.env.CODESK_WEB_MODE) {
+  const dist = path.join(process.cwd(), 'dist')
+  app.use(express.static(dist))
+  app.use((req, res) => res.sendFile(path.join(dist, 'index.html')))
+}
+
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => void stop(`received ${signal}`))
 process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason))
 
@@ -123,6 +131,7 @@ async function main() {
   await gateway.start()
   stateCache.refreshStaleHosts()
   const port = Number(process.env.PORT || 4242)
+  const host = process.env.HOST || (process.env.CODESK_WEB_MODE ? '0.0.0.0' : '127.0.0.1')
   server.on('error', (error) => {
     const message = error.code === 'EADDRINUSE'
       ? `Port ${port} is already in use. Stop the process holding it or set PORT to another port.`
@@ -130,6 +139,6 @@ async function main() {
     console.error(message)
     void stop(message, 1)
   })
-  server.listen(port, '127.0.0.1', () => console.log(`Codesk client gateway listening on http://127.0.0.1:${port}`))
+  server.listen(port, host, () => console.log(`Codesk client gateway listening on http://${host}:${port}`))
 }
 main().catch((error) => { console.error(error); void stop(`startup failed: ${error.message}`, 1) })

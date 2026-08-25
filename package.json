@@ -30,6 +30,7 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\"",
     "lint": "eslint src",
+    "start:web": "CODESK_WEB_MODE=1 node server/index.mjs",
     "start": "node server/index.mjs",
     "test": "vitest run",
     "test:agy-live": "cargo build -p codeskd && node scripts/test-agy-live.mjs",
