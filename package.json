@@ -33,7 +33,7 @@
     "start": "node server/index.mjs",
     "test": "vitest run",
     "test:agy-live": "cargo build -p codeskd && node scripts/test-agy-live.mjs",
-    "test:backend": "cargo build -p codeskd && cargo test -p codeskd && node scripts/test-session-budget.mjs && node scripts/test-run-archive.mjs && node scripts/test-hidden-agents.mjs && node scripts/test-codex-app-server.mjs && node scripts/test-gateway-codex.mjs && node scripts/test-daemon-survival.mjs && node scripts/test-daemon-lifecycle.mjs && node scripts/test-gateway-origin.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs && node scripts/test-drafts.mjs && node scripts/test-host-bootstrap-retry.mjs",
+    "test:backend": "cargo build -p codeskd && cargo test -p codeskd && node scripts/test-session-budget.mjs && node scripts/test-run-archive.mjs && node scripts/test-hidden-agents.mjs && node scripts/test-codex-app-server.mjs && node scripts/test-gateway-codex.mjs && node scripts/test-daemon-survival.mjs && node scripts/test-daemon-lifecycle.mjs && node scripts/test-gateway-origin.mjs && node scripts/test-worktrees.mjs && node scripts/test-discovery.mjs && node scripts/test-drafts.mjs && node scripts/test-host-bootstrap-retry.mjs && node scripts/test-mappers.mjs",
     "test:bootstrap-live": "node scripts/test-remote-bootstrap-live.mjs",
     "test:coverage": "vitest run --coverage",
     "test:dsh-live": "node scripts/test-dsh-live.mjs",

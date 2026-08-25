@@ -40,9 +40,11 @@ describe('TmuxDetails', () => {
     expect(screen.getByText('Sending resumes this conversation')).toBeInTheDocument()
   })
 
-  it('keeps the note for the pane it describes out of a controlled session', () => {
+  it('keeps the resume note off a named pane that has already exited', () => {
     render(<TmuxDetails name="codesk-a" note="Sending resumes this conversation" />)
     expect(screen.queryByText('Sending resumes this conversation')).not.toBeInTheDocument()
+    expect(screen.getByText('This pane has exited')).toBeInTheDocument()
+    expect(screen.queryByText('Access')).not.toBeInTheDocument()
   })
 
   it('copies the on-host command', async () => {

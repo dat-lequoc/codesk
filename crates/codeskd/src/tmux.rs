@@ -312,14 +312,21 @@ impl PaneSnapshot {
 }
 
 pub fn access_command(socket: Option<&Path>, session_name: &str) -> String {
-    match socket {
+    // `=` forces an exact session name. Without it, `attach -t codesk-kiro-…`
+    // can land on a user's session named `codesk` because tmux treats the
+    // target as a prefix. `TMUX=` is required when the command is pasted
+    // inside another tmux client: attach otherwise talks to that server and
+    // refuses to nest.
+    let target = format!("={session_name}");
+    let attach = match socket {
         Some(socket) => format!(
             "tmux -S {} attach-session -t {}",
             shell_quote(socket.to_string_lossy().as_ref()),
-            shell_quote(session_name)
+            shell_quote(&target)
         ),
-        None => format!("tmux attach-session -t {}", shell_quote(session_name)),
-    }
+        None => format!("tmux attach-session -t {}", shell_quote(&target)),
+    };
+    format!("TMUX= {attach}")
 }
 
 pub fn resume_command_from_original(
@@ -744,10 +751,13 @@ mod tests {
 
     #[test]
     fn access_commands_are_copyable_and_shell_safe() {
-        assert_eq!(access_command(None, "work"), "tmux attach-session -t work");
+        assert_eq!(
+            access_command(None, "work"),
+            "TMUX= tmux attach-session -t =work"
+        );
         assert_eq!(
             access_command(Some(Path::new("/tmp/Codesk data/codesk.sock")), "chat one"),
-            "tmux -S '/tmp/Codesk data/codesk.sock' attach-session -t 'chat one'"
+            "TMUX= tmux -S '/tmp/Codesk data/codesk.sock' attach-session -t '=chat one'"
         );
     }
 

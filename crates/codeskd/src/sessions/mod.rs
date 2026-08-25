@@ -170,9 +170,12 @@ fn list_sync(
     Ok(result)
 }
 
-/// Attach a remembered pane name / access command after the live process is gone.
-/// Environment reads these fields; without this, a detached Codex chat looks like
-/// it never had tmux.
+/// Attach a remembered pane name after the live process is gone.
+///
+/// Environment still shows the name so a finished Codesk-owned chat does not
+/// look like it never had tmux. The copy-paste attach command is omitted once
+/// the pane is dead — advertising it is how users end up with
+/// `can't find session`.
 pub fn apply_remembered_tmux(
     sessions: &mut [ProviderSession],
     controls: &[TmuxControl],
@@ -188,8 +191,10 @@ pub fn apply_remembered_tmux(
                 && control.session_name.is_some()
         }) {
             session.tmux_name = control.session_name.clone();
-            session.tmux_access_command = remembered_access_command(control);
             session.tmux_owned = control.owned;
+            if tmux_control_is_attachable(control) {
+                session.tmux_access_command = remembered_access_command(control);
+            }
             continue;
         }
         if let Some(run) = runs.iter().find(|run| {
@@ -197,25 +202,34 @@ pub fn apply_remembered_tmux(
                 && run.project_id == session.project_id
                 && run.provider_session_id.as_deref() == Some(session.native_session_id.as_str())
                 && run.tmux_name.is_some()
+                && tmux_run_is_attachable(run)
         }) {
             session.tmux_name = run.tmux_name.clone();
-            session.tmux_access_command = run.tmux_access_command.clone().or_else(|| {
-                run.tmux_name
-                    .as_deref()
-                    .map(|name| tmux::access_command(None, name))
-            });
+            session.tmux_access_command = run
+                .tmux_name
+                .as_deref()
+                .map(|name| tmux::access_command(None, name));
             session.tmux_owned = true;
         }
     }
 }
 
+fn tmux_control_is_attachable(control: &TmuxControl) -> bool {
+    !matches!(control.status.as_str(), "dead" | "failed")
+}
+
+fn tmux_run_is_attachable(run: &Run) -> bool {
+    matches!(
+        run.status.as_str(),
+        "running" | "waiting_for_input" | "starting"
+    )
+}
+
 fn remembered_access_command(control: &TmuxControl) -> Option<String> {
-    control.access_command.clone().or_else(|| {
-        control
-            .session_name
-            .as_deref()
-            .map(|name| tmux::access_command(control.socket_path.as_deref().map(Path::new), name))
-    })
+    control
+        .session_name
+        .as_deref()
+        .map(|name| tmux::access_command(control.socket_path.as_deref().map(Path::new), name))
 }
 
 /// Keep a detected pane tied to the conversation it was overlaid on, so
@@ -1129,7 +1143,7 @@ mod tests {
         assert_eq!(sessions[0].tmux_name.as_deref(), Some("work"));
         assert_eq!(
             sessions[0].tmux_access_command.as_deref(),
-            Some("tmux attach-session -t work")
+            Some("TMUX= tmux attach-session -t =work")
         );
     }
 
@@ -1184,7 +1198,71 @@ mod tests {
         assert_eq!(sessions[0].tmux_name.as_deref(), Some("dev"));
         assert_eq!(
             sessions[0].tmux_access_command.as_deref(),
-            Some("tmux attach-session -t dev")
+            Some("TMUX= tmux attach-session -t =dev")
+        );
+    }
+
+    #[test]
+    fn dead_panes_keep_their_name_but_not_an_attach_command() {
+        let mut sessions = vec![ProviderSession {
+            id: "kiro:session-1".into(),
+            provider: "kiro".into(),
+            native_session_id: "session-1".into(),
+            project_id: "project-1".into(),
+            cwd: "/dev".into(),
+            title: "finished".into(),
+            created_at: "2026-08-23T00:00:00Z".into(),
+            updated_at: "2026-08-23T00:00:00Z".into(),
+            status: "idle".into(),
+            pid: None,
+            managed_run_id: None,
+            model: None,
+            effort: None,
+            input_available: false,
+            input_transport: None,
+            tmux_name: None,
+            tmux_access_command: None,
+            tmux_controlled: false,
+            tmux_owned: false,
+        }];
+        let control = TmuxControl {
+            id: "owned-1".into(),
+            project_id: Some("project-1".into()),
+            run_id: None,
+            provider: "kiro".into(),
+            native_session_id: Some("session-1".into()),
+            transcript_path: None,
+            source_pid: 99,
+            source_pgid: 99,
+            cwd: "/dev".into(),
+            original_command: "kiro-cli chat".into(),
+            socket_path: Some("/home/nightfury/.local/share/codesk/tmux/codesk.sock".into()),
+            pane_id: Some("%0".into()),
+            session_name: Some("codesk-kiro-0f52a58e".into()),
+            access_command: Some(
+                "tmux -S /home/nightfury/.local/share/codesk/tmux/codesk.sock attach-session -t codesk-kiro-0f52a58e".into(),
+            ),
+            owned: true,
+            enabled: true,
+            status: "dead".into(),
+            error: Some("tmux pane is no longer available".into()),
+            queue_state: "ready".into(),
+            queue_state_at: "2026-08-23T00:00:00Z".into(),
+            created_at: "2026-08-23T00:00:00Z".into(),
+            updated_at: "2026-08-23T00:00:00Z".into(),
+        };
+        apply_remembered_tmux(&mut sessions, &[control], &[]);
+        assert_eq!(
+            sessions[0].tmux_name.as_deref(),
+            Some("codesk-kiro-0f52a58e")
+        );
+        assert!(
+            sessions[0].tmux_owned,
+            "a Codesk-owned pane should still look like tmux"
+        );
+        assert_eq!(
+            sessions[0].tmux_access_command, None,
+            "copy-paste attach must not point at a session that is gone"
         );
     }
 

@@ -113,6 +113,11 @@ export function TmuxDetails({
       {!name && note ? (
         <small className="pl-[68px] text-[9px] leading-tight text-muted">{note}</small>
       ) : null}
+      {name && !command ? (
+        <small className="pl-[68px] text-[9px] leading-tight text-muted">
+          This pane has exited
+        </small>
+      ) : null}
       {command ? (
         <TmuxCommandRow label="Access" command={command} copyLabel="Copy tmux access command" />
       ) : null}

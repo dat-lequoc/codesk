@@ -59,3 +59,4 @@ jobs:
       - run: node scripts/test-discovery.mjs
       - run: node scripts/test-drafts.mjs
       - run: node scripts/test-host-bootstrap-retry.mjs
+      - run: node scripts/test-mappers.mjs
