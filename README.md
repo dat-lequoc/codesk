@@ -79,6 +79,8 @@ Codesk therefore uses tmux as the control transport for interactive sessions:
 
 This gives Codesk durable control without replacing the harness, inventing a parallel conversation protocol, or hiding where the process actually runs. Enter sends **Steer**, Tab adds a durable **Queue** item, and Shift+Enter inserts a newline.
 
+Every prompt Codesk sends is kept in a shell-style history. Press Up in any composer to walk back through what was already submitted and Down to come forward again, including back to the draft that was in the box. A steered prompt lands in a harness TUI that can drop it, so this is the way to get one back.
+
 ### Kiro CLI commands
 
 Codesk reads Kiro's command catalog directly from ACP and offers keyboard-first completion in the composer. Type `/` to browse commands, use the arrow keys to select one, and press Tab or Enter to complete it. `/model` uses Kiro's live model list, while `/effort` offers `low`, `medium`, `high`, `xhigh`, and `max`. `/compact` compacts the active Kiro conversation when it is large enough.

@@ -23,6 +23,7 @@ import { api } from '../../api'
 import { useLatest } from '../../hooks/useLatest'
 import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
+import { usePromptRecall } from '../../hooks/usePromptRecall'
 import { providerName } from '../../lib/providers'
 import { observedAgentTitle } from '../../lib/observed'
 import { ProviderIcon } from '../../components/ProviderIcon'
@@ -54,6 +55,7 @@ export function ObservedScreen({
   const [message, setMessage] = usePersistentComposerDraft(
     `agent:${host?.id || 'unknown'}:${agent.id}`,
   )
+  const { recall, remember } = usePromptRecall(setMessage)
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState(false)
   const [moving, setMoving] = useState(false)
@@ -106,6 +108,7 @@ export function ObservedScreen({
     const prompt = message.trim()
     if (!prompt || busy || host?.status !== 'online' || !canContinue) return
     if (delivery === 'queue' && !canQueue) return
+    remember(prompt)
     setBusy(true)
     try {
       const result = await api.externalAgentInput(
@@ -130,6 +133,10 @@ export function ObservedScreen({
     }
   }
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (recall(event)) {
+      event.preventDefault()
+      return
+    }
     if (event.key === 'Tab' && canQueue) {
       event.preventDefault()
       void submit('queue')

@@ -52,6 +52,7 @@ import { api } from '../../api'
 import { Spinner } from '../../components/ui/spinner'
 import { useFilePreview } from '../../hooks/useFilePreview'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
+import { usePromptRecall } from '../../hooks/usePromptRecall'
 import {
   historicalActivityItems,
   historicalTimelineItems,
@@ -124,6 +125,7 @@ export function SessionScreen({
   const [message, setMessage] = usePersistentComposerDraft(
     `session:${session.hostId}:${session.provider}:${session.nativeSessionId}`,
   )
+  const { recall, remember } = usePromptRecall(setMessage)
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState<'adopt' | 'move' | null>(null)
   const [moving, setMoving] = useState(false)
@@ -245,6 +247,7 @@ export function SessionScreen({
   const submitMessage = async (mode: 'steer' | 'queue' = 'steer') => {
     const prompt = message.trim()
     if (!prompt || !canSend || submitting.current) return
+    remember(prompt)
     submitting.current = true
     setBusy(true)
     try {
@@ -292,6 +295,10 @@ export function SessionScreen({
       setCommandIndex(
         (value) => (value - 1 + commandSuggestions.length) % commandSuggestions.length,
       )
+      return
+    }
+    if (recall(event)) {
+      event.preventDefault()
       return
     }
     if (commandSuggestions.length && event.key === 'Tab') {

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { api } from '../../api'
 import { logoUrl } from '../../lib/app-state'
+import { usePromptRecall } from '../../hooks/usePromptRecall'
 import { harnessOrder } from '../../lib/providers'
 import { ProviderIcon } from '../../components/ProviderIcon'
 import type { AppState, DraftSession, GitContext, Host, Project, Run } from '../../types'
@@ -56,6 +57,7 @@ export function StartScreen({
   onError: (message: string) => void
 }) {
   const [prompt, setPrompt] = useState(draft?.prompt || '')
+  const { recall, remember } = usePromptRecall(setPrompt)
   const [provider, setProvider] = useState(draft?.provider || 'codex')
   const [workspace, setWorkspace] = useState<'current_checkout' | 'managed_worktree'>(
     draft?.workspaceMode || 'current_checkout',
@@ -133,6 +135,7 @@ export function StartScreen({
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (!project || !canSubmit || submitting.current) return
+    remember(prompt)
     submitting.current = true
     setBusy(true)
     try {
@@ -290,6 +293,9 @@ export function StartScreen({
             className="h-[60px] px-4 py-3 text-[13px]"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (recall(event)) event.preventDefault()
+            }}
             placeholder={
               selectedHarness
                 ? `Ask ${selectedHarness.name} to do anything`

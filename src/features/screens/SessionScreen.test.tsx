@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -114,6 +114,18 @@ describe('SessionScreen · steering an attached session', () => {
       ),
     )
     expect(composer()).toHaveValue('')
+  })
+
+  // Steering types into a harness TUI that can silently drop the text, so the
+  // composer must be able to give a sent prompt back.
+  it('recalls a sent prompt with the Up arrow', async () => {
+    vi.mocked(api.externalSessionInput).mockResolvedValue({ ok: true, delivery: 'steer' })
+    mount(controlled())
+    await userEvent.type(composer(), 'run the migration')
+    await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(composer()).toHaveValue(''))
+    fireEvent.keyDown(composer(), { key: 'ArrowUp' })
+    expect(composer()).toHaveValue('run the migration')
   })
 
   // A managed run owns the harness's stdin; the external path refuses to

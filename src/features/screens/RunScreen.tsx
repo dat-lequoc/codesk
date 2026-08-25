@@ -55,6 +55,7 @@ import {
 import { api } from '../../api'
 import { useFilePreview } from '../../hooks/useFilePreview'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
+import { usePromptRecall } from '../../hooks/usePromptRecall'
 import {
   isActivityGroup,
   liveActivityItems,
@@ -104,6 +105,7 @@ export function RunScreen({
   onError: (message: string) => void
 }) {
   const [message, setMessage] = usePersistentComposerDraft(`run:${run.hostId}:${run.id}`)
+  const { recall, remember } = usePromptRecall(setMessage)
   const [sending, setSending] = useState(false)
   const [rewind, setRewind] = useState<{
     turnId: string
@@ -165,6 +167,7 @@ export function RunScreen({
   const sendPrompt = async (mode: 'send' | 'fork' | 'queue' = 'send') => {
     const prompt = message.trim()
     if (!prompt || submitting.current) return
+    remember(prompt)
     submitting.current = true
     setSending(true)
     try {
@@ -341,6 +344,10 @@ export function RunScreen({
       setCommandIndex(
         (value) => (value - 1 + commandSuggestions.length) % commandSuggestions.length,
       )
+      return
+    }
+    if (recall(event)) {
+      event.preventDefault()
       return
     }
     if (commandSuggestions.length && event.key === 'Tab') {
