@@ -3,7 +3,14 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { SlashSuggestion } from '../../lib/kiro'
-import { ComposerFooter, ComposerFrame, ComposerInput, SlashCommandMenu } from './Composer'
+import {
+  AttachmentButton,
+  ComposerAttachmentsList,
+  ComposerFooter,
+  ComposerFrame,
+  ComposerInput,
+  SlashCommandMenu,
+} from './Composer'
 
 const suggestions: SlashSuggestion[] = [
   { value: '/usage', label: '/usage', description: 'Show token usage' },
@@ -114,5 +121,34 @@ describe('ComposerFooter', () => {
       </ComposerFooter>,
     )
     expect(screen.getByText('Resume · Codex')).toBeInTheDocument()
+  })
+})
+
+describe('AttachmentButton & ComposerAttachmentsList', () => {
+  it('renders attachment button and triggers file input', () => {
+    const onAttach = vi.fn()
+    render(<AttachmentButton onAttach={onAttach} />)
+    const button = screen.getByRole('button', { name: 'Add attachment' })
+    expect(button).toBeInTheDocument()
+  })
+
+  it('renders attached files and allows removal', async () => {
+    const onRemove = vi.fn()
+    const attachments = [
+      {
+        id: '1',
+        name: 'photo.png',
+        size: 1024,
+        type: 'image/png',
+        dataUrl: 'data:image/png;base64,123',
+      },
+      { id: '2', name: 'script.py', size: 512, type: 'text/x-python' },
+    ]
+    render(<ComposerAttachmentsList attachments={attachments} onRemove={onRemove} />)
+    expect(screen.getByText('photo.png')).toBeInTheDocument()
+    expect(screen.getByText('script.py')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove photo.png' }))
+    expect(onRemove).toHaveBeenCalledWith('1')
   })
 })

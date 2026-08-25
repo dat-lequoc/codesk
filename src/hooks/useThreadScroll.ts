@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { recallThreadScroll, rememberThreadScroll } from '../lib/thread-scroll'
 
@@ -39,6 +39,7 @@ export function useThreadScroll(key: string, contentKey: string, options?: Threa
   const restoring = useRef(true)
   const onAtEndRef = useRef(options?.onAtEnd)
   const readyRef = useRef(options?.ready !== false)
+  const [isAtBottom, setIsAtBottom] = useState(true)
 
   const notifyIfAtEnd = () => {
     const element = scroll.current
@@ -58,6 +59,8 @@ export function useThreadScroll(key: string, contentKey: string, options?: Threa
     if (!element) return
     restoring.current = true
     applyPosition(element, key)
+    const isBot = atBottom(element)
+    setIsAtBottom(isBot)
     requestAnimationFrame(() => {
       restoring.current = false
       notifyIfAtEnd()
@@ -82,6 +85,7 @@ export function useThreadScroll(key: string, contentKey: string, options?: Threa
       if (restoring.current || !following.current) return
       restoring.current = true
       element.scrollTop = element.scrollHeight
+      setIsAtBottom(true)
       requestAnimationFrame(() => {
         restoring.current = false
         notifyIfAtEnd()
@@ -94,12 +98,34 @@ export function useThreadScroll(key: string, contentKey: string, options?: Threa
   const onScroll = () => {
     const element = scroll.current
     if (!element || restoring.current) return
-    following.current = atBottom(element)
+    const bot = atBottom(element)
+    following.current = bot
+    setIsAtBottom(bot)
     rememberThreadScroll(key, { following: following.current, top: element.scrollTop })
     if (following.current) notifyIfAtEnd()
   }
 
+  const scrollToBottom = (smooth = true) => {
+    const element = scroll.current
+    if (!element) return
+    if (smooth) {
+      element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+    } else {
+      element.scrollTop = element.scrollHeight
+    }
+    following.current = true
+    setIsAtBottom(true)
+  }
+
   const saved = recallThreadScroll(key)
   const startAtEnd = !saved || saved.following
-  return { scroll, following, onScroll, startAtEnd, savedTop: saved?.top ?? 0 }
+  return {
+    scroll,
+    following,
+    onScroll,
+    startAtEnd,
+    savedTop: saved?.top ?? 0,
+    isAtBottom,
+    scrollToBottom,
+  }
 }

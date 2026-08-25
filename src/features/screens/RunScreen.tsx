@@ -10,7 +10,6 @@ import {
   environmentToggle,
   environmentToggleActive,
   headerButton,
-  interrupt,
   openIn,
   queueHeader,
   queueHeaderButton,
@@ -44,13 +43,14 @@ import {
   Laptop,
   ListPlus,
   Pencil,
-  Plus,
   RefreshCw,
   Send,
+  Sparkles,
   Square,
   Terminal,
   WifiOff,
   X,
+  XCircle,
 } from 'lucide-react'
 import { api } from '../../api'
 import { useFilePreview } from '../../hooks/useFilePreview'
@@ -69,11 +69,14 @@ import { providerName, providerUi } from '../../lib/providers'
 import type { Host, Project, Provider, Run, RunEvent } from '../../types'
 import { ActivityInspectorPanel, ToolActivityGroup } from '../activity/Activity'
 import {
+  AttachmentButton,
+  ComposerAttachmentsList,
   ComposerFooter,
   ComposerFrame,
   ComposerInput,
   SlashCommandMenu,
 } from '../composer/Composer'
+import { formatPromptWithAttachments, type ComposerAttachment } from '../../lib/attachments'
 import { ConfirmDialog } from '../dialogs/ConfirmDialog'
 import type { AppDialogRequest } from '../dialogs/ConfirmDialog'
 import { FilePreviewPanel } from '../dialogs/FilePreviewPanel'
@@ -104,6 +107,7 @@ export function RunScreen({
   onError: (message: string) => void
 }) {
   const [message, setMessage] = usePersistentComposerDraft(`run:${run.hostId}:${run.id}`)
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [sending, setSending] = useState(false)
   const [rewind, setRewind] = useState<{
     turnId: string
@@ -111,6 +115,7 @@ export function RunScreen({
     text: string
   } | null>(null)
   const [showEnvironment, setShowEnvironment] = useState(false)
+  const [cleanView, setCleanView] = useState(() => run.provider === 'dsh')
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [workspaceLabel, setWorkspaceLabel] = useState(
     run.worktreeId ? 'Managed worktree' : 'Current checkout',
@@ -123,7 +128,7 @@ export function RunScreen({
   const [commandIndex, setCommandIndex] = useState(0)
   const filePreview = useFilePreview(run.hostId, run.cwd)
   const lastEvent = events.at(-1)
-  const { scroll, onScroll, startAtEnd, savedTop } = useThreadScroll(
+  const { scroll, onScroll, startAtEnd, savedTop, isAtBottom, scrollToBottom } = useThreadScroll(
     threadScrollKeyForRun(run),
     `${events.length}:${lastEvent?.event_id ?? ''}:${lastEvent?.kind ?? ''}:${run.status}`,
     {
@@ -163,7 +168,7 @@ export function RunScreen({
   const turnRewind = provider?.turn_rewind ?? ui.turnRewind
   const canUseAttachedSession = Boolean((tmuxRun || provider?.live_input) && active.has(run.status))
   const sendPrompt = async (mode: 'send' | 'fork' | 'queue' = 'send') => {
-    const prompt = message.trim()
+    const prompt = formatPromptWithAttachments(message.trim(), attachments)
     if (!prompt || submitting.current) return
     submitting.current = true
     setSending(true)
@@ -176,6 +181,7 @@ export function RunScreen({
       else if (run.sessionId && provider?.resume) onStarted(await api.resumeRun(run, prompt))
       else return
       setMessage('')
+      setAttachments([])
       setRewind(null)
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause))
@@ -396,6 +402,25 @@ export function RunScreen({
             <MoreHorizontal size={18} />
           </button>
           <span className="flex-1" />
+          <button
+            type="button"
+            className={cn(
+              'flex h-[28px] items-center gap-1.5 rounded-lg border px-2.5 text-xs transition-colors cursor-pointer',
+              cleanView
+                ? 'border-azure-500/60 bg-azure-950/70 text-azure-300 font-medium'
+                : 'border-line-strong bg-ink-700 text-muted hover:text-fg-soft hover:bg-ink-650',
+            )}
+            onClick={() => setCleanView((value) => !value)}
+            title={
+              cleanView
+                ? 'Switch to classic conversation view'
+                : 'Switch to cleaner conversation view'
+            }
+            aria-label="Toggle clean conversation view"
+          >
+            <Sparkles size={13} className={cleanView ? 'text-azure-400' : 'text-muted'} />
+            <span className="text-[11px]">{cleanView ? 'Clean View' : 'Classic View'}</span>
+          </button>
           <button className={openIn}>
             Open in <ChevronDown size={14} />
           </button>
@@ -550,6 +575,18 @@ export function RunScreen({
         {!selectedActivity && filePreview.preview && (
           <FilePreviewPanel state={filePreview.preview} onClose={filePreview.close} />
         )}
+        {!isAtBottom && events.length > 0 && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom(true)}
+            className="absolute bottom-[76px] right-8 z-20 flex items-center gap-1.5 rounded-full border border-line-strong bg-ink-750/95 px-3 py-1.5 text-xs font-medium text-fg-soft shadow-lg backdrop-blur-xs hover:bg-ink-700 hover:text-fg hover:border-azure-500/50 transition-all cursor-pointer"
+            aria-label="Scroll to bottom"
+            title="Scroll to bottom"
+          >
+            <ChevronDown size={14} className="text-azure-400" />
+            <span>Scroll to bottom</span>
+          </button>
+        )}
         <ComposerFrame
           className={cn(
             threadComposer,
@@ -557,6 +594,7 @@ export function RunScreen({
             commandSuggestions.length > 0 && threadComposerMenuOpen,
           )}
           onSubmit={send}
+          onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
         >
           <SlashCommandMenu
             suggestions={commandSuggestions}
@@ -627,6 +665,7 @@ export function RunScreen({
             value={message}
             onChange={(event) => setMessage(event.target.value)}
             onKeyDown={handleComposerKeyDown}
+            onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
             placeholder={
               tmuxRun
                 ? 'Steer now · Tab queues after this turn'
@@ -645,24 +684,23 @@ export function RunScreen({
                     : 'This provider session cannot be resumed'
             }
           />
+          <ComposerAttachmentsList
+            attachments={attachments}
+            onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+          />
           <ComposerFooter className={composerBar}>
-            <button
-              type="button"
-              className="grid shrink-0 place-items-center text-muted hover:text-fg"
-              aria-label="Add attachment"
-              title="Attachments are not supported yet"
-              disabled
-            >
-              <Plus size={18} />
-            </button>
+            <AttachmentButton
+              onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
+              disabled={sending}
+            />
             {turnRunning && (
               <button
                 type="button"
-                className={interrupt}
+                className="flex items-center gap-1.5 rounded-md border border-ember-800/50 bg-ember-950/60 px-2.5 py-1 text-xs font-medium text-ember-300 hover:bg-ember-900/60 hover:text-ember-200 transition-colors"
                 onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}
               >
-                <Square size={14} />
-                Interrupt
+                <Square size={11} className="fill-current" />
+                <span>Interrupt</span>
               </button>
             )}
             {queuedInput && turnRunning && (
@@ -685,7 +723,7 @@ export function RunScreen({
             {ui.closeAttached && run.status === 'waiting_for_input' && (
               <button
                 type="button"
-                className={interrupt}
+                className="flex items-center gap-1.5 rounded-md border border-ink-650 bg-ink-800 px-2.5 py-1 text-xs font-medium text-fg-soft hover:bg-ink-700 hover:text-scarlet-400 hover:border-scarlet-800/50 transition-colors"
                 onClick={() =>
                   setDialog({
                     kind: 'confirm',
@@ -696,22 +734,22 @@ export function RunScreen({
                   })
                 }
               >
-                <Square size={14} />
-                Close
+                <XCircle size={13} className="text-scarlet-400" />
+                <span>Close</span>
               </button>
             )}
             {run.status === 'interrupting' && (
-              <>
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  className={interrupt}
+                  className="flex items-center gap-1 rounded-md border border-ember-800/60 bg-ember-950 px-2 py-1 text-xs font-medium text-ember-300 hover:bg-ember-900"
                   onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}
                 >
                   Terminate
                 </button>
                 <button
                   type="button"
-                  className={interrupt}
+                  className="flex items-center gap-1 rounded-md border border-scarlet-800/60 bg-scarlet-950 px-2 py-1 text-xs font-medium text-scarlet-300 hover:bg-scarlet-900"
                   onClick={() =>
                     setDialog({
                       kind: 'confirm',
@@ -724,7 +762,7 @@ export function RunScreen({
                 >
                   Kill
                 </button>
-              </>
+              </div>
             )}
             <span className="flex-1" />
             <small className={composerHint}>

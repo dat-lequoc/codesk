@@ -70,10 +70,18 @@ export const api = {
     provider: string,
     sessionId: string,
     after?: string,
-  ) =>
-    request<SessionMessage[]>(
-      `/api/projects/${hostId}/${projectId}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}/messages${after ? `?after=${encodeURIComponent(after)}` : ''}`,
-    ),
+    before?: string,
+    limit = 100,
+  ) => {
+    const params = new URLSearchParams()
+    if (after) params.set('after', after)
+    if (before) params.set('before', before)
+    if (limit) params.set('limit', String(limit))
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    return request<SessionMessage[]>(
+      `/api/projects/${hostId}/${projectId}/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(sessionId)}/messages${qs}`,
+    )
+  },
   projectSessions: (hostId: string, projectId: string, limit: number) =>
     request<ProviderSession[]>(`/api/projects/${hostId}/${projectId}/sessions?limit=${limit}`),
   refreshProjectSessions: (hostId: string, projectId: string, limit = 50) =>

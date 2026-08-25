@@ -2,7 +2,6 @@ import { memo } from 'react'
 import { Archive, Circle } from 'lucide-react'
 import { Spinner } from '../../components/ui/spinner'
 import { cn } from '../../lib/cn'
-import { active } from '../../lib/events'
 import { relative } from '../../lib/format'
 import { providerName } from '../../lib/providers'
 import type { Run } from '../../types'
@@ -30,9 +29,16 @@ export const RunRow = memo(function RunRow({
         onClick={() => onSelect(run)}
       >
         <span
-          className={cn(recentStatus, active.has(run.status) ? 'text-grass-400' : 'text-muted')}
+          className={cn(
+            recentStatus,
+            run.status === 'running' || run.status === 'starting' ? 'text-grass-400' : 'text-muted',
+          )}
         >
-          {active.has(run.status) ? <Spinner /> : <Circle size={7} fill="currentColor" />}
+          {run.status === 'running' || run.status === 'starting' ? (
+            <Spinner />
+          ) : (
+            <Circle size={7} fill="currentColor" />
+          )}
         </span>
         <span className={rowTitle}>
           <SidebarHarness provider={run.provider} />

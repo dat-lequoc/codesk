@@ -2,7 +2,7 @@ import { useLatest } from '../../hooks/useLatest'
 import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
 import { cn } from '../../lib/cn'
 import { threadColumn } from '../thread/thread-column'
-import { threadStatus, turnBoundary, turnRule } from '../thread/thread-styles'
+import { threadStatus, turnBoundary, turnRule, reasoningSummary } from '../thread/thread-styles'
 import {
   composerBar,
   composerHint,
@@ -36,14 +36,17 @@ import { FilePreviewContext } from '../../hooks/useFilePreview'
 import type { KeyboardEvent } from 'react'
 import { Globe2, MoreHorizontal } from 'lucide-react'
 import {
+  Bot,
+  ChevronDown,
   FolderGit2,
+  History,
   Info,
   Laptop,
   ListPlus,
   Plug,
-  Plus,
   RefreshCw,
   Send,
+  Sparkles,
   Terminal,
   WifiOff,
   X,
@@ -83,14 +86,29 @@ import type {
 } from '../../types'
 import { ActivityInspectorPanel, HistoricalActivityGroup } from '../activity/Activity'
 import {
+  AttachmentButton,
+  ComposerAttachmentsList,
   ComposerFooter,
   ComposerFrame,
   ComposerInput,
   SlashCommandMenu,
 } from '../composer/Composer'
+import { formatPromptWithAttachments, type ComposerAttachment } from '../../lib/attachments'
+import {
+  ContextInjectionCard,
+  ProducedFilesCard,
+  CleanToolCard,
+  TodoCard,
+  GoalCard,
+} from '../thread/CleanDshConversation'
+import {
+  isContextInjectionMessage,
+  extractTodosFromMessage,
+  extractGoalFromMessage,
+} from '../../lib/clean-dsh'
 import { FilePreviewPanel } from '../dialogs/FilePreviewPanel'
 import { EnvironmentPopover, EnvironmentRow, TmuxDetails } from '../environment/Environment'
-import { ConversationMessage } from '../thread/Markdown'
+import { ConversationMessage, MarkdownContent } from '../thread/Markdown'
 import { UsageCard } from '../thread/ThreadEvent'
 import { VirtualTimeline, virtualRowEstimate } from '../thread/VirtualTimeline'
 import { useThreadScroll } from '../../hooks/useThreadScroll'
@@ -100,6 +118,9 @@ export function SessionScreen({
   session,
   messages,
   messagesLoaded = false,
+  hasEarlier = false,
+  loadingEarlier = false,
+  onLoadEarlier,
   runEvents,
   project,
   host,
@@ -112,6 +133,9 @@ export function SessionScreen({
   /// Whether the first fetch for this conversation has completed; separates
   /// "still loading" from "loaded and genuinely empty".
   messagesLoaded?: boolean
+  hasEarlier?: boolean
+  loadingEarlier?: boolean
+  onLoadEarlier?: () => void
   runEvents: RunEvent[]
   project?: Project
   host?: Host
@@ -120,6 +144,8 @@ export function SessionScreen({
   onError: (message: string) => void
 }) {
   const [showEnvironment, setShowEnvironment] = useState(false)
+  const [cleanView, setCleanView] = useState(() => session.provider === 'dsh')
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null)
   const [message, setMessage] = usePersistentComposerDraft(
     `session:${session.hostId}:${session.provider}:${session.nativeSessionId}`,
@@ -151,13 +177,39 @@ export function SessionScreen({
     () => runEvents.filter((event) => event.kind === 'usage.updated').at(-1) || null,
     [runEvents],
   )
-  const activityEntries = timeline.flatMap((item) =>
-    isHistoricalActivity(item)
-      ? historicalActivityItems(item.messages).flatMap((activity) =>
-          activity.type === 'entry' ? [activity.entry] : [],
-        )
-      : [],
+  const activityEntries = useMemo(
+    () =>
+      timeline.flatMap((item) =>
+        isHistoricalActivity(item)
+          ? historicalActivityItems(item.messages).flatMap((activity) =>
+              activity.type === 'entry' ? [activity.entry] : [],
+            )
+          : [],
+      ),
+    [timeline],
   )
+  const producedFilesByTurn = useMemo(() => {
+    const map = new Map<string, string[]>()
+    let currentFiles: string[] = []
+    for (const item of timeline) {
+      if (isHistoricalActivity(item)) {
+        for (const msg of item.messages) {
+          const changes = msg.meta?.changes || []
+          for (const c of changes) {
+            if (c.path && !currentFiles.includes(c.path)) {
+              currentFiles.push(c.path)
+            }
+          }
+        }
+      } else if (item.kind === 'turn_completed') {
+        if (currentFiles.length > 0) {
+          map.set(item.id, [...currentFiles])
+          currentFiles = []
+        }
+      }
+    }
+    return map
+  }, [timeline])
   const selectedActivity = selectedActivityId
     ? activityEntries.find((entry) => entry.id === selectedActivityId) || null
     : null
@@ -243,7 +295,7 @@ export function SessionScreen({
     requestAnimationFrame(() => composerInput.current?.focus())
   }
   const submitMessage = async (mode: 'steer' | 'queue' = 'steer') => {
-    const prompt = message.trim()
+    const prompt = formatPromptWithAttachments(message.trim(), attachments)
     if (!prompt || !canSend || submitting.current) return
     submitting.current = true
     setBusy(true)
@@ -255,6 +307,7 @@ export function SessionScreen({
         if (session.managedRunId) {
           await api.input(session.hostId, session.managedRunId, prompt, mode)
           setMessage('')
+          setAttachments([])
         } else {
           const result = await api.externalSessionInput(session, prompt, mode)
           if (result.queued)
@@ -263,11 +316,13 @@ export function SessionScreen({
               result.queued!,
             ])
           setMessage('')
+          setAttachments([])
           if (result.run) onStarted(result.run)
         }
       } else {
         const run = await api.resumeSession(session, prompt)
         setMessage('')
+        setAttachments([])
         onStarted(run)
       }
     } catch (cause) {
@@ -365,7 +420,7 @@ export function SessionScreen({
   // follow-bottom keys on the tail's identity and content, not just length.
   const lastMessage = messages.at(-1)
   const followKey = `${messages.length}:${lastMessage?.id ?? ''}:${lastMessage?.text?.length ?? 0}:${session.status}`
-  const { scroll, onScroll, startAtEnd, savedTop } = useThreadScroll(
+  const { scroll, onScroll, startAtEnd, savedTop, isAtBottom, scrollToBottom } = useThreadScroll(
     threadScrollKeyForSession(session),
     followKey,
     {
@@ -398,6 +453,25 @@ export function SessionScreen({
             </span>
           )}
           <span className="flex-1" />
+          <button
+            type="button"
+            className={cn(
+              'flex h-[28px] items-center gap-1.5 rounded-lg border px-2.5 text-xs transition-colors cursor-pointer',
+              cleanView
+                ? 'border-azure-500/60 bg-azure-950/70 text-azure-300 font-medium'
+                : 'border-line-strong bg-ink-700 text-muted hover:text-fg-soft hover:bg-ink-650',
+            )}
+            onClick={() => setCleanView((value) => !value)}
+            title={
+              cleanView
+                ? 'Switch to classic conversation view'
+                : 'Switch to cleaner conversation view'
+            }
+            aria-label="Toggle clean conversation view"
+          >
+            <Sparkles size={13} className={cleanView ? 'text-azure-400' : 'text-muted'} />
+            <span className="text-[11px]">{cleanView ? 'Clean View' : 'Classic View'}</span>
+          </button>
           <button className={headerButton} title="Thread actions" aria-label="Thread actions">
             <MoreHorizontal size={18} />
           </button>
@@ -424,25 +498,129 @@ export function SessionScreen({
               scrollRef={scroll}
               initialOffset={startAtEnd ? timeline.length * virtualRowEstimate : savedTop}
               itemKey={(item) => item.id}
-              renderItem={(item) =>
-                isHistoricalActivity(item) ? (
-                  <HistoricalActivityGroup
-                    messages={item.messages}
-                    selectedId={selectedActivity?.id ?? null}
-                    onSelect={selectActivity}
-                  />
-                ) : item.kind === 'turn_completed' ? (
-                  <div className={turnBoundary}>
-                    <span className={turnRule} />
-                    {item.duration_ms !== undefined
-                      ? `Worked for ${durationLabel(item.duration_ms)}`
-                      : 'Turn completed'}
-                    <span className={turnRule} />
+              before={
+                hasEarlier ? (
+                  <div className="flex justify-center my-3">
+                    <button
+                      type="button"
+                      onClick={onLoadEarlier}
+                      disabled={loadingEarlier}
+                      className="flex items-center gap-2 rounded-lg border border-line-strong bg-ink-750 px-3.5 py-1.5 text-xs font-medium text-fg-soft hover:bg-ink-700 hover:text-fg hover:border-azure-500/40 transition-colors disabled:opacity-50 cursor-pointer shadow-xs"
+                      aria-label="Load earlier messages"
+                    >
+                      {loadingEarlier ? (
+                        <RefreshCw size={13} className="animate-spin text-azure-400" />
+                      ) : (
+                        <History size={13} className="text-azure-400" />
+                      )}
+                      <span>
+                        {loadingEarlier ? 'Loading earlier history…' : 'Load earlier messages'}
+                      </span>
+                    </button>
                   </div>
-                ) : (
-                  <ConversationMessage author={item.role} text={item.text} />
-                )
+                ) : undefined
               }
+              renderItem={(item) => {
+                if (cleanView) {
+                  if (isHistoricalActivity(item)) {
+                    return (
+                      <div className="space-y-1.5 my-2">
+                        {item.messages.map((msg) => {
+                          if (msg.kind === 'reasoning') {
+                            return (
+                              <div className={reasoningSummary} key={msg.id}>
+                                <Bot size={13} />
+                                <MarkdownContent text={msg.text} />
+                              </div>
+                            )
+                          }
+                          const todos = extractTodosFromMessage(msg)
+                          if (todos) {
+                            return <TodoCard key={msg.id} todos={todos} />
+                          }
+                          const goal = extractGoalFromMessage(msg)
+                          if (goal) {
+                            return <GoalCard key={msg.id} goal={goal} />
+                          }
+                          if (
+                            msg.kind === 'tool' ||
+                            msg.kind === 'file_change' ||
+                            msg.kind === 'tool_output'
+                          ) {
+                            if (msg.kind === 'tool_output') return null
+                            return (
+                              <CleanToolCard
+                                key={msg.id}
+                                tool={
+                                  msg.meta?.tool || (msg.kind === 'file_change' ? 'edit' : 'tool')
+                                }
+                                command={msg.meta?.command ? String(msg.meta.command) : undefined}
+                                output={msg.meta?.output ? String(msg.meta.output) : undefined}
+                                status={msg.meta?.status}
+                                onOpenFile={openFile}
+                              />
+                            )
+                          }
+                          return null
+                        })}
+                      </div>
+                    )
+                  }
+                  if (item.role === 'user' && isContextInjectionMessage(item)) {
+                    return <ContextInjectionCard message={item} />
+                  }
+                  if (item.role === 'assistant') {
+                    const todos = extractTodosFromMessage(item)
+                    if (todos) {
+                      return <TodoCard todos={todos} />
+                    }
+                    const goal = extractGoalFromMessage(item)
+                    if (goal) {
+                      return <GoalCard goal={goal} />
+                    }
+                    if (item.kind === 'tool' || item.kind === 'file_change') {
+                      return (
+                        <CleanToolCard
+                          tool={item.meta?.tool || (item.kind === 'file_change' ? 'edit' : 'tool')}
+                          command={item.meta?.command ? String(item.meta.command) : undefined}
+                          output={item.meta?.output ? String(item.meta.output) : undefined}
+                          status={item.meta?.status}
+                          onOpenFile={openFile}
+                        />
+                      )
+                    }
+                  }
+                }
+                if (isHistoricalActivity(item)) {
+                  return (
+                    <HistoricalActivityGroup
+                      messages={item.messages}
+                      selectedId={selectedActivity?.id ?? null}
+                      onSelect={selectActivity}
+                    />
+                  )
+                }
+                if (item.kind === 'turn_completed') {
+                  return (
+                    <div className="space-y-2">
+                      {cleanView && producedFilesByTurn.has(item.id) && (
+                        <ProducedFilesCard
+                          files={producedFilesByTurn.get(item.id)!}
+                          onOpenFile={openFile}
+                        />
+                      )}
+                      <div className={turnBoundary}>
+                        <span className={turnRule} />
+                        {item.duration_ms !== undefined
+                          ? `Worked for ${durationLabel(item.duration_ms)}`
+                          : 'Turn completed'}
+                        <span className={turnRule} />
+                      </div>
+                    </div>
+                  )
+                }
+                return <ConversationMessage author={item.role} text={item.text} />
+              }}
             />
           ) : (
             <div className={threadColumn}>
@@ -572,6 +750,18 @@ export function SessionScreen({
             </button>
           </div>
         )}
+        {!isAtBottom && messages.length > 0 && (
+          <button
+            type="button"
+            onClick={() => scrollToBottom(true)}
+            className="absolute bottom-[76px] right-8 z-20 flex items-center gap-1.5 rounded-full border border-line-strong bg-ink-750/95 px-3 py-1.5 text-xs font-medium text-fg-soft shadow-lg backdrop-blur-xs hover:bg-ink-700 hover:text-fg hover:border-azure-500/50 transition-all cursor-pointer"
+            aria-label="Scroll to bottom"
+            title="Scroll to bottom"
+          >
+            <ChevronDown size={14} className="text-azure-400" />
+            <span>Scroll to bottom</span>
+          </button>
+        )}
         {canSend ? (
           <ComposerFrame
             className={cn(
@@ -581,6 +771,7 @@ export function SessionScreen({
               commandSuggestions.length > 0 && threadComposerMenuOpen,
             )}
             onSubmit={continueSession}
+            onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
           >
             <SlashCommandMenu
               suggestions={commandSuggestions}
@@ -651,20 +842,22 @@ export function SessionScreen({
               value={message}
               onChange={(event) => setMessage(event.target.value)}
               onKeyDown={handleComposerKeyDown}
+              onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
               placeholder={
                 canQueue
                   ? `Steer this ${providerName(session.provider)} session`
                   : `Continue this ${providerName(session.provider)} conversation`
               }
             />
+            <ComposerAttachmentsList
+              attachments={attachments}
+              onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+            />
             <ComposerFooter className={composerBar}>
-              <button
-                type="button"
-                className="grid shrink-0 place-items-center text-muted hover:text-fg"
-                aria-label="Add attachment"
-              >
-                <Plus size={18} />
-              </button>
+              <AttachmentButton
+                onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
+                disabled={busy}
+              />
               {canQueue && (
                 <>
                   <span className={deliveryMode}>

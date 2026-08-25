@@ -21,7 +21,14 @@ import { logoUrl } from '../../lib/app-state'
 import { harnessOrder } from '../../lib/providers'
 import { ProviderIcon } from '../../components/ProviderIcon'
 import type { AppState, DraftSession, GitContext, Host, Project, Run } from '../../types'
-import { ComposerFooter, ComposerFrame, ComposerInput } from '../composer/Composer'
+import {
+  AttachmentButton,
+  ComposerAttachmentsList,
+  ComposerFooter,
+  ComposerFrame,
+  ComposerInput,
+} from '../composer/Composer'
+import { formatPromptWithAttachments, type ComposerAttachment } from '../../lib/attachments'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 const starterCard =
@@ -56,6 +63,7 @@ export function StartScreen({
   onError: (message: string) => void
 }) {
   const [prompt, setPrompt] = useState(draft?.prompt || '')
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [provider, setProvider] = useState(draft?.provider || 'codex')
   const [workspace, setWorkspace] = useState<'current_checkout' | 'managed_worktree'>(
     draft?.workspaceMode || 'current_checkout',
@@ -127,7 +135,7 @@ export function StartScreen({
     project &&
       host?.status === 'online' &&
       selectedHarness?.available &&
-      prompt.trim() &&
+      (prompt.trim() || attachments.length > 0) &&
       (workspace !== 'managed_worktree' || canUseWorktree),
   )
   const submit = async (event: FormEvent) => {
@@ -136,11 +144,12 @@ export function StartScreen({
     submitting.current = true
     setBusy(true)
     try {
+      const finalPrompt = formatPromptWithAttachments(prompt, attachments)
       const input = {
         hostId: project.hostId,
         project_id: project.id,
         provider,
-        prompt,
+        prompt: finalPrompt,
         workspace_mode: workspace,
         base_ref: workspace === 'managed_worktree' ? gitContext?.branch || 'HEAD' : undefined,
       }
@@ -211,7 +220,11 @@ export function StartScreen({
         )}
       </div>
       {project ? (
-        <ComposerFrame className={codexComposer} onSubmit={submit}>
+        <ComposerFrame
+          className={codexComposer}
+          onSubmit={submit}
+          onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
+        >
           <div className={composerContext}>
             <button type="button" className={contextButton}>
               <FolderGit2 size={15} />
@@ -290,22 +303,22 @@ export function StartScreen({
             className="h-[60px] px-4 py-3 text-[13px]"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
+            onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
             placeholder={
               selectedHarness
                 ? `Ask ${selectedHarness.name} to do anything`
                 : 'Choose a harness to get started'
             }
           />
+          <ComposerAttachmentsList
+            attachments={attachments}
+            onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+          />
           <ComposerFooter className="rounded-b-[18px]">
-            <button
-              type="button"
-              className="grid size-7 shrink-0 place-items-center text-muted hover:text-fg"
-              aria-label="Add attachment"
-              title="Attachments are not supported yet"
-              disabled
-            >
-              <Plus size={18} />
-            </button>
+            <AttachmentButton
+              onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
+              disabled={busy}
+            />
             <div className="relative">
               <button
                 type="button"

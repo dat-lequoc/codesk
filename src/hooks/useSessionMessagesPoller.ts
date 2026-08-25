@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { mergeSessionMessages } from '../lib/events'
 import type { Host, Provider, ProviderSession, SessionMessage } from '../types'
 
+const PAGE_SIZE = 100
+
 /**
- * Polls the provider transcript for the selected session, backing off while
- * the session is idle and resetting to a fast cadence whenever it is running
- * or new messages arrive.
+ * Polls the provider transcript for the selected session with tail-paged loading:
+ * loads the latest 100 messages instantly, supports loading earlier history,
+ * and polls for new incoming messages.
  */
 export function useSessionMessagesPoller({
   selectedSessionKey,
@@ -28,7 +30,61 @@ export function useSessionMessagesPoller({
   setError: (message: string) => void
 }) {
   const [sessionMessages, setSessionMessages] = useState<Record<string, SessionMessage[]>>({})
+  const [hasEarlierBySession, setHasEarlierBySession] = useState<Record<string, boolean>>({})
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
   const sessionMessagesRef = useRef<Record<string, SessionMessage[]>>({})
+
+  const loadEarlier = useCallback(async () => {
+    if (
+      !selectedSessionKey ||
+      !sessionHostId ||
+      sessionProjectId === undefined ||
+      !sessionProviderId ||
+      !sessionNativeId ||
+      loadingEarlier
+    )
+      return
+    const current = sessionMessagesRef.current[selectedSessionKey] || []
+    const oldestTimestamp = current.find((item) => item.timestamp)?.timestamp
+    if (!oldestTimestamp) return
+    setLoadingEarlier(true)
+    try {
+      const incoming = await api.sessionMessages(
+        sessionHostId,
+        sessionProjectId,
+        sessionProviderId,
+        sessionNativeId,
+        undefined,
+        oldestTimestamp,
+        PAGE_SIZE,
+      )
+      setHasEarlierBySession((prev) => ({
+        ...prev,
+        [selectedSessionKey]: incoming.length >= PAGE_SIZE,
+      }))
+      if (incoming.length > 0) {
+        setSessionMessages((prev) => {
+          const existing = prev[selectedSessionKey] || []
+          const next = mergeSessionMessages(incoming, existing)
+          sessionMessagesRef.current = { ...prev, [selectedSessionKey]: next }
+          return { ...prev, [selectedSessionKey]: next }
+        })
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }, [
+    loadingEarlier,
+    selectedSessionKey,
+    sessionHostId,
+    sessionNativeId,
+    sessionProjectId,
+    sessionProviderId,
+    setError,
+  ])
+
   useEffect(() => {
     if (
       !selectedSessionKey ||
@@ -44,7 +100,10 @@ export function useSessionMessagesPoller({
     let idleDelay = 2000
     const load = async () => {
       const prior = sessionMessagesRef.current[selectedSessionKey] || []
-      const after = [...prior].reverse().find((item) => item.timestamp)?.timestamp
+      const isInitial = prior.length === 0
+      const after = isInitial
+        ? undefined
+        : [...prior].reverse().find((item) => item.timestamp)?.timestamp
       try {
         const incoming = await api.sessionMessages(
           sessionHostId,
@@ -52,16 +111,19 @@ export function useSessionMessagesPoller({
           sessionProviderId,
           sessionNativeId,
           after,
+          undefined,
+          isInitial ? PAGE_SIZE : undefined,
         )
         if (stopped) return false
         setSessionMessages((current) => {
           const existing = current[selectedSessionKey]
-          // Record even an empty first result: the key existing is how the
-          // screen tells "loaded and genuinely empty" apart from "still
-          // loading", which used to spin forever on empty conversations.
           if (!existing) {
             const updated = { ...current, [selectedSessionKey]: mergeSessionMessages([], incoming) }
             sessionMessagesRef.current = updated
+            setHasEarlierBySession((prev) => ({
+              ...prev,
+              [selectedSessionKey]: incoming.length >= PAGE_SIZE,
+            }))
             return updated
           }
           if (!incoming.length) return current
@@ -109,5 +171,11 @@ export function useSessionMessagesPoller({
     sessionHostStatus,
     setError,
   ])
-  return { sessionMessages }
+
+  return {
+    sessionMessages,
+    hasEarlier: selectedSessionKey ? hasEarlierBySession[selectedSessionKey] === true : false,
+    loadingEarlier,
+    loadEarlier,
+  }
 }
