@@ -472,7 +472,13 @@ fn shell_command_with_environment(
         .map(|(key, value)| format!("{key}={}", shell_quote(value)))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("env {assignments} {}", shell_command(command, args))
+    // Absolute path on purpose. A `~/.local/bin/env` meant to be sourced for
+    // its PATH exports shadows the real one, and executing it silently drops
+    // the command: the pane exits 0 with no output and the harness never runs.
+    format!(
+        "/usr/bin/env {assignments} {}",
+        shell_command(command, args)
+    )
 }
 
 fn parent_shell_command_with_environment(
@@ -797,6 +803,22 @@ mod tests {
         assert_eq!(
             parent_shell_command_with_environment("kiro-cli", &["chat".into()], Some(&environment)),
             "/bin/sh -c 'export CODESK_PROJECT_PATH='\\''/tmp/project path'\\''; \"$@\"; status=$?; exit \"$status\"' codesk-terminal kiro-cli chat"
+        );
+    }
+
+    // A `~/.local/bin/env` that only exports PATH shadows the real one and
+    // swallows whatever it was asked to run, so the pane must not go looking
+    // for `env` on PATH.
+    #[test]
+    fn environment_is_applied_through_the_system_env_binary() {
+        let environment = BTreeMap::from([("CODESK_RUN_ID".into(), "run-1".into())]);
+        assert_eq!(
+            shell_command_with_environment("codex", &["--yolo".into()], Some(&environment)),
+            "/usr/bin/env CODESK_RUN_ID=run-1 codex --yolo"
+        );
+        assert_eq!(
+            shell_command_with_environment("codex", &["--yolo".into()], None),
+            "codex --yolo"
         );
     }
 }
