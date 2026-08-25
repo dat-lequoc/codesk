@@ -381,6 +381,21 @@ describe('SessionScreen · model and effort', () => {
     await userEvent.click(await screen.findByRole('menuitemradio', { name: /gpt-5.6-terra/ }))
     expect(await screen.findByRole('button', { name: /gpt-5.6-terra · high/ })).toBeInTheDocument()
   })
+
+  it('shows the last known model on a past conversation and in Environment', async () => {
+    mount(
+      makeSession({
+        model: 'gpt-5.6-sol',
+        effort: 'xhigh',
+        tmuxName: 'codesk-codex-abc',
+      }),
+    )
+    expect(screen.getByText('gpt-5.6-sol · xhigh')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /gpt-5.6-sol/ })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Environment/ }))
+    const panel = screen.getByText('Project').closest('div')!.parentElement!
+    expect(within(panel).getByText('gpt-5.6-sol · xhigh')).toBeInTheDocument()
+  })
 })
 
 describe('SessionScreen · environment', () => {

@@ -69,6 +69,11 @@ describe('ObservedScreen', () => {
     expect(screen.getByText('codex')).toBeInTheDocument()
   })
 
+  it('shows the live model on the tmux view', () => {
+    mount(steerable({ model: 'gpt-5.6-sol', effort: 'high' }))
+    expect(screen.getAllByText('gpt-5.6-sol · high').length).toBeGreaterThan(0)
+  })
+
   it('steers a controlled agent', async () => {
     vi.mocked(api.externalAgentInput).mockResolvedValue({ ok: true, delivery: 'steer' })
     mount(steerable())

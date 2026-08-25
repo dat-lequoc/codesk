@@ -48,6 +48,7 @@ fn index_kiro_file(project: &Project, path: &Path) -> Result<Option<ProviderSess
     let modified_at = modified_rfc3339(&metadata);
     let created_at = string(&value["created_at"]).unwrap_or_else(|| modified_at.clone());
     let updated_at = string(&value["updated_at"]).unwrap_or_else(|| modified_at.clone());
+    let (model, effort) = kiro_session_status(&value);
     Ok(Some(ProviderSession {
         id: format!("kiro:{native_id}"),
         provider: "kiro".to_string(),
@@ -60,8 +61,8 @@ fn index_kiro_file(project: &Project, path: &Path) -> Result<Option<ProviderSess
         status: "idle".to_string(),
         pid: None,
         managed_run_id: None,
-        model: None,
-        effort: None,
+        model,
+        effort,
         input_available: false,
         input_transport: None,
         tmux_name: None,
@@ -69,6 +70,14 @@ fn index_kiro_file(project: &Project, path: &Path) -> Result<Option<ProviderSess
         tmux_controlled: false,
         tmux_owned: false,
     }))
+}
+
+fn kiro_session_status(value: &Value) -> (Option<String>, Option<String>) {
+    let state = &value["session_state"]["rts_model_state"];
+    (
+        string(&state["model_info"]["model_id"]),
+        string(&state["additional_fields"]["overrides"]["output_config"]["effort"]),
+    )
 }
 
 #[cfg(test)]
@@ -96,7 +105,13 @@ mod tests {
                 "cwd":project_path,
                 "created_at":"2026-08-16T08:00:00Z",
                 "updated_at":"2026-08-16T08:01:00Z",
-                "title":"Kiro test session"
+                "title":"Kiro test session",
+                "session_state":{
+                    "rts_model_state":{
+                        "model_info":{"model_id":"claude-opus-5"},
+                        "additional_fields":{"overrides":{"output_config":{"effort":"xhigh"}}}
+                    }
+                }
             })
             .to_string(),
         )
@@ -108,6 +123,8 @@ mod tests {
             .unwrap();
         assert_eq!(session.provider, "kiro");
         assert_eq!(session.native_session_id, native_id);
+        assert_eq!(session.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(session.effort.as_deref(), Some("xhigh"));
         assert_eq!(
             source_path_from_home(&home, &test_project(&project_path), "kiro", native_id).unwrap(),
             transcript_path

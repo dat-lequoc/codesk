@@ -263,4 +263,6 @@ export type DiscoveredAgent = {
   tmux_host_access_command?: string | null
   tmux_controlled?: boolean
   tmux_owned?: boolean
+  model?: string | null
+  effort?: string | null
 }

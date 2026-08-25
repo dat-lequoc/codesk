@@ -44,6 +44,7 @@ import {
   Plus,
   RefreshCw,
   Send,
+  Sparkles,
   Terminal,
   WifiOff,
   X,
@@ -59,7 +60,7 @@ import {
   isHistoricalActivity,
 } from '../../lib/activity'
 import type { ActivityEntry } from '../../lib/activity'
-import { durationLabel } from '../../lib/format'
+import { durationLabel, modelEffortLabel } from '../../lib/format'
 import {
   kiroCommandContext,
   kiroModelCatalog,
@@ -515,6 +516,13 @@ export function SessionScreen({
               value={host?.name}
             />
             <EnvironmentRow icon={<FolderGit2 size={16} />} label="Project" value={project?.name} />
+            {modelEffortLabel(commandContext.currentModel, commandContext.currentEffort) ? (
+              <EnvironmentRow
+                icon={<Sparkles size={16} />}
+                label="Model"
+                value={modelEffortLabel(commandContext.currentModel, commandContext.currentEffort)}
+              />
+            ) : null}
             <TmuxDetails
               name={session.tmuxName}
               command={session.tmuxAccessCommand}
@@ -719,11 +727,8 @@ export function SessionScreen({
                 />
               ) : (
                 <small className={composerHint}>
-                  {canQueue
-                    ? [commandContext.currentModel, commandContext.currentEffort]
-                        .filter(Boolean)
-                        .join(' · ') || session.tmuxName
-                    : provider?.name}
+                  {modelEffortLabel(commandContext.currentModel, commandContext.currentEffort) ||
+                    (canQueue ? session.tmuxName : provider?.name)}
                 </small>
               )}
               <button

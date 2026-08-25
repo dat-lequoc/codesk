@@ -30,6 +30,9 @@ export const conversationText = (value: string) => {
   return { text: value.replace(environmentContextPattern, '').trim(), hadContext }
 }
 
+export const modelEffortLabel = (model?: string | null, effort?: string | null) =>
+  [model, effort].filter(Boolean).join(' · ')
+
 export const durationLabel = (durationMs: number) => {
   const seconds = Math.max(0, Math.round(durationMs / 1000))
   if (seconds < 60) return `${seconds}s`

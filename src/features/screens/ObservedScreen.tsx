@@ -12,6 +12,7 @@ import {
   sendButton,
   sendButtonSmall,
   threadComposer,
+  threadComposerMenuOpen,
   threadHeader,
   threadHeaderTitle,
   threadScreen,
@@ -24,6 +25,7 @@ import { useLatest } from '../../hooks/useLatest'
 import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
 import { usePersistentComposerDraft } from '../../hooks/usePersistentComposerDraft'
 import { usePromptRecall } from '../../hooks/usePromptRecall'
+import { modelEffortLabel } from '../../lib/format'
 import { providerName } from '../../lib/providers'
 import { observedAgentTitle } from '../../lib/observed'
 import { ProviderIcon } from '../../components/ProviderIcon'
@@ -36,11 +38,13 @@ import type {
   Run,
 } from '../../types'
 import { ComposerFooter, ComposerFrame, ComposerInput } from '../composer/Composer'
+import { ModelMenu } from '../composer/ModelMenu'
 import { TmuxDetails } from '../environment/Environment'
 import { useEffect, useRef, useState } from 'react'
 export function ObservedScreen({
   host,
   project,
+  provider,
   agent,
   onStarted,
   onError,
@@ -64,6 +68,8 @@ export function ObservedScreen({
   // "Moving to tmux" state for one extra frame.
   if (moving && (agent.tmux_session_name || agent.tmux_controlled)) setMoving(false)
   const [queued, setQueued] = useState<ExternalQueuedInput[]>([])
+  const [applied, setApplied] = useState<{ model?: string; effort?: string } | null>(null)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
   const [log, setLog] = useState<{ text: string; capturedAt: string } | null>(null)
   const [logError, setLogError] = useState('')
@@ -80,6 +86,9 @@ export function ObservedScreen({
   const canContinue = Boolean(agent.native_session_id && controlled)
   const canQueue = Boolean(project && canContinue)
   const hasPane = Boolean(agent.tmux_pane_id)
+  const liveModel = applied?.model || agent.model
+  const liveEffort = applied?.effort || agent.effort
+  const canPickModel = Boolean(host && agent.managed_run_id && provider?.model_picker && controlled)
   useEffect(() => {
     if (!logOpen || !hostId || hostStatus !== 'online' || !hasPane) return
     let cancelled = false
@@ -198,6 +207,14 @@ export function ObservedScreen({
             <dt className="w-[72px] shrink-0 text-dim">Command</dt>
             <dd className="min-w-0 break-all text-fg-soft">{agent.command}</dd>
           </div>
+          {modelEffortLabel(liveModel, liveEffort) ? (
+            <div className="flex gap-3 py-1">
+              <dt className="w-[72px] shrink-0 text-dim">Model</dt>
+              <dd className="min-w-0 truncate text-fg-soft">
+                {modelEffortLabel(liveModel, liveEffort)}
+              </dd>
+            </div>
+          ) : null}
         </dl>
         {(agent.tmux_session_name || agent.tmux_access_command) && (
           <div className="mx-auto mt-2 w-[min(650px,100%)] rounded-lg border border-line-strong bg-ink-700 px-3 py-2.5">
@@ -289,7 +306,7 @@ export function ObservedScreen({
       </div>
       {canContinue && (
         <ComposerFrame
-          className={cn(threadComposer, 'bottom-3')}
+          className={cn(threadComposer, 'bottom-3', modelMenuOpen && threadComposerMenuOpen)}
           onSubmit={(event) => {
             event.preventDefault()
             void submit()
@@ -346,7 +363,23 @@ export function ObservedScreen({
               </span>
             )}
             <span className="flex-1" />
-            <small className={composerHint}>{agent.tmux_session_name}</small>
+            {canPickModel && host && agent.managed_run_id ? (
+              <ModelMenu
+                hostId={host.id}
+                runId={agent.managed_run_id}
+                provider={agent.provider}
+                model={liveModel}
+                effort={liveEffort}
+                fallback={agent.tmux_session_name}
+                disabled={busy}
+                onApplied={setApplied}
+                onOpenChange={setModelMenuOpen}
+              />
+            ) : (
+              <small className={composerHint}>
+                {modelEffortLabel(liveModel, liveEffort) || agent.tmux_session_name}
+              </small>
+            )}
             <button
               className={cn(sendButton, sendButtonSmall)}
               aria-label="Send message"

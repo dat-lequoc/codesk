@@ -2,7 +2,7 @@
 use std::collections::HashSet;
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -13,9 +13,10 @@ use rusqlite::params_from_iter;
 use serde_json::Value;
 
 use super::{
-    MAX_INDEX_BYTES, MAX_MESSAGES, cwd_matches, home_dir, index_file, jsonl_files,
-    meaningful_user_text, message, newest_numbered_database, parse_messages, readonly_database,
-    sort_recent, string, text_content, truncate_title, unix_millis_rfc3339, unix_seconds_rfc3339,
+    MAX_INDEX_BYTES, MAX_INDEX_TAIL_BYTES, MAX_MESSAGES, cwd_matches, home_dir, index_file,
+    jsonl_files, meaningful_user_text, message, newest_numbered_database, parse_messages,
+    readonly_database, sort_recent, string, text_content, truncate_title, unix_millis_rfc3339,
+    unix_seconds_rfc3339,
 };
 use crate::model::{Project, ProviderSession, SessionMessage};
 
@@ -42,13 +43,16 @@ pub(crate) fn index_codex(project: &Project, limit: usize) -> Result<Vec<Provide
     sort_recent(&mut files);
     files.truncate(MAX_CODEX_CANDIDATES);
     for path in files {
-        if let Some(item) = index_file(project, "codex", &path)? {
+        if let Some(mut item) = index_file(project, "codex", &path)? {
             if sessions
                 .iter()
                 .any(|session| session.native_session_id == item.native_session_id)
             {
                 continue;
             }
+            let (model, effort) = last_turn_status(&path);
+            item.model = model;
+            item.effort = effort;
             sessions.push(item);
             if sessions.len() >= limit {
                 break;
@@ -68,7 +72,7 @@ fn index_codex_database(
     };
     let connection = readonly_database(&path)?;
     let mut statement = connection.prepare(
-        "SELECT id, cwd, title, first_user_message, created_at, updated_at
+        "SELECT id, cwd, title, first_user_message, created_at, updated_at, rollout_path
          FROM threads
          WHERE archived = 0 AND cwd = ?1
          ORDER BY updated_at DESC
@@ -81,35 +85,87 @@ fn index_codex_database(
         let first_user_message: String = row.get(3)?;
         let created_at: i64 = row.get(4)?;
         let updated_at: i64 = row.get(5)?;
-        Ok(ProviderSession {
-            id: format!("codex:{native_id}"),
-            provider: "codex".to_string(),
-            native_session_id: native_id,
-            project_id: project.id.clone(),
-            cwd,
-            title: truncate_title(&meaningful_user_text(if title.trim().is_empty() {
-                first_user_message
-            } else {
-                title
-            })),
-            created_at: unix_seconds_rfc3339(created_at),
-            updated_at: unix_seconds_rfc3339(updated_at),
-            status: "idle".to_string(),
-            pid: None,
-            managed_run_id: None,
-            model: None,
-            effort: None,
-            input_available: false,
-            input_transport: None,
-            tmux_name: None,
-            tmux_access_command: None,
-            tmux_controlled: false,
-            tmux_owned: false,
-        })
+        let rollout_path: Option<String> = row.get(6)?;
+        Ok((
+            ProviderSession {
+                id: format!("codex:{native_id}"),
+                provider: "codex".to_string(),
+                native_session_id: native_id,
+                project_id: project.id.clone(),
+                cwd,
+                title: truncate_title(&meaningful_user_text(if title.trim().is_empty() {
+                    first_user_message
+                } else {
+                    title
+                })),
+                created_at: unix_seconds_rfc3339(created_at),
+                updated_at: unix_seconds_rfc3339(updated_at),
+                status: "idle".to_string(),
+                pid: None,
+                managed_run_id: None,
+                model: None,
+                effort: None,
+                input_available: false,
+                input_transport: None,
+                tmux_name: None,
+                tmux_access_command: None,
+                tmux_controlled: false,
+                tmux_owned: false,
+            },
+            rollout_path,
+        ))
     })?;
-    let mut sessions = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
-    sessions.retain(|session| !session.title.is_empty());
+    let mut sessions = Vec::new();
+    for row in rows.flatten() {
+        let (mut session, rollout_path) = row;
+        if session.title.is_empty() {
+            continue;
+        }
+        if let Some(path) = rollout_path.filter(|path| !path.trim().is_empty()) {
+            let (model, effort) = last_turn_status(Path::new(&path));
+            session.model = model;
+            session.effort = effort;
+        }
+        sessions.push(session);
+    }
     Ok(sessions)
+}
+
+/// The last `turn_context` in a rollout is what the session was running when
+/// it went idle: model and effort, without a live pane to read.
+fn last_turn_status(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(mut file) = File::open(path) else {
+        return (None, None);
+    };
+    let Ok(metadata) = file.metadata() else {
+        return (None, None);
+    };
+    let tail_start = metadata.len().saturating_sub(MAX_INDEX_TAIL_BYTES);
+    if tail_start > 0 && file.seek(SeekFrom::Start(tail_start)).is_err() {
+        return (None, None);
+    }
+    let mut reader = BufReader::new(file);
+    if tail_start > 0 {
+        let mut skip = String::new();
+        let _ = reader.read_line(&mut skip);
+    }
+    let mut model = None;
+    let mut effort = None;
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value["type"] != "turn_context" {
+            continue;
+        }
+        if let Some(id) = string(&value["payload"]["model"]) {
+            model = Some(id);
+        }
+        if let Some(id) = string(&value["payload"]["effort"]) {
+            effort = Some(id);
+        }
+    }
+    (model, effort)
 }
 
 #[cfg(test)]
@@ -482,7 +538,7 @@ fn duration_between(start: &str, end: &str) -> Option<i64> {
 mod tests {
     use std::fs;
 
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
 
     use super::*;
     use crate::sessions::{MAX_SESSIONS_PER_PROVIDER, test_project};
@@ -498,13 +554,14 @@ mod tests {
                 "CREATE TABLE threads (
                     id TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL,
                     first_user_message TEXT NOT NULL, created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL, archived INTEGER NOT NULL
+                    updated_at INTEGER NOT NULL, archived INTEGER NOT NULL,
+                    rollout_path TEXT
                  );",
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO threads VALUES (?1, ?2, '', ?3, 100, 200, 0)",
+                "INSERT INTO threads VALUES (?1, ?2, '', ?3, 100, 200, 0, NULL)",
                 params![
                     "thread-1",
                     project_path.to_string_lossy(),
@@ -514,7 +571,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO threads VALUES (?1, ?2, '', ?3, 101, 201, 0)",
+                "INSERT INTO threads VALUES (?1, ?2, '', ?3, 101, 201, 0, NULL)",
                 params![
                     "thread-child",
                     project_path.join("nested").to_string_lossy(),
@@ -533,6 +590,57 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].native_session_id, "thread-1");
         assert_eq!(sessions[0].title, "A fresh conversation");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reads_the_last_turn_context_as_the_dormant_model() {
+        let root = std::env::temp_dir().join(format!("codesk-turn-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let rollout = root.join("rollout.jsonl");
+        fs::write(
+            &rollout,
+            concat!(
+                r#"{"type":"session_meta","payload":{"cwd":"/repo"}}"#,
+                "\n",
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"low"}}"#,
+                "\n",
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra","effort":"max"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let (model, effort) = last_turn_status(&rollout);
+        assert_eq!(model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(effort.as_deref(), Some("max"));
+
+        let project_path = root.join("repo");
+        let connection = Connection::open(root.join("state_1.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL,
+                    first_user_message TEXT NOT NULL, created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL, archived INTEGER NOT NULL,
+                    rollout_path TEXT
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads VALUES (?1, ?2, '', ?3, 100, 200, 0, ?4)",
+                params![
+                    "thread-1",
+                    project_path.to_string_lossy(),
+                    "A past conversation",
+                    rollout.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let sessions = index_codex_database(&test_project(&project_path), &root, 8).unwrap();
+        assert_eq!(sessions[0].model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(sessions[0].effort.as_deref(), Some("max"));
         fs::remove_dir_all(root).unwrap();
     }
 

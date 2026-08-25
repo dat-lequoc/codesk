@@ -16,8 +16,9 @@ Codex and Kiro sessions now report the model and reasoning level they are
 running and let both be changed from the composer. What is left is every case
 without a live pane to read or drive.
 
-- [ ] Report model and effort for a dormant Codex session, which has no pane to
-      read, from the last `turn_context` record in its rollout.
+- [x] Report model and effort for a dormant Codex session, which has no pane to
+      read, from the last `turn_context` record in its rollout. Kiro reads the
+      same from `session_state` in its session file.
 - [ ] Report model and effort for Claude Code, Pi, DSH, Antigravity, and
       opencode, none of which expose either today.
 - [ ] Choose the model and effort when starting a run. `StartScreen` sends no

@@ -47,6 +47,7 @@ import {
   Plus,
   RefreshCw,
   Send,
+  Sparkles,
   Square,
   Terminal,
   WifiOff,
@@ -66,6 +67,7 @@ import type { ActivityEntry } from '../../lib/activity'
 import { active, coalesceStreamEvents, currentBranchEvents, pendingQueue } from '../../lib/events'
 import { kiroCommandContext, kiroSlashSuggestions, kiroSuggestionLimit } from '../../lib/kiro'
 import type { SlashSuggestion } from '../../lib/kiro'
+import { modelEffortLabel } from '../../lib/format'
 import { providerName, providerUi } from '../../lib/providers'
 import type { Host, Project, Provider, Run, RunEvent } from '../../types'
 import { ActivityInspectorPanel, ToolActivityGroup } from '../activity/Activity'
@@ -484,6 +486,19 @@ export function RunScreen({
               value={workspaceLabel}
             />
             <EnvironmentRow icon={<Folder size={16} />} label="Path" value={run.cwd} />
+            {modelEffortLabel(
+              applied?.model || commandContext.currentModel || run.model,
+              applied?.effort || commandContext.currentEffort,
+            ) ? (
+              <EnvironmentRow
+                icon={<Sparkles size={16} />}
+                label="Model"
+                value={modelEffortLabel(
+                  applied?.model || commandContext.currentModel || run.model,
+                  applied?.effort || commandContext.currentEffort,
+                )}
+              />
+            ) : null}
             <TmuxDetails
               name={run.tmuxName}
               command={run.tmuxAccessCommand}
@@ -754,16 +769,10 @@ export function RunScreen({
               />
             ) : (
               <small className={composerHint}>
-                {run.provider === 'kiro'
-                  ? [
-                      commandContext.currentModel || run.model || 'Kiro',
-                      commandContext.currentEffort,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')
-                  : tmuxRun
-                    ? run.tmuxName
-                    : run.model || provider?.name}
+                {modelEffortLabel(
+                  applied?.model || commandContext.currentModel || run.model,
+                  applied?.effort || commandContext.currentEffort,
+                ) || (tmuxRun ? run.tmuxName : provider?.name)}
               </small>
             )}
             {!active.has(run.status) && run.sessionId && provider?.fork && (
