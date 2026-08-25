@@ -1,5 +1,5 @@
 import { Check, ChevronDown, RefreshCw } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { api } from '../../api'
 import { cn } from '../../lib/cn'
@@ -22,6 +22,7 @@ export function ModelMenu({
   fallback,
   disabled,
   onApplied,
+  onOpenChange,
 }: {
   hostId: string
   runId: string
@@ -32,6 +33,9 @@ export function ModelMenu({
   fallback?: string | null
   disabled?: boolean
   onApplied?: (applied: { model?: string; effort?: string }) => void
+  // The composer clips its own overflow, so it has to be told to stop while
+  // this menu is up or the list is cut off at the composer's edge.
+  onOpenChange?: (open: boolean) => void
 }) {
   const key = `${hostId}:${provider}`
   const [open, setOpen] = useState(false)
@@ -41,14 +45,21 @@ export function ModelMenu({
   const [error, setError] = useState('')
   const menu = useRef<HTMLDivElement>(null)
   const label = [model, effort].filter(Boolean).join(' · ') || fallback || 'Model'
+  const show = useCallback(
+    (next: boolean) => {
+      setOpen(next)
+      onOpenChange?.(next)
+    },
+    [onOpenChange],
+  )
 
   useEffect(() => {
     if (!open) return
     const dismiss = (event: MouseEvent) => {
-      if (!menu.current?.contains(event.target as Node)) setOpen(false)
+      if (!menu.current?.contains(event.target as Node)) show(false)
     }
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key === 'Escape') show(false)
     }
     document.addEventListener('mousedown', dismiss)
     document.addEventListener('keydown', escape)
@@ -56,11 +67,11 @@ export function ModelMenu({
       document.removeEventListener('mousedown', dismiss)
       document.removeEventListener('keydown', escape)
     }
-  }, [open])
+  }, [open, show])
 
   const toggle = async () => {
-    if (open) return setOpen(false)
-    setOpen(true)
+    if (open) return show(false)
+    show(true)
     if (catalog || reading) return
     setReading(true)
     setError('')
@@ -89,7 +100,7 @@ export function ModelMenu({
     try {
       const applied = await api.setProviderModel(hostId, runId, change)
       onApplied?.({ model: applied.model || undefined, effort: applied.effort || undefined })
-      setOpen(false)
+      show(false)
     } catch (failure) {
       setError((failure as Error).message)
     } finally {
@@ -121,7 +132,9 @@ export function ModelMenu({
           aria-label="Model and reasoning effort"
           className="absolute right-0 bottom-[calc(100%+8px)] z-30 flex w-[290px] flex-col overflow-hidden rounded-xl border border-line-strong bg-ink-700 shadow-2xl shadow-black/55"
         >
-          <div className="scroll-thin flex max-h-[300px] min-h-0 flex-col overflow-x-hidden overflow-y-auto p-1.5">
+          {/* Tall enough that a short catalog shows its reasoning levels
+              without scrolling, and still bounded for a long one. */}
+          <div className="scroll-thin flex max-h-[min(70vh,520px)] min-h-0 flex-col overflow-x-hidden overflow-y-auto p-1.5">
             {reading && (
               <span className="flex items-center gap-2 px-2.5 py-3 text-[10.5px] text-muted">
                 <RefreshCw size={12} className="animate-spin" />

@@ -191,6 +191,7 @@ export function SessionScreen({
   // What the harness reported after a change made here, held until the next
   // discovery scan reports the same thing on the session itself.
   const [applied, setApplied] = useState<{ model?: string; effort?: string } | null>(null)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   if (applied && session.model === applied.model && session.effort === applied.effort)
     setApplied(null)
   // A terminal-driven session reports its live model and effort on the harness
@@ -599,7 +600,7 @@ export function SessionScreen({
               threadComposer,
               'bottom-3',
               (filePreview.preview || selectedActivity) && threadComposerFilePreview,
-              commandSuggestions.length > 0 && threadComposerMenuOpen,
+              (commandSuggestions.length > 0 || modelMenuOpen) && threadComposerMenuOpen,
             )}
             onSubmit={continueSession}
           >
@@ -714,6 +715,7 @@ export function SessionScreen({
                   fallback={session.tmuxName}
                   disabled={busy}
                   onApplied={setApplied}
+                  onOpenChange={setModelMenuOpen}
                 />
               ) : (
                 <small className={composerHint}>

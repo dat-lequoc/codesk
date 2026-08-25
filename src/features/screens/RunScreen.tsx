@@ -261,6 +261,7 @@ export function RunScreen({
   // the harness announced. What the picker applied is the newer truth, so it
   // stays until the run screen is left.
   const [applied, setApplied] = useState<{ model?: string; effort?: string } | null>(null)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const commandSuggestions = useMemo(
     () =>
       run.provider === 'kiro'
@@ -566,7 +567,7 @@ export function RunScreen({
           className={cn(
             threadComposer,
             (filePreview.preview || selectedActivity) && threadComposerFilePreview,
-            commandSuggestions.length > 0 && threadComposerMenuOpen,
+            (commandSuggestions.length > 0 || modelMenuOpen) && threadComposerMenuOpen,
           )}
           onSubmit={send}
         >
@@ -749,6 +750,7 @@ export function RunScreen({
                 fallback={run.tmuxName}
                 disabled={sending}
                 onApplied={setApplied}
+                onOpenChange={setModelMenuOpen}
               />
             ) : (
               <small className={composerHint}>

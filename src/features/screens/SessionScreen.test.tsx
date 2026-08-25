@@ -334,6 +334,26 @@ describe('SessionScreen · model and effort', () => {
     expect(await screen.findByRole('menuitemradio', { name: /gpt-5.6-terra/ })).toBeInTheDocument()
   })
 
+  // The composer clips its own overflow to keep its rounded corners, which cut
+  // the open menu down to a sliver until the frame was told to stop.
+  it('lets the open menu escape the composer it is anchored in', async () => {
+    vi.mocked(api.providerModels).mockResolvedValue({
+      models: [{ id: 'gpt-5.6-terra', description: 'Balanced agentic coding model.' }],
+      efforts: [],
+    })
+    const { container } = mount(
+      controlled({ managedRunId: 'run-managed', model: 'gpt-5.6-sol', effort: 'high' }),
+      [],
+      makeProvider({ model_picker: true }),
+    )
+    const composer = container.querySelector('form')
+    expect(composer?.className).toContain('overflow-hidden')
+    await userEvent.click(screen.getByRole('button', { name: /gpt-5.6-sol · high/ }))
+    expect(composer?.className).toContain('overflow-visible')
+    await userEvent.keyboard('{Escape}')
+    expect(composer?.className).not.toContain('overflow-visible')
+  })
+
   // The status line is the only live source, and it is only readable while
   // Codesk drives the pane.
   it('shows a plain hint when the harness exposes no picker', () => {
