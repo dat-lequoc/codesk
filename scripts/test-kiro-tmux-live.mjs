@@ -70,9 +70,10 @@ try {
   runId = run.id
   const activeRun = await waitFor(async () => {
     const current = await request(`/v1/runs/${runId}`)
-    if (current.status !== 'waiting_for_input' || current.input_transport !== 'tmux' || !current.tmux_name || !current.provider_session_id) return false
-    const output = await capture(current.tmux_name)
-    return output.split('KIRO_CODESK_TMUX_OK').length >= 3 ? current : false
+    if (!current.tmux_name) return false
+    lastCapture = await capture(current.tmux_name)
+    if (current.status !== 'waiting_for_input' || current.input_transport !== 'tmux' || !current.provider_session_id) return false
+    return lastCapture.split('KIRO_CODESK_TMUX_OK').length >= 3 ? current : false
   })
 
   // Regression: once Kiro finishes a turn it stops holding its transcript open,
@@ -124,7 +125,36 @@ try {
     return lastCapture.split(marker).length >= 3
   })
 
-  console.log(JSON.stringify({ ok: true, provider: 'kiro', transport: 'tmux', session: activeRun.tmux_name, attached: true, usage: true, plan: usageEvent.payload?.plan ?? null, steerAfterUsage: true }))
+  const queueMarker = `QUEUE_AFTER_STEER_${Math.floor(Math.random() * 1e6)}`
+  await request(`/v1/runs/${runId}/input`, {
+    method: 'POST',
+    body: JSON.stringify({
+      message: 'Count from 1 to 8, one number per line, then stop. Do not use tools.',
+      delivery: 'steer',
+      request_id: crypto.randomUUID(),
+    }),
+  })
+  await waitFor(async () => {
+    lastCapture = await capture(activeRun.tmux_name)
+    return lastCapture.includes('1') && (lastCapture.includes('esc to interrupt') || lastCapture.includes('2'))
+      ? true
+      : false
+  }, 60000)
+  await request(`/v1/runs/${runId}/input`, {
+    method: 'POST',
+    body: JSON.stringify({
+      message: `Reply with exactly ${queueMarker} and nothing else. Do not use tools.`,
+      delivery: 'queue',
+      request_id: crypto.randomUUID(),
+    }),
+  })
+  const captureWhenQueued = await capture(activeRun.tmux_name)
+  await waitFor(async () => {
+    lastCapture = await capture(activeRun.tmux_name)
+    return lastCapture.split(queueMarker).length >= 3
+  }, 120000)
+
+  console.log(JSON.stringify({ ok: true, provider: 'kiro', transport: 'tmux', session: activeRun.tmux_name, attached: true, usage: true, plan: usageEvent.payload?.plan ?? null, steerAfterUsage: true, queueAfterSteer: true, queueHeldUntilIdle: captureWhenQueued.split(queueMarker).length < 3 }))
 } catch (error) {
   failed = true
   if (lastSession) console.error(JSON.stringify({ session: lastSession }))

@@ -298,7 +298,9 @@ impl Supervisor {
                             .flatten();
                         if let Some(current) = current {
                             let screen = tmux.capture_text(&current).await.unwrap_or_default();
-                            if providers::terminal_ready(&provider, &screen) {
+                            if let Some(key) = providers::terminal_startup_key(&provider, &screen) {
+                                let _ = tmux.send_key(&current, key).await;
+                            } else if providers::terminal_ready(&provider, &screen) {
                                 let _ = tmux.send_prompt(&current, &prompt).await;
                                 return;
                             }

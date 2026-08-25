@@ -85,6 +85,9 @@ impl ProviderAdapter for Claude {
         if let Some(model) = support::model(request) {
             args.extend(["--model".into(), model.into()]);
         }
+        // Codesk drives this TUI unattended. Without the flag a permission
+        // prompt steals the composer and a steer types into the dialog.
+        args.push("--dangerously-skip-permissions".into());
         Ok(Some(support::CommandSpec {
             command: support::provider_command("claude")?,
             args,
@@ -116,6 +119,10 @@ impl ProviderAdapter for Claude {
         sessions::transcript_turn_active(path, DESCRIPTOR.id)
     }
 
+    fn keep_terminal_parent_shell(&self) -> bool {
+        true
+    }
+
     fn terminal_ready(&self, screen: &str) -> bool {
         !claude_input_blocked(screen)
     }
@@ -123,6 +130,14 @@ impl ProviderAdapter for Claude {
     fn terminal_input_blocked(&self, screen: &str) -> Option<bool> {
         Some(claude_input_blocked(screen))
     }
+
+    fn terminal_startup_key(&self, screen: &str) -> Option<&'static str> {
+        claude_folder_trust_prompt(screen).then_some("Enter")
+    }
+}
+
+fn claude_folder_trust_prompt(screen: &str) -> bool {
+    screen.contains("Yes, I trust this folder")
 }
 
 /// Claude's interactive TUI accepts a paste only at an idle composer.
@@ -132,6 +147,9 @@ impl ProviderAdapter for Claude {
 /// busy screen — the prompt vanishes — or waits forever after `/compact`.
 /// The visible pane is the source of truth.
 fn claude_input_blocked(screen: &str) -> bool {
+    if claude_folder_trust_prompt(screen) {
+        return true;
+    }
     let tail: Vec<&str> = screen.lines().rev().take(20).collect();
     if tail.iter().any(|line| {
         line.contains("Compacting conversation")
@@ -139,16 +157,22 @@ fn claude_input_blocked(screen: &str) -> bool {
             || line.contains('▱')
             // Idle Claude omits this; a live turn and compact both show it.
             || line.contains("esc to interrupt")
+            || line.contains("Loading previous session")
     }) {
         return true;
     }
     if tail.iter().any(|line| claude_status_working(line)) {
         return true;
     }
-    !tail.iter().any(|line| {
+    // The welcome splash paints a composer placeholder before the TUI is
+    // accepting input. Pasting then vanishes. The mode footer is the signal
+    // that the input loop is actually up.
+    let composer = tail.iter().any(|line| {
         let trimmed = line.trim();
         trimmed == "❯" || trimmed.starts_with('❯')
-    })
+    });
+    let input_loop = tail.iter().any(|line| line.contains("shift+tab to cycle"));
+    !composer || !input_loop
 }
 
 fn claude_status_working(line: &str) -> bool {
@@ -222,6 +246,13 @@ Claude Code
 Loading previous session…
 ";
 
+    const SPLASH_WITHOUT_FOOTER: &str = "\
+╭─── Claude Code ──────────────────────────────────────────────────────────────╮
+│                  Welcome back                                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+❯ Try \"fix typecheck errors\"
+";
+
     const POST_COMPACT: &str = "\
 ✻ Brewed for 7m 58s
 
@@ -232,6 +263,19 @@ Loading previous session…
 ❯ 
 ────────────────────────────────────────────────────────────────────────────────
   ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+";
+
+    const FOLDER_TRUST: &str = "\
+ Accessing workspace:
+
+ /tmp/new-project
+
+ Quick safety check: Is this a project you created or one you trust?
+
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+
+ Enter to confirm · Esc to cancel
 ";
 
     #[test]
@@ -258,6 +302,19 @@ Loading previous session…
     #[test]
     fn startup_without_composer_blocks_input() {
         assert!(claude_input_blocked(STARTUP));
+        assert!(claude_input_blocked(SPLASH_WITHOUT_FOOTER));
         assert!(!ADAPTER.terminal_ready(STARTUP));
+    }
+
+    #[test]
+    fn folder_trust_prompt_is_dismissed_before_the_first_prompt() {
+        assert!(claude_input_blocked(FOLDER_TRUST));
+        assert_eq!(ADAPTER.terminal_startup_key(FOLDER_TRUST), Some("Enter"));
+        assert_eq!(ADAPTER.terminal_startup_key(IDLE), None);
+    }
+
+    #[test]
+    fn terminal_keeps_a_parent_shell() {
+        assert!(ADAPTER.keep_terminal_parent_shell());
     }
 }

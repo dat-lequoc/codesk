@@ -37,6 +37,7 @@
     "test:bootstrap-live": "node scripts/test-remote-bootstrap-live.mjs",
     "test:coverage": "vitest run --coverage",
     "test:dsh-live": "node scripts/test-dsh-live.mjs",
+    "test:claude-tmux-live": "cargo build -p codeskd && node scripts/test-claude-tmux-live.mjs",
     "test:kiro-live": "cargo build -p codeskd && node scripts/test-kiro-acp-live.mjs",
     "test:kiro-model-live": "cargo build -p codeskd && node scripts/test-kiro-model-live.mjs",
     "test:kiro-tmux-live": "cargo build -p codeskd && node scripts/test-kiro-tmux-live.mjs",

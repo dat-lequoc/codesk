@@ -108,6 +108,13 @@ pub(crate) trait ProviderAdapter: Sync {
         None
     }
 
+    /// A key to send during pane startup before the composer is ready.
+    /// Claude's first-run folder trust dialog is the current case: without
+    /// dismissing it, the opening prompt is typed into the dialog.
+    fn terminal_startup_key(&self, _screen: &str) -> Option<&'static str> {
+        None
+    }
+
     /// A command that the harness renders in its own terminal UI instead of the
     /// conversation transcript. Codesk captures the pane afterwards so the run
     /// still gets an event, and dismisses the overlay so the pane stays
@@ -282,6 +289,10 @@ pub(crate) fn keep_terminal_parent_shell(provider: &str) -> bool {
 
 pub(crate) fn terminal_ready(provider: &str, screen: &str) -> bool {
     get(provider).is_none_or(|adapter| adapter.terminal_ready(screen))
+}
+
+pub(crate) fn terminal_startup_key(provider: &str, screen: &str) -> Option<&'static str> {
+    get(provider).and_then(|adapter| adapter.terminal_startup_key(screen))
 }
 
 pub(crate) fn terminal_input_blocked(provider: &str, screen: &str) -> Option<bool> {
