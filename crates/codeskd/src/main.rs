@@ -406,8 +406,8 @@ async fn project_session_messages(
             query.before.as_deref(),
             query.limit,
         )
-            .await
-            .map_err(api_error)?,
+        .await
+        .map_err(api_error)?,
     ))
 }
 async fn create_project(

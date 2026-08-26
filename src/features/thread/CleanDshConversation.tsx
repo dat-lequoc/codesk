@@ -34,7 +34,7 @@ export function ContextInjectionCard({ message }: { message: SessionMessage }) {
   }
 
   return (
-    <div className="my-2 overflow-hidden rounded-lg border border-azure-900/60 bg-ink-850/80 shadow-xs transition-all">
+    <div className="my-2 overflow-hidden rounded-lg border border-azure-950 bg-ink-850/80 shadow-xs transition-all">
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
@@ -42,11 +42,11 @@ export function ContextInjectionCard({ message }: { message: SessionMessage }) {
         aria-expanded={open}
       >
         <Compass size={13} className="shrink-0 text-azure-400" />
-        <span className="font-medium text-azure-300/90 text-[11px]">Context injection</span>
+        <span className="font-medium text-azure-400 text-[11px]">Context injection</span>
         <span className="text-[10px] text-muted">·</span>
         <span className="truncate text-[11px] text-fg-soft/80">{category}</span>
         <span className="flex-1" />
-        <span className="rounded-sm bg-azure-950/80 px-1.5 py-0.5 font-mono text-[9px] text-azure-400 border border-azure-800/40">
+        <span className="rounded-sm bg-azure-950/80 px-1.5 py-0.5 font-mono text-[9px] text-azure-400 border border-azure-600/40">
           snapshot
         </span>
         {open ? <ChevronDown size={13} className="text-muted" /> : <ChevronRight size={13} />}
@@ -72,7 +72,7 @@ export function ProducedFilesCard({
   if (!files.length) return null
 
   return (
-    <div className="my-3 flex flex-wrap items-center gap-1.5 rounded-lg border border-grass-800/50 bg-grass-950/40 px-3 py-2 text-xs">
+    <div className="my-3 flex flex-wrap items-center gap-1.5 rounded-lg border border-grass-600/40 bg-grass-950/40 px-3 py-2 text-xs">
       <span className="flex items-center gap-1.5 text-[11px] font-semibold text-grass-400">
         <Sparkles size={13} />
         Produced
@@ -86,7 +86,7 @@ export function ProducedFilesCard({
               key={path}
               type="button"
               onClick={() => onOpenFile?.(path)}
-              className="flex items-center gap-1 rounded-md border border-grass-700/60 bg-grass-900/60 px-2 py-0.5 font-mono text-[10.5px] text-grass-300 hover:bg-grass-800 hover:text-fg transition-colors"
+              className="flex items-center gap-1 rounded-md border border-grass-600/50 bg-grass-950 px-2 py-0.5 font-mono text-[10.5px] text-grass-400 hover:bg-grass-600/30 hover:text-fg transition-colors"
               title={`Open ${path}`}
             >
               <FileText size={11} className="opacity-70" />
@@ -143,7 +143,7 @@ export function TodoCard({ todos, defaultOpen }: { todos: TodoItemData[]; defaul
                 'flex items-start gap-2.5 rounded-md px-2 py-1 text-xs transition-colors',
                 todo.status === 'completed' && 'text-muted line-through opacity-80',
                 todo.status === 'in_progress' &&
-                  'bg-azure-950/40 text-fg font-medium border border-azure-900/40',
+                  'bg-azure-950/40 text-fg font-medium border border-azure-600/40',
                 todo.status === 'pending' && 'text-fg-soft',
               )}
             >
@@ -172,15 +172,15 @@ export function GoalCard({
   goal: { objective?: string; action?: string; status?: string }
 }) {
   return (
-    <div className="my-2.5 flex items-center gap-2.5 rounded-lg border border-amber-800/50 bg-amber-950/40 px-3 py-2 text-xs">
-      <Target size={14} className="text-amber-400 shrink-0" />
-      <span className="font-semibold text-amber-300 text-[11.5px]">Goal</span>
+    <div className="my-2.5 flex items-center gap-2.5 rounded-lg border border-amber-signal-600/50 bg-amber-signal-950/60 px-3 py-2 text-xs">
+      <Target size={14} className="text-amber-signal-400 shrink-0" />
+      <span className="font-semibold text-amber-signal-400 text-[11.5px]">Goal</span>
       <span className="text-[10px] text-muted">·</span>
       <span className="truncate font-medium text-fg-soft text-[11.5px]">
         {goal.objective || 'Active objective'}
       </span>
       <span className="flex-1" />
-      <span className="rounded bg-amber-900/60 px-1.5 py-0.5 font-mono text-[9px] text-amber-300 uppercase">
+      <span className="rounded bg-amber-signal-950 px-1.5 py-0.5 font-mono text-[9px] text-amber-signal-400 uppercase">
         {goal.action || 'active'}
       </span>
     </div>
@@ -236,13 +236,13 @@ export function CleanToolCard({
         aria-expanded={open}
       >
         <span className="grid size-5 place-items-center rounded shrink-0">
-          {isBash && <Terminal size={13} className="text-emerald-400" />}
-          {isEdit && <FileDiff size={13} className="text-amber-400" />}
-          {isRead && <FileText size={13} className="text-blue-400" />}
-          {isSearch && <Search size={13} className="text-purple-400" />}
-          {isSubagent && <Bot size={13} className="text-cyan-400" />}
+          {isBash && <Terminal size={13} className="text-grass-400" />}
+          {isEdit && <FileDiff size={13} className="text-amber-signal-400" />}
+          {isRead && <FileText size={13} className="text-azure-400" />}
+          {isSearch && <Search size={13} className="text-ember-400" />}
+          {isSubagent && <Bot size={13} className="text-fg-soft" />}
           {!isBash && !isEdit && !isRead && !isSearch && !isSubagent && (
-            <Terminal size={13} className="text-grass-400" />
+            <Terminal size={13} className="text-muted" />
           )}
         </span>
 
@@ -286,7 +286,7 @@ export function CleanToolCard({
                   <button
                     type="button"
                     onClick={() => onOpenFile(displayLabel)}
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] text-azure-400 hover:bg-ink-800 hover:text-azure-300 transition-colors"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] text-azure-400 hover:bg-ink-800 hover:text-azure-500 transition-colors"
                   >
                     <FileText size={10} />
                     <span>Open file</span>

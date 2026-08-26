@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, FileText, Plus, Terminal, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, FileText, FileX, Plus, Terminal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import type { FormEvent } from 'react'
 
@@ -101,7 +101,7 @@ export function AttachmentButton({
         ref={inputRef}
         type="file"
         multiple
-        accept="image/*,text/*,.pdf,.md,.txt,.json,.py,.ts,.js,.rs,.c,.cpp,.h,.css,.html,.yaml,.yml,.toml,.sh"
+        accept="text/*,.md,.txt,.json,.py,.ts,.tsx,.js,.jsx,.rs,.go,.rb,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.toml,.sh,.sql,.csv,.log,.diff,.patch"
         className="hidden"
         onChange={(e) => void handleFiles(e.target.files)}
       />
@@ -112,7 +112,7 @@ export function AttachmentButton({
           className,
         )}
         aria-label="Add attachment"
-        title="Add images or text files (or paste/drag into chat)"
+        title="Add text or code files (or paste/drag into the composer)"
         disabled={disabled}
         onClick={() => inputRef.current?.click()}
       >
@@ -137,22 +137,16 @@ export function ComposerAttachmentsList({
           key={att.id}
           className="group flex items-center gap-2 rounded-lg border border-ink-650 bg-ink-800 py-1 pr-2 pl-1.5 text-xs text-fg shadow-xs transition-all hover:border-ink-500"
         >
-          {att.dataUrl ? (
-            <img
-              src={att.dataUrl}
-              alt={att.name}
-              className="size-7 rounded object-cover border border-ink-700"
-            />
-          ) : (
-            <span className="grid size-7 place-items-center rounded bg-ink-700 text-muted">
-              <FileText size={14} />
-            </span>
-          )}
+          <span className="grid size-7 place-items-center rounded bg-ink-700 text-muted">
+            {att.skipped ? <FileX size={14} /> : <FileText size={14} />}
+          </span>
           <div className="min-w-0 max-w-[140px]">
             <p className="truncate font-medium text-[11px] leading-tight text-fg-soft">
               {att.name}
             </p>
-            <p className="text-[10px] text-muted">{formatFileSize(att.size)}</p>
+            <p className={cn('text-[10px]', att.skipped ? 'text-ember-400' : 'text-muted')}>
+              {att.skipped ?? formatFileSize(att.size)}
+            </p>
           </div>
           <button
             type="button"

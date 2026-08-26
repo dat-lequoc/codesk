@@ -29,7 +29,22 @@ Or run via the CLI binary:
 codesk web
 ```
 
-Then open `http://127.0.0.1:4000` (or access via your Tailscale IP/domain).
+Then open `http://127.0.0.1:4000`.
+
+The gateway binds loopback and has no authentication of its own — it holds the
+daemon token and proxies to it, so whatever reaches the port can start agents.
+To reach it from another machine, put something in front that authenticates.
+Tailscale is the intended one:
+
+```bash
+tailscale serve --bg 4000
+```
+
+That publishes the UI to your tailnet over HTTPS and to nobody else. Browsers
+are additionally held to the origin the page was served from; set
+`CODESK_WEB_ORIGINS=host[,host]` if you front it with a name outside your
+tailnet. `HOST=0.0.0.0` binds every interface and is only safe behind a
+firewall.
 
 </details>
 

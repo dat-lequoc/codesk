@@ -36,7 +36,8 @@ use agy::{agy_transcript_path, agy_workspace_paths, parse_agy_messages};
 use claude::{claude_project_directories, claude_user_text};
 use codex::{codex_rollout_matches_project, codex_rollout_path, parse_codex_history_event};
 use dsh::{
-    dsh_project_directory, dsh_session_files, dsh_turn_active, parse_dsh_messages,
+    dsh_project_directory, dsh_session_files, dsh_session_matches_project, dsh_turn_active,
+    parse_dsh_messages,
 };
 
 const MAX_SESSIONS_PER_PROVIDER: usize = 50;
@@ -810,14 +811,20 @@ fn source_path_from_home(
         if direct.is_file() {
             return Ok(direct);
         }
+        // The direct path above is project-scoped by construction, so it needs
+        // no further proof. This fallback scans every project's sessions, so a
+        // bare id match here would hand back another project's transcript.
         let candidates = dsh_session_files(home)?;
         for path in candidates {
             if path
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|value| value.to_str())
-                == Some(native_id)
+                != Some(native_id)
             {
+                continue;
+            }
+            if dsh_session_matches_project(&path, &project.path) {
                 return Ok(path);
             }
         }
@@ -1356,7 +1363,8 @@ mod tests {
         assert_eq!(messages[0].id, "newest");
         assert_eq!(messages[0].text, "Newest answer");
 
-        let messages = parse_messages(&path, "pi", Some("2026-08-13T20:30:00Z"), None, None).unwrap();
+        let messages =
+            parse_messages(&path, "pi", Some("2026-08-13T20:30:00Z"), None, None).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, "newest");
         fs::remove_dir_all(root).unwrap();

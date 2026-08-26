@@ -10,6 +10,7 @@ import {
   environmentToggle,
   environmentToggleActive,
   headerButton,
+  interrupt,
   openIn,
   queueHeader,
   queueHeaderButton,
@@ -50,7 +51,6 @@ import {
   Terminal,
   WifiOff,
   X,
-  XCircle,
 } from 'lucide-react'
 import { api } from '../../api'
 import { useFilePreview } from '../../hooks/useFilePreview'
@@ -421,7 +421,7 @@ export function RunScreen({
             className={cn(
               'flex h-[28px] items-center gap-1.5 rounded-lg border px-2.5 text-xs transition-colors cursor-pointer',
               cleanView
-                ? 'border-azure-500/60 bg-azure-950/70 text-azure-300 font-medium'
+                ? 'border-azure-500/60 bg-azure-950/70 text-azure-400 font-medium'
                 : 'border-line-strong bg-ink-700 text-muted hover:text-fg-soft hover:bg-ink-650',
             )}
             onClick={() => setCleanView((value) => !value)}
@@ -724,11 +724,11 @@ export function RunScreen({
             {turnRunning && (
               <button
                 type="button"
-                className="flex items-center gap-1.5 rounded-md border border-ember-800/50 bg-ember-950/60 px-2.5 py-1 text-xs font-medium text-ember-300 hover:bg-ember-900/60 hover:text-ember-200 transition-colors"
+                className={interrupt}
                 onClick={() => api.controlRun(run.hostId, run.id, 'interrupt')}
               >
-                <Square size={11} className="fill-current" />
-                <span>Interrupt</span>
+                <Square size={14} />
+                Interrupt
               </button>
             )}
             {queuedInput && turnRunning && (
@@ -751,7 +751,7 @@ export function RunScreen({
             {ui.closeAttached && run.status === 'waiting_for_input' && (
               <button
                 type="button"
-                className="flex items-center gap-1.5 rounded-md border border-ink-650 bg-ink-800 px-2.5 py-1 text-xs font-medium text-fg-soft hover:bg-ink-700 hover:text-scarlet-400 hover:border-scarlet-800/50 transition-colors"
+                className={interrupt}
                 onClick={() =>
                   setDialog({
                     kind: 'confirm',
@@ -762,22 +762,22 @@ export function RunScreen({
                   })
                 }
               >
-                <XCircle size={13} className="text-scarlet-400" />
-                <span>Close</span>
+                <Square size={14} />
+                Close
               </button>
             )}
             {run.status === 'interrupting' && (
-              <div className="flex items-center gap-1.5">
+              <>
                 <button
                   type="button"
-                  className="flex items-center gap-1 rounded-md border border-ember-800/60 bg-ember-950 px-2 py-1 text-xs font-medium text-ember-300 hover:bg-ember-900"
+                  className={interrupt}
                   onClick={() => api.controlRun(run.hostId, run.id, 'terminate')}
                 >
                   Terminate
                 </button>
                 <button
                   type="button"
-                  className="flex items-center gap-1 rounded-md border border-scarlet-800/60 bg-scarlet-950 px-2 py-1 text-xs font-medium text-scarlet-300 hover:bg-scarlet-900"
+                  className={interrupt}
                   onClick={() =>
                     setDialog({
                       kind: 'confirm',
@@ -790,7 +790,7 @@ export function RunScreen({
                 >
                   Kill
                 </button>
-              </div>
+              </>
             )}
             <span className="flex-1" />
             {tmuxRun && provider?.model_picker && active.has(run.status) ? (

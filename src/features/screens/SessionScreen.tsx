@@ -458,24 +458,23 @@ export function SessionScreen({
       markSessionFinishSeen(sessionNotificationKey(session))
     },
   })
-  const prevScrollHeightRef = useRef<number | null>(null)
+  // Prepending history moves the reader's rows down by exactly the height that
+  // arrived above them. Hold the pre-request measurements so the viewport can
+  // be pushed back down by that delta once the page lands.
+  const pendingEarlier = useRef<{ height: number; count: number } | null>(null)
 
   const handleLoadEarlier = () => {
     if (!onLoadEarlier) return
-    prevScrollHeightRef.current = getScrollHeight()
+    pendingEarlier.current = { height: getScrollHeight(), count: messages.length }
     onLoadEarlier()
   }
 
   useLayoutEffect(() => {
-    if (prevScrollHeightRef.current !== null) {
-      const currentHeight = getScrollHeight()
-      const delta = currentHeight - prevScrollHeightRef.current
-      if (delta > 0) {
-        adjustScrollTopBy(delta)
-      }
-      prevScrollHeightRef.current = null
-    }
-  }, [messages.length, adjustScrollTopBy, getScrollHeight])
+    const pending = pendingEarlier.current
+    if (!pending || loadingEarlier) return
+    if (messages.length > pending.count) adjustScrollTopBy(getScrollHeight() - pending.height)
+    pendingEarlier.current = null
+  }, [messages.length, loadingEarlier, adjustScrollTopBy, getScrollHeight])
 
   const openFile = (href: string) => {
     setSelectedActivityId(null)
@@ -504,7 +503,7 @@ export function SessionScreen({
             className={cn(
               'flex h-[28px] items-center gap-1.5 rounded-lg border px-2.5 text-xs transition-colors cursor-pointer',
               cleanView
-                ? 'border-azure-500/60 bg-azure-950/70 text-azure-300 font-medium'
+                ? 'border-azure-500/60 bg-azure-950/70 text-azure-400 font-medium'
                 : 'border-line-strong bg-ink-700 text-muted hover:text-fg-soft hover:bg-ink-650',
             )}
             onClick={() => setCleanView((value) => !value)}
@@ -588,12 +587,19 @@ export function SessionScreen({
                           if (goal) {
                             return <GoalCard key={msg.id} goal={goal} />
                           }
-                          if (
-                            msg.kind === 'tool' ||
-                            msg.kind === 'file_change' ||
-                            msg.kind === 'tool_output'
-                          ) {
-                            if (msg.kind === 'tool_output') return null
+                          if (msg.kind === 'tool_output') {
+                            return (
+                              <CleanToolCard
+                                key={msg.id}
+                                tool="result"
+                                output={
+                                  msg.meta?.output ? String(msg.meta.output) : msg.text || undefined
+                                }
+                                status={msg.meta?.status}
+                              />
+                            )
+                          }
+                          if (msg.kind === 'tool' || msg.kind === 'file_change') {
                             return (
                               <CleanToolCard
                                 key={msg.id}
