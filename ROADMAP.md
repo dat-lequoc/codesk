@@ -27,9 +27,11 @@ without a live pane to read or drive.
 
 ## Next
 
-- [ ] **Attachments in the composer.** The `+` button in every composer is
-      disabled and titled "Attachments are not supported yet". Needs an upload
-      path to the execution host plus a per-harness encoding.
+- [ ] **Attachments the harness cannot read as text.** Text files are inlined
+      into the prompt today; images, PDFs, and archives are accepted and then
+      marked "only text files can be sent" (`src/lib/attachments.ts`). Sending
+      them needs an upload path to the execution host plus a per-harness
+      encoding.
 - [ ] **Keep model and effort fresh.** The periodic host refresh calls the
       daemon without `refresh=true` (`server/state-cache.mjs`), so a change made
       outside Codesk can take a full discovery TTL to appear.
@@ -47,16 +49,25 @@ without a live pane to read or drive.
 - [ ] **Deeper Claude Code, Pi, and opencode support.** They run today through
       the generic terminal tier, without the structured tool, approval, and
       usage rendering the other four providers have.
-- [ ] **Live tests that do not need a human.** The live probes require a
+- [ ] **Announce a finished turn on a protocol run too.** A finished turn now
+      raises a mark and a notification for every conversation whose transcript
+      Codesk watches, which is every tmux-driven run and every agent started
+      outside Codesk. A run on a protocol transport publishes `turn.completed`
+      instead, and nothing listens: `notificationEventKinds`
+      (`src/lib/events.ts`) covers only terminal run statuses, approvals, and
+      input requests. Needs the "are they watching it right now" suppression the
+      transcript watcher already applies.
+- [ ] **Live tests that do not need a human.** Several live probes require a
       logged-in harness and real credits, so they cannot run in CI. A
       recorded-protocol tier would let the same assertions run on every commit.
+      `scripts/test-turn-completion.mjs` is the shape to copy: it drives the real
+      daemon against synthetic transcripts in a throwaway `HOME`.
 
 ## Later
 
 - [ ] Mobile client and an internet relay, so a phone can watch a run.
 - [ ] Team or shared multi-user control plane, which changes the trust model in
       `SECURITY.md` from one POSIX user to many.
-- [ ] Browser-based access to a hosted gateway.
 - [ ] Cloud history synchronization across machines.
 - [ ] Automatic cross-host project and Git-state handoff.
 
@@ -70,6 +81,24 @@ without a live pane to read or drive.
 
 ## Recently shipped
 
+- [x] A finished turn announces itself for every harness. Claude Code, Pi, Kiro,
+      and OpenCode write no end-of-turn record, so their conversations looked
+      like one turn that never ended: nothing raised a mark or a notification,
+      and the transcript watcher polled them at its active-turn rate forever.
+      Each parser now derives the boundary from the harness's own format, with
+      the duration where the harness records one. OpenCode also reports a live
+      turn for the first time, and a failed Pi turn no longer sits at "running"
+      until its process is killed.
+- [x] Session lists that answer in milliseconds. A project with no Codex history
+      fell through to a scan of every rollout on disk — nine seconds per call, on
+      every poll — which left every harness's running state too stale to see. The
+      Codex state database is now trusted when it returns nothing, as it already
+      was when it returned rows.
+- [x] Browser access to a hosted gateway: `CODESK_WEB_MODE` serves the UI from
+      the gateway itself, bound to loopback behind a `tailscale serve` front
+      door, with origin rules that survive DNS rebinding.
+- [x] Attachments in the composer: text files are read in the browser and inlined
+      into the prompt, from every composer, by drop, paste, or the `+` button.
 - [x] Model and reasoning effort in the composer: a session reports what it is
       running and both can be changed, by driving Codex's numbered `/model`
       picker and Kiro's slash commands, with a live script covering each.

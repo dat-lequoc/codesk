@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { makeChunk, makeEvent, makeMessage, resetIds } from '../test/factories'
+import {
+  makeChunk,
+  makeEvent,
+  makeHost,
+  makeMessage,
+  makeRun,
+  makeSession,
+  makeState,
+  resetIds,
+} from '../test/factories'
 import {
   active,
   coalesceStreamEvents,
@@ -9,6 +18,7 @@ import {
   mergeSessionMessages,
   pendingQueue,
   terminalRunStatuses,
+  sessionsNeedingTranscriptWatch,
   terminalStatusByEventKind,
   transcriptTurnOpen,
 } from './events'
@@ -353,6 +363,88 @@ describe('mergeSessionMessages', () => {
       }),
     ]
     expect(mergeSessionMessages(prior, incoming)[0].duration_ms).toBe(1200)
+  })
+})
+
+describe('sessionsNeedingTranscriptWatch', () => {
+  const online = makeHost({ id: 'host-local', status: 'online' })
+  const live = (overrides = {}) =>
+    makeSession({
+      hostId: 'host-local',
+      provider: 'claude',
+      nativeSessionId: 'abc',
+      pid: 4242,
+      ...overrides,
+    })
+
+  it('watches an agent the user started in their own terminal', () => {
+    const state = makeState({ hosts: [online], sessions: [live()] })
+    expect(sessionsNeedingTranscriptWatch(state).map((session) => session.nativeSessionId)).toEqual(
+      ['abc'],
+    )
+  })
+
+  it('watches a tmux run, whose events never say a turn ended', () => {
+    // A tmux run sits at waiting_for_input between turns and never reaches a
+    // terminal status, so the transcript is the only place a finished turn shows.
+    const state = makeState({
+      hosts: [online],
+      sessions: [live()],
+      runs: [
+        makeRun({
+          hostId: 'host-local',
+          provider: 'claude',
+          sessionId: 'abc',
+          status: 'waiting_for_input',
+          inputTransport: 'tmux',
+        }),
+      ],
+    })
+    expect(sessionsNeedingTranscriptWatch(state)).toHaveLength(1)
+  })
+
+  it('leaves a run that publishes turn events to them', () => {
+    const state = makeState({
+      hosts: [online],
+      sessions: [live()],
+      runs: [
+        makeRun({
+          hostId: 'host-local',
+          provider: 'claude',
+          sessionId: 'abc',
+          inputTransport: null,
+        }),
+      ],
+    })
+    expect(sessionsNeedingTranscriptWatch(state)).toEqual([])
+  })
+
+  it('ignores a conversation with no live process and one on an offline host', () => {
+    const offline = makeHost({ id: 'host-remote', status: 'offline' })
+    const state = makeState({
+      hosts: [online, offline],
+      sessions: [live({ pid: undefined }), live({ hostId: 'host-remote', nativeSessionId: 'def' })],
+    })
+    expect(sessionsNeedingTranscriptWatch(state)).toEqual([])
+  })
+
+  it('does not confuse same-id conversations on different hosts', () => {
+    const other = makeHost({ id: 'host-remote', status: 'online' })
+    const state = makeState({
+      hosts: [online, other],
+      sessions: [live(), live({ hostId: 'host-remote' })],
+      runs: [
+        makeRun({
+          hostId: 'host-local',
+          provider: 'claude',
+          sessionId: 'abc',
+          inputTransport: null,
+        }),
+      ],
+    })
+    expect(sessionsNeedingTranscriptWatch(state).map((session) => session.hostId)).toEqual([
+      'host-remote',
+    ])
   })
 })
 

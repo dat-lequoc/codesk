@@ -34,7 +34,9 @@ pub(crate) use pi::index_pi;
 
 use agy::{agy_transcript_path, agy_workspace_paths, parse_agy_messages};
 use claude::{claude_project_directories, claude_user_text};
-use codex::{codex_rollout_matches_project, codex_rollout_path, parse_codex_history_event};
+use codex::{
+    codex_rollout_matches_project, codex_rollout_path, duration_between, parse_codex_history_event,
+};
 use dsh::{
     dsh_project_directory, dsh_session_files, dsh_session_matches_project, dsh_turn_active,
     parse_dsh_messages,
@@ -418,10 +420,12 @@ fn scan_transcript_turn_active(path: &Path, provider: &str) -> bool {
             } else if role == "assistant" {
                 let reason = string(&value["message"]["stopReason"])
                     .or_else(|| string(&value["message"]["rawStopReason"]));
-                Some(!matches!(
-                    reason.as_deref(),
-                    Some("stop" | "end_turn" | "completed")
-                ))
+                // Pi marks every mid-turn stop `toolUse`; a record still being
+                // streamed has no stop reason yet. Anything else has stopped for
+                // good, `error` and `aborted` included — reading those as live
+                // is what left a failed Pi session showing "running" until the
+                // process was killed.
+                Some(matches!(reason.as_deref(), None | Some("toolUse")))
             } else {
                 None
             }
@@ -889,6 +893,7 @@ fn parse_messages(
     }
     let mut messages = Vec::new();
     let mut codex_turn_started: Option<String> = None;
+    let mut turn_started: Option<String> = None;
     for (line_number, line) in reader.lines().map_while(Result::ok).enumerate() {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -947,12 +952,138 @@ fn parse_messages(
                 after,
                 &mut codex_turn_started,
             );
+        } else {
+            push_turn_boundary(
+                provider,
+                &value,
+                line_number,
+                &mut messages,
+                after,
+                &mut turn_started,
+            );
         }
         if messages.len() >= MAX_MESSAGES {
             break;
         }
     }
     Ok(messages)
+}
+
+/// Whether this record ends a turn, and how long the turn took if the harness
+/// says so.
+///
+/// Codex, DSH, and Antigravity each write an explicit end-of-turn event, so
+/// their parsers read the boundary straight off it. Claude Code and Pi write no
+/// such record — a turn simply stops producing assistant steps — so the
+/// boundary has to be inferred from the step that stopped.
+fn turn_boundary(
+    provider: &str,
+    value: &Value,
+    turn_started: &mut Option<String>,
+) -> Option<TurnBoundary> {
+    match provider {
+        "claude" => {
+            if value["type"] == "assistant" {
+                let reason = string(&value["message"]["stop_reason"]);
+                matches!(reason.as_deref(), Some("end_turn" | "stop_sequence"))
+                    .then_some(TurnBoundary::Ends(None))
+            } else if value["type"] == "system" && value["subtype"] == "turn_duration" {
+                // Claude times its own turns and writes the total a beat after
+                // the assistant step that ended one, so this record is the tail
+                // of a turn already marked rather than a turn of its own.
+                Some(TurnBoundary::Times(value["durationMs"].as_i64()))
+            } else {
+                None
+            }
+        }
+        "pi" => {
+            if value["type"] != "message" {
+                return None;
+            }
+            match string(&value["message"]["role"])
+                .unwrap_or_default()
+                .as_str()
+            {
+                // Pi keeps tool results under their own role, so a `user`
+                // record really is the prompt that opens a turn.
+                "user" => {
+                    *turn_started = string(&value["timestamp"]);
+                    None
+                }
+                "assistant" => {
+                    let reason = string(&value["message"]["stopReason"])
+                        .or_else(|| string(&value["message"]["rawStopReason"]))?;
+                    // Every mid-turn stop is `toolUse`. Everything else ends the
+                    // turn, `error` and `aborted` included — they leave nothing
+                    // running, and treating them as live is what used to strand
+                    // a failed Pi session at "running" forever.
+                    (reason != "toolUse").then(|| {
+                        TurnBoundary::Ends(
+                            turn_started
+                                .take()
+                                .zip(string(&value["timestamp"]))
+                                .and_then(|(start, end)| duration_between(&start, &end)),
+                        )
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What a record says about the end of a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnBoundary {
+    /// This step stopped, so a turn ended here.
+    Ends(Option<i64>),
+    /// This record only reports how long the turn that just ended took. It is
+    /// not a turn of its own, and must never become a second marker — two
+    /// markers are two finished turns, and each one is announced.
+    Times(Option<i64>),
+}
+
+/// Append the turn marker for `value`, if it ends a turn.
+fn push_turn_boundary(
+    provider: &str,
+    value: &Value,
+    line_number: usize,
+    messages: &mut Vec<SessionMessage>,
+    after: Option<&str>,
+    turn_started: &mut Option<String>,
+) {
+    let Some(boundary) = turn_boundary(provider, value, turn_started) else {
+        return;
+    };
+    let timestamp = string(&value["timestamp"]).unwrap_or_default();
+    if after.is_some_and(|cursor| timestamp.as_str() < cursor) {
+        return;
+    }
+    let duration_ms = match boundary {
+        TurnBoundary::Ends(duration_ms) => duration_ms,
+        TurnBoundary::Times(duration_ms) => {
+            if let Some(marked) = messages
+                .last_mut()
+                .filter(|previous| previous.kind == "turn_completed")
+            {
+                marked.duration_ms = marked.duration_ms.or(duration_ms);
+                return;
+            }
+            duration_ms
+        }
+    };
+    messages.push(SessionMessage {
+        id: string(&value["uuid"])
+            .or_else(|| string(&value["id"]))
+            .unwrap_or_else(|| format!("turn-{line_number}")),
+        timestamp,
+        role: "assistant".to_string(),
+        text: String::new(),
+        kind: "turn_completed".to_string(),
+        meta: None,
+        duration_ms,
+    });
 }
 
 fn message(value: &Value, line_number: usize, role: &str, text: String) -> Option<SessionMessage> {
@@ -1337,6 +1468,112 @@ mod tests {
             meaningful_user_text("/model\n\nBuild the app".into()),
             "Build the app"
         );
+    }
+
+    #[test]
+    fn pairs_a_claude_turn_with_the_duration_claude_reports() {
+        let root =
+            std::env::temp_dir().join(format!("codesk-claude-turn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let lines = [
+            json!({"type":"user","uuid":"u1","timestamp":"2026-08-13T20:00:00Z",
+                   "message":{"role":"user","content":"do the thing"}}),
+            json!({"type":"assistant","uuid":"a1","timestamp":"2026-08-13T20:00:10Z",
+                   "message":{"role":"assistant","content":[{"type":"text","text":"done"}],
+                              "stop_reason":"end_turn"}}),
+            json!({"type":"system","subtype":"turn_duration","uuid":"d1",
+                   "timestamp":"2026-08-13T20:00:10.040Z","durationMs":10_040}),
+        ];
+        fs::write(
+            &path,
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+
+        let messages = parse_messages(&path, "claude", None, None, None).unwrap();
+        let turns = messages
+            .iter()
+            .filter(|message| message.kind == "turn_completed")
+            .collect::<Vec<_>>();
+        // The stopped step and Claude's duration record describe one turn, and a
+        // second marker here would announce a turn that never happened.
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].duration_ms, Some(10_040));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn counts_back_to_back_claude_turns_separately() {
+        let root =
+            std::env::temp_dir().join(format!("codesk-claude-turns-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        // Neither turn produced trailing text, so neither leaves a message behind
+        // for the next boundary to land after. They are still two finished turns.
+        let lines = [
+            json!({"type":"assistant","uuid":"a1","timestamp":"2026-08-13T20:00:10Z",
+                   "message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}),
+            json!({"type":"assistant","uuid":"a2","timestamp":"2026-08-13T20:00:20Z",
+                   "message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}),
+        ];
+        fs::write(
+            &path,
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+
+        let messages = parse_messages(&path, "claude", None, None, None).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.kind == "turn_completed")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_pi_turn_ends_rather_than_running_forever() {
+        let root = std::env::temp_dir().join(format!("codesk-pi-turn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let lines = [
+            json!({"type":"message","id":"u1","timestamp":"2026-08-13T20:00:00Z",
+                   "message":{"role":"user","content":"do the thing"}}),
+            json!({"type":"message","id":"a1","timestamp":"2026-08-13T20:00:05Z",
+                   "message":{"role":"assistant","content":[{"type":"text","text":"calling"}],
+                              "stopReason":"toolUse"}}),
+            json!({"type":"message","id":"a2","timestamp":"2026-08-13T20:00:12Z",
+                   "message":{"role":"assistant","content":[{"type":"text","text":"gave up"}],
+                              "stopReason":"error"}}),
+        ];
+        fs::write(
+            &path,
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+
+        assert!(!scan_transcript_turn_active(&path, "pi"));
+        let messages = parse_messages(&path, "pi", None, None, None).unwrap();
+        let turns = messages
+            .iter()
+            .filter(|message| message.kind == "turn_completed")
+            .collect::<Vec<_>>();
+        assert_eq!(turns.len(), 1);
+        // Measured from the prompt that opened the turn, which is the only clock
+        // Pi transcripts offer.
+        assert_eq!(turns[0].duration_ms, Some(12_000));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
