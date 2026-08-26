@@ -1,16 +1,27 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { RefObject } from 'react'
 import { api } from '../api'
-import { externalCompletionSettleMs, transcriptTurnOpen } from '../lib/events'
+import {
+  externalCompletionSettleMs,
+  sessionsNeedingTranscriptWatch,
+  transcriptTurnOpen,
+} from '../lib/events'
 import type { ExternalTranscriptWatch } from '../lib/events'
 import { sessionNotificationKey } from '../lib/keys'
 import { notify } from '../lib/notifications'
 import type { AppState, ProviderSession } from '../types'
 
 /**
- * Watches the transcripts of externally-driven sessions (agents the user runs
- * in their own terminal) so a completed turn can raise an unread badge and a
- * notification, even though no Codesk-managed run reports events for them.
+ * Watches conversation transcripts so a completed turn can raise an unread badge
+ * and a notification.
+ *
+ * This covers every session no run reports turn events for: agents the user
+ * started in their own terminal, and Codesk's own tmux-driven runs. A tmux run
+ * parks at `waiting_for_input` between turns and never reaches a terminal run
+ * status, so the run's own events announce nothing when a turn ends — which is
+ * why a finished Claude Code turn used to arrive in silence. Runs on a protocol
+ * transport do publish turn events and are left to them, so nothing announces a
+ * turn twice.
  */
 export function useExternalTranscriptWatcher({
   sessions,
@@ -118,17 +129,7 @@ export function useExternalTranscriptWatcher({
       if (stopped || loading || document.hidden) return
       loading = true
       const snapshot = stateRef.current
-      const managedSessions = new Set(
-        snapshot.runs.flatMap((run) =>
-          run.sessionId ? [`${run.hostId}:${run.provider}:${run.sessionId}`] : [],
-        ),
-      )
-      const sessions = snapshot.sessions.filter(
-        (session) =>
-          session.pid &&
-          snapshot.hosts.find((host) => host.id === session.hostId)?.status === 'online' &&
-          !managedSessions.has(`${session.hostId}:${session.provider}:${session.nativeSessionId}`),
-      )
+      const sessions = sessionsNeedingTranscriptWatch(snapshot)
       const activeKeys = new Set(sessions.map(sessionNotificationKey))
       for (const key of externalTranscriptWatches.current.keys())
         if (!activeKeys.has(key)) externalTranscriptWatches.current.delete(key)

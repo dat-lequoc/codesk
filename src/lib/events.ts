@@ -1,5 +1,5 @@
 // Extracted from App.tsx during the Tailwind/module refactor.
-import type { ProviderSession, Run, RunEvent, SessionMessage } from '../types'
+import type { AppState, ProviderSession, Run, RunEvent, SessionMessage } from '../types'
 
 export const active = new Set([
   'queued',
@@ -68,6 +68,32 @@ export type ExternalTranscriptWatch = {
 }
 
 export const externalCompletionSettleMs = 12_000
+
+/**
+ * The live conversations whose transcript has to be watched for a finished turn.
+ *
+ * A run on a protocol transport publishes its own `turn.completed` event, so
+ * watching its transcript as well would announce the same turn twice. Every
+ * other live conversation needs the transcript: an agent the user started in
+ * their own terminal has no run at all, and a tmux-driven run parks at
+ * `waiting_for_input` between turns without ever reaching a terminal status, so
+ * its events say nothing when a turn ends.
+ */
+export const sessionsNeedingTranscriptWatch = (state: AppState) => {
+  const reportedByRunEvents = new Set(
+    state.runs.flatMap((run) =>
+      run.sessionId && run.inputTransport !== 'tmux'
+        ? [`${run.hostId}:${run.provider}:${run.sessionId}`]
+        : [],
+    ),
+  )
+  return state.sessions.filter(
+    (session) =>
+      session.pid &&
+      state.hosts.find((host) => host.id === session.hostId)?.status === 'online' &&
+      !reportedByRunEvents.has(`${session.hostId}:${session.provider}:${session.nativeSessionId}`),
+  )
+}
 
 export const transcriptTurnOpen = (
   messages: SessionMessage[],

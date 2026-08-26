@@ -25,13 +25,14 @@ pub(crate) fn index_codex(project: &Project, limit: usize) -> Result<Vec<Provide
     let codex_root = home_dir().join(".codex");
     let database_available = newest_numbered_database(&codex_root, "state_").is_some();
     let mut sessions = index_codex_database(project, &codex_root, limit).unwrap_or_default();
-    // The state database is Codex's authoritative thread index.  When it has
-    // rows for this project, do not fall through to the legacy rollout scan:
-    // large homes can contain thousands of multi-megabyte transcripts, and
-    // scanning them on every navigation request makes the daemon appear hung.
-    // The rollout fallback remains available for installations without a
-    // usable database (or projects that predate the index entirely).
-    if sessions.len() >= limit || (database_available && !sessions.is_empty()) {
+    // The state database is Codex's authoritative thread index, and it is just
+    // as authoritative when it returns nothing: a project with no Codex history
+    // is the common case, and it used to be the one that fell through to the
+    // rollout scan below. That scan reads a thousand multi-megabyte transcripts
+    // to confirm the empty answer the database already gave — nine seconds per
+    // call, on every session poll, for every project. Only an installation with
+    // no usable database needs the legacy scan.
+    if sessions.len() >= limit || database_available {
         return Ok(sessions);
     }
     let directory = codex_root.join("sessions");
@@ -472,7 +473,7 @@ pub(super) fn parse_codex_history_event(
     }
 }
 
-fn duration_between(start: &str, end: &str) -> Option<i64> {
+pub(super) fn duration_between(start: &str, end: &str) -> Option<i64> {
     let start = chrono::DateTime::parse_from_rfc3339(start).ok()?;
     let end = chrono::DateTime::parse_from_rfc3339(end).ok()?;
     Some((end - start).num_milliseconds().max(0))

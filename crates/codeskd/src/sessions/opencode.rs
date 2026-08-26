@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -9,6 +13,11 @@ use super::{
     truncate_title, unix_millis_rfc3339,
 };
 use crate::model::{Project, ProviderSession, SessionMessage};
+
+/// OpenCode's own word for "this assistant step asked for tools", the only
+/// finish reason that leaves a turn open.
+const OPENCODE_MID_TURN_FINISH: &str = "tool-calls";
+const OPENCODE_ACTIVE_WINDOW_MS: i64 = 60_000;
 
 fn opencode_database() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
@@ -37,12 +46,14 @@ fn index_opencode_database(
          ORDER BY time_updated DESC
          LIMIT ?2",
     )?;
+    let mut updated_millis = HashMap::new();
     let rows = statement.query_map(params![project.path, limit as i64], |row| {
         let native_id: String = row.get(0)?;
         let cwd: String = row.get(1)?;
         let title: String = row.get(2)?;
         let created_at: i64 = row.get(3)?;
         let updated_at: i64 = row.get(4)?;
+        updated_millis.insert(native_id.clone(), updated_at);
         Ok(ProviderSession {
             id: format!("opencode:{native_id}"),
             provider: "opencode".to_string(),
@@ -65,10 +76,57 @@ fn index_opencode_database(
             tmux_owned: false,
         })
     })?;
-    Ok(rows
+    let mut sessions = rows
         .filter_map(|row| row.ok())
         .filter(|session| !session.title.is_empty())
-        .collect())
+        .collect::<Vec<_>>();
+    // OpenCode keeps its history in SQLite, so it has no transcript file for the
+    // shared turn-active scan to read and used to be the one provider that could
+    // never report a live turn. Its own rows answer the question directly.
+    for session in sessions.iter_mut() {
+        let updated_at = updated_millis.get(&session.native_session_id).copied();
+        if updated_at.is_some_and(recently_updated)
+            && opencode_turn_active(&connection, &session.native_session_id)
+        {
+            session.status = "running".to_string();
+        }
+    }
+    Ok(sessions)
+}
+
+/// A session whose newest assistant message is still waiting on tool calls is
+/// mid-turn. Anything else — a plain stop, a length cutoff, an error — is done.
+fn opencode_turn_active(connection: &Connection, native_session_id: &str) -> bool {
+    connection
+        .query_row(
+            "SELECT json_extract(data, '$.finish'), json_extract(data, '$.time.completed')
+             FROM message
+             WHERE session_id = ?1 AND json_extract(data, '$.role') = 'assistant'
+             ORDER BY time_created DESC
+             LIMIT 1",
+            [native_session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                ))
+            },
+        )
+        .map(|(finish, completed)| {
+            completed.is_none() || finish.as_deref() == Some(OPENCODE_MID_TURN_FINISH)
+        })
+        .unwrap_or(false)
+}
+
+/// A transcript that stopped mid-turn and then went quiet belongs to a session
+/// nobody is driving any more, not to a live one. The shared scan applies the
+/// same window to file-backed providers.
+fn recently_updated(updated_at_millis: i64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or_default();
+    (0..=OPENCODE_ACTIVE_WINDOW_MS).contains(&(now - updated_at_millis))
 }
 
 pub(crate) fn opencode_messages_for_project(
@@ -121,8 +179,17 @@ fn opencode_history_messages(
         ))
     })?;
     let mut messages = Vec::new();
+    // One assistant message spans several part rows, and the turn marker belongs
+    // after the last of them, so it is held until the message id changes.
+    let mut pending_turn: Option<SessionMessage> = None;
     for row in rows.flatten() {
         let (message_id, message_time, message_json, part_id, part_time, part_json) = row;
+        if pending_turn
+            .as_ref()
+            .is_some_and(|turn| turn.id != format!("{message_id}:turn"))
+        {
+            messages.extend(pending_turn.take());
+        }
         let Ok(message_data) = serde_json::from_str::<Value>(&message_json) else {
             continue;
         };
@@ -218,11 +285,48 @@ fn opencode_history_messages(
                 let _ = message_id;
             }
         }
+        if let Some(turn) = opencode_turn_marker(&message_data, &message_id, message_time)
+            .filter(|turn| after.is_none_or(|cursor| turn.timestamp.as_str() >= cursor))
+        {
+            pending_turn = Some(turn);
+        }
         if messages.len() >= MAX_MESSAGES {
             break;
         }
     }
+    messages.extend(pending_turn);
     Ok(messages)
+}
+
+/// The turn marker for an assistant message that stopped for good.
+///
+/// OpenCode records when each assistant step finished and why, so unlike the
+/// other file-backed harnesses it can report both the boundary and the time the
+/// turn took.
+fn opencode_turn_marker(
+    message_data: &Value,
+    message_id: &str,
+    message_time: i64,
+) -> Option<SessionMessage> {
+    if message_data["role"].as_str() != Some("assistant") {
+        return None;
+    }
+    let completed = message_data["time"]["completed"].as_i64()?;
+    if message_data["finish"].as_str() == Some(OPENCODE_MID_TURN_FINISH) {
+        return None;
+    }
+    let created = message_data["time"]["created"]
+        .as_i64()
+        .unwrap_or(message_time);
+    Some(SessionMessage {
+        id: format!("{message_id}:turn"),
+        timestamp: unix_millis_rfc3339(completed),
+        role: "assistant".to_string(),
+        text: String::new(),
+        kind: "turn_completed".to_string(),
+        meta: string(&message_data["finish"]).map(|finish| json!({ "stop_reason": finish })),
+        duration_ms: Some((completed - created).max(0)),
+    })
 }
 
 #[cfg(test)]

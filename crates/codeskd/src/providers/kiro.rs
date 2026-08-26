@@ -563,6 +563,24 @@ fn parse_history_line(
                     _ => {}
                 }
             }
+            // Kiro appends one AssistantMessage per step and writes nothing when
+            // the turn ends, so the step that stops asking for tools is the
+            // boundary. Only Prompt records carry a real clock, so the turn's
+            // length is not something this transcript can honestly report.
+            let content = data["content"].as_array();
+            let asked_for_a_tool =
+                content.is_some_and(|items| items.iter().any(|item| item["kind"] == "toolUse"));
+            if !asked_for_a_tool {
+                result.push(SessionMessage {
+                    id: format!("{message_id}:turn"),
+                    timestamp: state.timestamp(data, line_offset, content.map_or(0, Vec::len)),
+                    role: "assistant".to_string(),
+                    text: String::new(),
+                    kind: "turn_completed".to_string(),
+                    meta: None,
+                    duration_ms: None,
+                });
+            }
         }
         "ToolResults" => {
             for (index, item) in data["content"].as_array().into_iter().flatten().enumerate() {
