@@ -56,6 +56,7 @@ jobs:
       - run: cargo build -p codeskd
       - run: node scripts/test-session-budget.mjs
       - run: node scripts/test-turn-completion.mjs
+      - run: node scripts/test-daemon-upgrade.mjs
       - run: node scripts/test-run-archive.mjs
       - run: node scripts/test-daemon-survival.mjs
       - run: node scripts/test-daemon-lifecycle.mjs

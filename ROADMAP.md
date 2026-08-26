@@ -94,6 +94,14 @@ without a live pane to read or drive.
       every poll — which left every harness's running state too stale to see. The
       Codex state database is now trusted when it returns nothing, as it already
       was when it returned rows.
+- [x] Remote daemons upgrade themselves. A host that answered `/v1/health` kept
+      whatever binary it had: the automatic install only ran when the daemon was
+      missing, and the version floor marked a too-old host offline with an
+      instruction to run `codeskd install` by hand. The crate version could not
+      decide it either — it is unchanged between releases, so a rebuilt daemon
+      looks identical. The daemon now reports a hash of its own executable, and
+      the gateway upgrades any host whose hash differs from the artifact it
+      would install, waiting for the host to be idle first.
 - [x] Browser access to a hosted gateway: `CODESK_WEB_MODE` serves the UI from
       the gateway itself, bound to loopback behind a `tailscale serve` front
       door, with origin rules that survive DNS rebinding.

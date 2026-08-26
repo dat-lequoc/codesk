@@ -332,9 +332,37 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Health> {
     Json(Health {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
+        build: build_fingerprint().to_string(),
         host_name: env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into()),
         uptime_seconds: state.started.elapsed().as_secs(),
         active_runs: state.supervisor.active_count().await,
+    })
+}
+
+/// A short digest of this executable, computed once.
+///
+/// The crate version is the same for every build between releases, so a
+/// gateway comparing versions cannot tell that a remote is running yesterday's
+/// binary. Hashing the file itself answers the only question that matters —
+/// is this the same daemon the gateway would install? — and needs no build
+/// plumbing, so a copy made by any route still identifies itself correctly.
+/// An unreadable executable yields an empty fingerprint, which reads as
+/// "cannot say" rather than as a mismatch that would reinstall on every poll.
+fn build_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let Ok(path) = std::env::current_exe() else {
+            return String::new();
+        };
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return String::new();
+        };
+        let mut hasher = Sha256::new();
+        if std::io::copy(&mut file, &mut hasher).is_err() {
+            return String::new();
+        }
+        format!("{:x}", hasher.finalize())[..16].to_string()
     })
 }
 async fn capabilities(State(state): State<Arc<AppState>>) -> Json<Vec<model::AdapterCapability>> {

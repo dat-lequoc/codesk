@@ -1,4 +1,5 @@
 import { spawn, execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import net from 'node:net'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -11,6 +12,14 @@ const sshOptions = ['-o','BatchMode=yes','-o','ExitOnForwardFailure=yes','-o','C
 // running a daemon installed by an older Codesk indefinitely; without this
 // check it stays "online" while requests fail in confusing ways.
 const MIN_DAEMON_VERSION = '0.2.2'
+// How often an online host is re-checked for a stale daemon. The check is a
+// health request down an SSH tunnel that is already open, plus a hash of a
+// local file that is cached until it changes, so it is close to free.
+const DAEMON_UPGRADE_INTERVAL_MS = 60_000
+// Two installs that both fail to change the remote's fingerprint mean the
+// artifact and the running daemon disagree for a reason reinstalling cannot
+// fix. Stop rather than reinstall on a loop.
+const MAX_DAEMON_UPGRADE_ATTEMPTS = 2
 function versionLt(left, right) {
   const parse = (value) => String(value).split('.').map((part) => Number.parseInt(part, 10) || 0)
   const a = parse(left); const b = parse(right)
@@ -43,6 +52,10 @@ export class Gateway {
     this.eventFailures = new Map()
     this.bootstrapping = new Set()
     this.bootstrapAttempts = new Map()
+    // How many times an automatic daemon upgrade has been attempted for a host
+    // since it last came online. An upgrade that does not change the remote's
+    // fingerprint would otherwise reinstall on every check forever.
+    this.upgradeAttempts = new Map()
     // Daemon tokens are read from each host at connect time and kept here
     // rather than on the host record, which is persisted to disk.
     this.tokens = new Map()
@@ -135,11 +148,79 @@ export class Gateway {
     return Boolean(version) && versionLt(version, MIN_DAEMON_VERSION)
   }
 
+  /// The daemon binary this gateway would install on `hostId`, or '' when it
+  /// has none for that platform.
+  async artifactForHost(hostId) {
+    return localArtifactFor(await this.inspectRemote(hostId))
+  }
+
+  scheduleDaemonUpgradeCheck(hostId, delay = DAEMON_UPGRADE_INTERVAL_MS) {
+    if (this.shuttingDown) return
+    clearTimeout(this.pollers.get(`upgrade:${hostId}`))
+    this.pollers.set(`upgrade:${hostId}`, setTimeout(() => this.checkDaemonUpgrade(hostId), delay))
+  }
+
+  /// Keep a remote host off a daemon this gateway has already replaced.
+  ///
+  /// A host that answers `/v1/health` is online and stays online, so nothing
+  /// used to look at what it was running: an installed daemon was upgraded only
+  /// when it stopped answering, or by hand. The crate version cannot decide it
+  /// either — it is unchanged between releases, so every build during a day's
+  /// work reports the same one. The daemon reports a hash of its own executable
+  /// instead, and that is compared against the artifact this gateway would
+  /// install.
+  ///
+  /// An upgrade restarts codeskd, so it waits for the host to be idle. A busy
+  /// host is simply rechecked later; being one build behind for another minute
+  /// is cheaper than interrupting a turn.
+  async checkDaemonUpgrade(hostId) {
+    const host = this.host(hostId)
+    if (!host || host.type !== 'ssh') return
+    if (this.shuttingDown || this.bootstrapping.has(hostId)) return
+    // A daemon below the floor is held offline until an upgrade lands, so it is
+    // the one host state worth acting on that is not `online`.
+    const outdated = this.daemonOutdated(host)
+    if (!outdated && host.status !== 'online') return
+    let upgraded = false
+    try {
+      const remoteBuild = host.health?.build
+      // No fingerprint means a daemon too old to report one — which the version
+      // floor catches instead. No artifact means there is nothing to install.
+      const artifact = (outdated || remoteBuild) && (await this.artifactForHost(hostId))
+      if (artifact && (outdated || (await fileFingerprint(artifact)) !== remoteBuild)) {
+        if ((this.upgradeAttempts.get(hostId) || 0) >= MAX_DAEMON_UPGRADE_ATTEMPTS) return
+        // Restarting the daemon under a live turn costs more than the delay.
+        // An outdated one is not being driven at all, so nothing is interrupted.
+        if (!outdated && (!(await this.health(host)) || host.health?.active_runs > 0)) return
+        this.upgradeAttempts.set(hostId, (this.upgradeAttempts.get(hostId) || 0) + 1)
+        this.bootstrapping.add(hostId)
+        try {
+          await this.bootstrapRemote(hostId, { localBinaryPath: artifact, reconnect: false })
+        } finally {
+          this.bootstrapping.delete(hostId)
+        }
+        upgraded = true
+        this.reconnect(hostId)
+      }
+    } catch (error) {
+      // A host that cannot be upgraded is still a host that works. Say so once
+      // and keep driving it rather than taking it offline over a stale binary.
+      host.bootstrapError = `Automatic daemon upgrade failed: ${error.message}`
+      this.store.save()
+    } finally {
+      // A reconnect calls markOnline, which schedules the next check itself.
+      if (!upgraded) this.scheduleDaemonUpgradeCheck(hostId)
+    }
+  }
+
   markOnline(host) {
     // A reachable but outdated daemon is worse than an offline one: requests
     // would fail with protocol errors instead of one actionable message.
     if (this.daemonOutdated(host)) {
-      this.markOffline(host, `codeskd ${host.health.version} on ${host.name} is older than the required ${MIN_DAEMON_VERSION}. Update it (run \`codeskd install\` with a newer binary) and reconnect.`)
+      this.markOffline(host, `codeskd ${host.health.version} on ${host.name} is older than the required ${MIN_DAEMON_VERSION}. Codesk is installing a newer one; it reconnects when that lands.`)
+      // Being too old to drive is the clearest case for an automatic upgrade,
+      // and markOffline just cleared the timer that would have run one.
+      this.scheduleDaemonUpgradeCheck(host.id, 0)
       return
     }
     const changed = host.status !== 'online'
@@ -147,10 +228,14 @@ export class Gateway {
     if (changed) this.broadcast('host.updated', host)
     this.connectEvents(host.id)
     this.onHostOnline?.(host.id)
+    if (changed) this.upgradeAttempts.delete(host.id)
+    this.scheduleDaemonUpgradeCheck(host.id, changed ? 0 : DAEMON_UPGRADE_INTERVAL_MS)
   }
 
   markOffline(host, error) {
     const changed = host.status !== 'offline' || host.error !== error
+    clearTimeout(this.pollers.get(`upgrade:${host.id}`))
+    this.pollers.delete(`upgrade:${host.id}`)
     host.status = 'offline'; host.error = error; this.store.save()
     const socket = this.eventSockets.get(host.id)
     if (socket) { this.eventSockets.delete(host.id); socket.close() }
@@ -360,6 +445,9 @@ export class Gateway {
   removeHost(hostId) {
     clearTimeout(this.pollers.get(`connect:${hostId}`))
     this.pollers.delete(`connect:${hostId}`)
+    clearTimeout(this.pollers.get(`upgrade:${hostId}`))
+    this.pollers.delete(`upgrade:${hostId}`)
+    this.upgradeAttempts.delete(hostId)
     this.closeEvents(hostId)
     this.pollers.delete(`events:${hostId}`)
     this.failures.delete(hostId)
@@ -466,6 +554,23 @@ function remoteShell(script){return `sh -c ${shellQuote(`PATH="$HOME/.local/bin:
 function shellQuote(value){return `'${String(value).replaceAll("'","'\\''")}'`}
 function localPlatform(){return {os: process.platform === 'darwin' ? 'Darwin' : process.platform === 'linux' ? 'Linux' : process.platform, arch: process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x86_64' : process.arch}}
 function matchesLocalPlatform(inspection){const local=localPlatform();return inspection.os===local.os&&inspection.arch===local.arch}
+// Hashing a daemon artifact costs tens of milliseconds, and the check runs on
+// a timer per host, so the answer is kept until the file itself changes.
+const fingerprints = new Map()
+export async function fileFingerprint(filePath){
+  let stats
+  try{stats=await fs.promises.stat(filePath)}catch{return ''}
+  const key=`${stats.size}:${stats.mtimeMs}`
+  const cached=fingerprints.get(filePath)
+  if(cached?.key===key)return cached.value
+  const hash=createHash('sha256')
+  try{
+    for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk)
+  }catch{return ''}
+  const value=hash.digest('hex').slice(0,16)
+  fingerprints.set(filePath,{key,value})
+  return value
+}
 function artifactPath(inspection){return path.join(process.env.CODESK_ARTIFACT_DIR || path.join(os.homedir(),'.codesk','artifacts'),`codeskd-${inspection.os}-${inspection.arch}`)}
 function localArtifactFor(inspection){
   const candidates=[artifactPath(inspection),path.resolve(process.cwd(),'dist',`codeskd-${inspection.os}-${inspection.arch}`)]

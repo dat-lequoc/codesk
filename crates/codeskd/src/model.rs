@@ -222,6 +222,11 @@ pub struct AdapterCapability {
 pub struct Health {
     pub ok: bool,
     pub version: &'static str,
+    /// Fingerprint of the running executable. The crate version only moves on a
+    /// release, so it cannot tell a rebuilt daemon from the one it replaced —
+    /// which is exactly the case a gateway has to notice to keep a remote host
+    /// off stale code.
+    pub build: String,
     pub host_name: String,
     pub uptime_seconds: u64,
     pub active_runs: usize,
