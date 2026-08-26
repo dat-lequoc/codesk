@@ -1,0 +1,7 @@
+# pnpm 10 refuses to run a dependency's install script unless it is named here.
+# esbuild's postinstall fetches its platform binary, so vite's bundler depends
+# on it having run. This setting used to live under a `pnpm` key in
+# package.json; pnpm no longer reads it there, which left the allowlist silently
+# inert and the approval riding on whatever a previous install had cached.
+onlyBuiltDependencies:
+  - esbuild

@@ -14,13 +14,18 @@
 // same two signals against a real Claude Code process.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { daemonAuth } from './daemon-token.mjs'
 
-const root = await mkdtemp(join(tmpdir(), 'codesk-turns-'))
+// Resolved, because these fixtures are keyed on the project's path and the
+// daemon canonicalizes it. On macOS the system temp directory lives under
+// /var, which is a symlink to /private/var: the daemon would register
+// /private/var/... while the transcript directories here were named after
+// /var/..., and nothing would match.
+const root = await realpath(await mkdtemp(join(tmpdir(), 'codesk-turns-')))
 const home = join(root, 'home')
 const workspace = join(root, 'workspace')
 const port = 46000 + Math.floor(Math.random() * 500)
