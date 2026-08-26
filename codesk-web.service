@@ -1,15 +1,27 @@
+# Template: copy to ~/.config/systemd/user/codesk-web.service, edit the paths,
+# then `systemctl --user enable --now codesk-web`.
+#
+# The gateway has no authentication of its own — it holds the daemon token and
+# proxies to it, so anything that reaches the port can start agents. It stays on
+# loopback and something else does the authenticating. `tailscale serve` is the
+# intended front door:
+#
+#     tailscale serve --bg 4000
+#
+# That publishes it to your tailnet over HTTPS and to nobody else. If you set
+# HOST to a non-loopback address instead, a firewall has to do that job.
 [Unit]
-Description=Codesk Web Interface
+Description=Codesk web UI
 After=network.target codeskd.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ubuntu/codesk
+WorkingDirectory=%h/codesk
 Environment="CODESK_WEB_MODE=1"
-Environment="HOST=0.0.0.0"
 Environment="PORT=4000"
-# Adjust the Node.js path if needed
-ExecStart=/usr/bin/npm run start:web
+# Origins the browser may use, when the tailnet name is not enough:
+# Environment="CODESK_WEB_ORIGINS=codesk.tail1234.ts.net"
+ExecStart=/usr/bin/env npm run start:web
 Restart=on-failure
 RestartSec=5
 

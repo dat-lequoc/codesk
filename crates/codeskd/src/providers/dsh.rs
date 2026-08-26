@@ -59,12 +59,25 @@ impl ProviderAdapter for Dsh {
     }
     fn build_terminal(
         &self,
-        _request: &StartRunRequest,
+        request: &StartRunRequest,
         _session_key: &str,
         _cwd: &str,
     ) -> Result<Option<support::CommandSpec>> {
-        // DSH runs as an integrated web/HTTP service with RunnerKind::DshWeb, not a TUI process.
-        Ok(None)
+        let mut args = vec!["--profile".into(), "tui".into()];
+        if matches!(request.operation.as_deref(), Some("resume") | Some("fork")) {
+            args.extend([
+                "--resume".into(),
+                support::require_resume_session(request)?.into(),
+            ]);
+        }
+        if let Some(model) = support::model(request) {
+            args.extend(["--model".into(), model.into()]);
+        }
+        Ok(Some(support::CommandSpec {
+            command: support::provider_command("dsh")?,
+            args,
+            session_id: request.resume_session_id.clone(),
+        }))
     }
     fn encode_input(
         &self,
@@ -97,7 +110,6 @@ impl ProviderAdapter for Dsh {
         support::command_tokens(&lower).contains(&"dsh")
             || lower.contains("@deepseek-ai/dsh")
             || lower.contains("deepseek-harness")
-            || (lower.contains("apps/cli/src/bin.ts") && lower.contains("web"))
     }
     fn transcript_matches(&self, path: &str) -> bool {
         path.ends_with("/session.jsonl.zstd") && path.contains("/.dsh/sessions/")

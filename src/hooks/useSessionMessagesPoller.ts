@@ -58,10 +58,9 @@ export function useSessionMessagesPoller({
         oldestTimestamp,
         PAGE_SIZE,
       )
-      const supportsPaging = sessionProviderId === 'dsh'
       setHasEarlierBySession((prev) => ({
         ...prev,
-        [selectedSessionKey]: supportsPaging && incoming.length >= PAGE_SIZE,
+        [selectedSessionKey]: sessionProviderId === 'dsh' && incoming.length >= PAGE_SIZE,
       }))
       if (incoming.length > 0) {
         setSessionMessages((prev) => {
@@ -116,16 +115,20 @@ export function useSessionMessagesPoller({
           isInitial ? PAGE_SIZE : undefined,
         )
         if (stopped) return false
+        if (isInitial) {
+          // Only the providers that honour `limit` can be short a page; for the
+          // rest the first response is already the whole transcript.
+          const paged = sessionProviderId === 'dsh' && incoming.length >= PAGE_SIZE
+          setHasEarlierBySession((prev) => ({ ...prev, [selectedSessionKey]: paged }))
+        }
         setSessionMessages((current) => {
           const existing = current[selectedSessionKey]
+          // Record even an empty first result: the key existing is how the
+          // screen tells "loaded and genuinely empty" apart from "still
+          // loading", which used to spin forever on empty conversations.
           if (!existing) {
             const updated = { ...current, [selectedSessionKey]: mergeSessionMessages([], incoming) }
             sessionMessagesRef.current = updated
-            const supportsPaging = sessionProviderId === 'dsh'
-            setHasEarlierBySession((prev) => ({
-              ...prev,
-              [selectedSessionKey]: supportsPaging && incoming.length >= PAGE_SIZE,
-            }))
             return updated
           }
           if (!incoming.length) return current

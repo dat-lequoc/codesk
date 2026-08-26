@@ -112,7 +112,6 @@ describe('archive then show-more round trip', () => {
       map = budgetAfterArchive(map, 'p1')
       seen.push(itemBudget(map, 'p1'))
     }
-    const expected = Array.from({ length: 8 }, (_, i) => Math.max(0, projectItemPageSize - 1 - i))
-    expect(seen).toEqual(expected)
+    expect(seen).toEqual([4, 3, 2, 1, 0, 0, 0, 0])
   })
 })

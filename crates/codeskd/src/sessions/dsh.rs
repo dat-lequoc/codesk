@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -9,17 +9,22 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::{
-    MAX_MESSAGES, cwd_matches, home_dir,
-    meaningful_user_text, modified_rfc3339, sort_recent, string, truncate_title,
-    unix_millis_rfc3339,
+    MAX_MESSAGES, cwd_matches, home_dir, meaningful_user_text, modified_rfc3339, sort_recent,
+    string, truncate_title, unix_millis_rfc3339,
 };
 use crate::model::{Project, ProviderSession, SessionMessage};
+
+/// How far into a transcript to look for a title before settling for the
+/// fallback. Titles are written early; scanning further is wasted work.
+const MAX_TITLE_SCAN_LINES: usize = 5000;
+
+/// A decompressed transcript, positioned after whatever has been read so far.
+type DshReader = BufReader<zstd::stream::read::Decoder<'static, BufReader<File>>>;
 
 pub(crate) fn index_dsh(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let mut files = dsh_project_session_files(&home_dir(), &project.path)?;
     sort_recent(&mut files);
-    let scan_limit = (limit * 3).max(100);
-    files.truncate(scan_limit);
+    files.truncate(limit.saturating_add(10));
     let mut result = files
         .into_iter()
         .filter_map(|path| index_dsh_file(project, &path).transpose())
@@ -68,8 +73,9 @@ pub(super) fn dsh_session_files(home: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSession>> {
-    let metadata = fs::metadata(path)?;
+/// The `session` header is the first record of the stream, so answering
+/// "whose project is this?" costs one line instead of a full decompress.
+fn dsh_header(path: &Path) -> Result<Option<(Value, DshReader)>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let decoder = zstd::stream::read::Decoder::new(file)
         .with_context(|| format!("decompress {}", path.display()))?;
@@ -78,13 +84,30 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
     if reader.read_line(&mut first_line)? == 0 {
         return Ok(None);
     }
-    let header: Value = match serde_json::from_str(&first_line) {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
+    let Ok(header) = serde_json::from_str::<Value>(&first_line) else {
+        return Ok(None);
     };
     if header["type"] != "session" {
         return Ok(None);
     }
+    Ok(Some((header, reader)))
+}
+
+/// Whether this transcript belongs to `project_path`, read from the header
+/// alone. Used to keep a by-id lookup from crossing project boundaries.
+pub(super) fn dsh_session_matches_project(path: &Path, project_path: &str) -> bool {
+    dsh_header(path)
+        .ok()
+        .flatten()
+        .and_then(|(header, _)| string(&header["cwd"]))
+        .is_some_and(|cwd| cwd_matches(&cwd, project_path))
+}
+
+fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSession>> {
+    let metadata = fs::metadata(path)?;
+    let Some((header, mut reader)) = dsh_header(path)? else {
+        return Ok(None);
+    };
     let cwd = string(&header["cwd"]).unwrap_or_default();
     if cwd.is_empty() || !cwd_matches(&cwd, &project.path) {
         return Ok(None);
@@ -100,64 +123,62 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
     if native_id.is_empty() {
         return Ok(None);
     }
+    // A rename the user typed beats a title the model wrote, which beats
+    // anything else the harness recorded, which beats guessing from the first
+    // prompt. Only a user rename is final, so only it can stop the scan early.
     let mut user_title = None::<String>;
     let mut provider_title = None::<String>;
     let mut fallback_title = None::<String>;
     let mut first_prompt = String::new();
     let mut line = String::new();
     let mut lines_checked = 0;
-    while lines_checked < 5000 && reader.read_line(&mut line)? > 0 {
+    while lines_checked < MAX_TITLE_SCAN_LINES && reader.read_line(&mut line)? > 0 {
         lines_checked += 1;
-        if line.contains("\"session/title\"") {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                if value["type"] == "session/title" {
-                    if let Some(t) = string(&value["data"]["title"]).filter(|s| !s.trim().is_empty()) {
-                        let kind = value["data"]["source"]["kind"].as_str().unwrap_or_default();
-                        match kind {
-                            "user" => {
-                                user_title = Some(t);
-                                break;
-                            }
-                            "provider" => {
-                                provider_title = Some(t);
-                            }
-                            _ => {
-                                if fallback_title.is_none() {
-                                    fallback_title = Some(t);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if first_prompt.is_empty() && line.contains("\"user/message\"") {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                if value["type"] == "user/message" {
-                    let content_text = dsh_content_text(&value["data"]["content"]);
-                    let meaningful = meaningful_user_text(content_text.clone());
-                    if !meaningful.is_empty() {
-                        first_prompt = meaningful;
-                    } else if !content_text.is_empty() {
-                        first_prompt = content_text;
-                    }
-                }
-            }
-        } else if first_prompt.is_empty() && line.contains("\"goal/change\"") {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                if let Some(obj) = string(&value["data"]["goal"]["objective"]) {
-                    first_prompt = obj;
-                }
-            }
-        } else if first_prompt.is_empty() && line.contains("\"command/run\"") {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                if value["data"]["name"] == "goal" {
-                    if let Some(args) = string(&value["data"]["args"]) {
-                        first_prompt = args;
-                    }
-                }
-            }
-        }
+        // `contains` first: parsing every record of a long transcript to read a
+        // title is the cost this whole function exists to avoid.
+        let interesting = line.contains("\"session/title\"")
+            || (first_prompt.is_empty()
+                && (line.contains("\"user/message\"")
+                    || line.contains("\"goal/change\"")
+                    || line.contains("\"command/run\"")));
+        let value = interesting
+            .then(|| serde_json::from_str::<Value>(&line).ok())
+            .flatten();
         line.clear();
+        let Some(value) = value else { continue };
+        match value["type"].as_str().unwrap_or_default() {
+            "session/title" => {
+                let Some(title) =
+                    string(&value["data"]["title"]).filter(|value| !value.trim().is_empty())
+                else {
+                    continue;
+                };
+                match value["data"]["source"]["kind"].as_str().unwrap_or_default() {
+                    "user" => {
+                        user_title = Some(title);
+                        break;
+                    }
+                    "provider" => provider_title = Some(title),
+                    _ => fallback_title = fallback_title.or(Some(title)),
+                }
+            }
+            "user/message" => {
+                let content = dsh_content_text(&value["data"]["content"]);
+                let meaningful = meaningful_user_text(content.clone());
+                first_prompt = if meaningful.is_empty() {
+                    content
+                } else {
+                    meaningful
+                };
+            }
+            "goal/change" => {
+                first_prompt = string(&value["data"]["goal"]["objective"]).unwrap_or_default();
+            }
+            "command/run" if value["data"]["name"] == "goal" => {
+                first_prompt = string(&value["data"]["args"]).unwrap_or_default();
+            }
+            _ => {}
+        }
     }
     let mut title = user_title
         .or(provider_title)
@@ -181,7 +202,7 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
         .ok()
         .and_then(|m| m.elapsed().ok())
         .is_some_and(|elapsed| elapsed <= std::time::Duration::from_secs(60));
-    let is_active = is_recent && dsh_turn_active(path);
+    let is_active = is_recent && super::transcript_turn_active(path, "dsh");
     let status = if is_active { "running" } else { "idle" };
     Ok(Some(ProviderSession {
         id: format!("dsh:{native_id}"),
@@ -252,7 +273,14 @@ pub(super) fn parse_dsh_messages(
     let decoder = zstd::stream::read::Decoder::new(file)
         .with_context(|| format!("decompress {}", path.display()))?;
     let reader = BufReader::new(decoder);
-    let mut messages = Vec::new();
+    // `after` streams forward from a cursor and wants the first page it finds.
+    // Every other call — the initial open, and every "load earlier" — wants the
+    // newest messages in range, so the cap has to drop from the front. Breaking
+    // out instead would hand back a window from the far side of the history and
+    // leave a silent gap above the cursor.
+    let forward = after.is_some() && before.is_none();
+    let cap = limit.unwrap_or(MAX_MESSAGES).clamp(1, MAX_MESSAGES);
+    let mut messages = VecDeque::new();
     let mut turn_started = HashMap::<u64, i64>::new();
 
     for line in reader.lines().map_while(Result::ok) {
@@ -297,7 +325,7 @@ pub(super) fn parse_dsh_messages(
                     || text.starts_with("The approval policy changed")
                     || text.starts_with("Additional instructions from:");
                 if (!text.trim().is_empty() || is_context_injection) && include(&timestamp) {
-                    messages.push(SessionMessage {
+                    messages.push_back(SessionMessage {
                         id: format!("dsh-{seq}"),
                         timestamp,
                         role: "user".to_string(),
@@ -333,7 +361,7 @@ pub(super) fn parse_dsh_messages(
                         _ => continue,
                     };
                     if !text.trim().is_empty() && include(&timestamp) {
-                        messages.push(SessionMessage {
+                        messages.push_back(SessionMessage {
                             id: format!("{message_id}:{kind}:{index}"),
                             timestamp: timestamp.clone(),
                             role: "assistant".to_string(),
@@ -348,8 +376,8 @@ pub(super) fn parse_dsh_messages(
             "tool/call" => {
                 let name = string(&value["data"]["name"]).unwrap_or_else(|| "tool".to_string());
                 let arguments = string(&value["data"]["arguments"]).unwrap_or_default();
-                let call_id = string(&value["data"]["callId"])
-                    .unwrap_or_else(|| format!("dsh-tool-{seq}"));
+                let call_id =
+                    string(&value["data"]["callId"]).unwrap_or_else(|| format!("dsh-tool-{seq}"));
                 let path = dsh_tool_path(&arguments);
                 let file_change = dsh_file_tool(&name) && path.is_some();
                 let args_json = serde_json::from_str::<Value>(&arguments).ok();
@@ -392,7 +420,7 @@ pub(super) fn parse_dsh_messages(
                         meta_obj.insert("changes".into(), json!([{"path": path, "kind": "edit"}]));
                     }
 
-                    messages.push(SessionMessage {
+                    messages.push_back(SessionMessage {
                         id: call_id,
                         timestamp,
                         role: "assistant".to_string(),
@@ -409,7 +437,7 @@ pub(super) fn parse_dsh_messages(
                     .or_else(|| string(&value["data"]["callId"]));
                 let is_error = value["data"]["message"]["content"][0]["isError"] == true;
                 if include(&timestamp) {
-                    messages.push(SessionMessage {
+                    messages.push_back(SessionMessage {
                         id: format!("dsh-tool-result-{seq}"),
                         timestamp,
                         role: "assistant".to_string(),
@@ -436,7 +464,7 @@ pub(super) fn parse_dsh_messages(
                     .and_then(|turn| turn_started.remove(&turn))
                     .map(|started| time.saturating_sub(started));
                 if include(&timestamp) {
-                    messages.push(SessionMessage {
+                    messages.push_back(SessionMessage {
                         id: format!("dsh-turn-{seq}"),
                         timestamp,
                         role: "assistant".to_string(),
@@ -449,21 +477,15 @@ pub(super) fn parse_dsh_messages(
             }
             _ => {}
         }
-        if messages.len() >= MAX_MESSAGES {
-            break;
-        }
-    }
-    if let Some(page_limit) = limit {
-        if messages.len() > page_limit {
-            if after.is_some() && before.is_none() {
-                messages.truncate(page_limit);
-            } else {
-                let start = messages.len().saturating_sub(page_limit);
-                return Ok(messages.split_off(start));
+        if messages.len() > cap {
+            if forward {
+                messages.truncate(cap);
+                break;
             }
+            messages.pop_front();
         }
     }
-    Ok(messages)
+    Ok(messages.into())
 }
 
 fn dsh_content_text(value: &Value) -> String {
@@ -510,6 +532,63 @@ mod tests {
     use crate::sessions::{
         parse_messages, source_path_from_home, test_project, transcript_turn_active,
     };
+
+    /// A `before` page has to sit flush against the cursor it was handed. The
+    /// obvious implementation — collect forward, stop at a cap, keep the head —
+    /// returns a window from the far side of the history and silently drops
+    /// everything between it and the cursor.
+    #[test]
+    fn tail_pages_dsh_history_flush_against_the_cursor() {
+        let home = std::env::temp_dir().join(format!("codesk-dsh-paging-{}", uuid::Uuid::new_v4()));
+        let project_path = home.join("repo");
+        let session_dir = home.join(".dsh/sessions/--repo--").join("paging");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::create_dir_all(&project_path).unwrap();
+        let path = session_dir.join("session.jsonl.zstd");
+
+        let file = File::create(&path).unwrap();
+        let mut encoder = zstd::stream::write::Encoder::new(file, 1).unwrap();
+        writeln!(
+            encoder,
+            "{}",
+            json!({"type":"session","version":0,"id":"paging","createdAt":1786840000000_i64,"cwd":project_path})
+        )
+        .unwrap();
+        // Past MAX_MESSAGES, so a head-biased cap is visible in the result.
+        for seq in 1..=5000_i64 {
+            writeln!(
+                encoder,
+                "{}",
+                json!({"type":"user/message","seq":seq,"time":1786840000000_i64 + seq,
+                       "data":{"content":[{"type":"text","text":format!("message {seq}")}],
+                               "source":{"kind":"user"},"role":"user","id":format!("user-{seq}")}})
+            )
+            .unwrap();
+        }
+        encoder.finish().unwrap();
+
+        // No cursor: the newest page, not the oldest.
+        let newest = parse_dsh_messages(&path, None, None, Some(100)).unwrap();
+        assert_eq!(newest.len(), 100);
+        assert_eq!(newest.first().unwrap().text, "message 4901");
+        assert_eq!(newest.last().unwrap().text, "message 5000");
+
+        // Load earlier: the 100 immediately above that page, with no gap.
+        let earlier =
+            parse_dsh_messages(&path, None, Some(&newest[0].timestamp), Some(100)).unwrap();
+        assert_eq!(earlier.len(), 100);
+        assert_eq!(earlier.first().unwrap().text, "message 4801");
+        assert_eq!(earlier.last().unwrap().text, "message 4900");
+
+        // `after` streams forward instead, from the cursor.
+        let forward =
+            parse_dsh_messages(&path, Some(&earlier[0].timestamp), None, Some(10)).unwrap();
+        assert_eq!(forward.len(), 10);
+        assert_eq!(forward.first().unwrap().text, "message 4801");
+        assert_eq!(forward.last().unwrap().text, "message 4810");
+
+        fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn indexes_resolves_and_parses_dsh_zstd_history() {

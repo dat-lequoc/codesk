@@ -160,7 +160,7 @@ pub async fn run(spec: &RunnerSpec) -> Result<ExitStatus> {
         let poll_delay = if turn_active {
             Duration::from_millis(140)
         } else {
-            Duration::from_millis(1000)
+            Duration::from_secs(60 * 60)
         };
         tokio::select! {
             status = child.wait() => {

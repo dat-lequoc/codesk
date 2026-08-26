@@ -2,12 +2,41 @@ import express from 'express'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { Store } from './store.mjs'
 import { Gateway } from './gateway.mjs'
 import { createMappers } from './mappers.mjs'
 import { createStateCache } from './state-cache.mjs'
 import { registerRoutes } from './routes.mjs'
+
+const webMode = Boolean(process.env.CODESK_WEB_MODE)
+
+const originHost = (value) => {
+  try {
+    return new URL(value.includes('://') ? value : `https://${value}`).host.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+// Hosts the operator has vouched for by name, e.g.
+// CODESK_WEB_ORIGINS=codesk.tail1234.ts.net,10.0.0.5:4000
+const vouchedHosts = new Set(
+  (process.env.CODESK_WEB_ORIGINS || '')
+    .split(',')
+    .map((value) => originHost(value.trim()))
+    .filter(Boolean),
+)
+
+// A DNS name an attacker controls can be rebound to this machine, at which
+// point `Origin` and `Host` agree and same-origin proves nothing. Tailnet
+// names and CGNAT addresses are the exception web mode is built for: `ts.net`
+// resolves only inside the user's tailnet, and a `100.64/10` literal is one
+// the user had to type. Everything else needs CODESK_WEB_ORIGINS.
+const tailnetHost = (host) =>
+  /\.ts\.net$/.test(host.replace(/:\d+$/, '')) ||
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host)
 
 // Only the Tauri webview and local dev servers are legitimate cross-origin
 // callers. A request with any other `Origin` is a page the user happened to
@@ -19,17 +48,17 @@ const allowedOrigin = (origin, req) => {
   if (
     origin.startsWith('tauri://') ||
     origin.startsWith('http://tauri.localhost') ||
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)
   ) {
     return true
   }
-  if (req?.headers?.host) {
-    try {
-      const url = new URL(origin)
-      if (url.host === req.headers.host) return true
-    } catch {}
-  }
-  return false
+  // Web mode serves the UI from this same gateway, so the page's own origin
+  // has to pass. Desktop mode has no such page and keeps the tighter rule.
+  if (!webMode) return false
+  const host = originHost(origin)
+  if (!host) return false
+  if (vouchedHosts.has(host)) return true
+  return host === String(req?.headers?.host || '').toLowerCase() && tailnetHost(host)
 }
 
 const app = express(); const server = http.createServer(app); const store = new Store()
@@ -130,19 +159,23 @@ ownerWatchdog.unref?.()
 
 registerRoutes(app, { store, gateway, broadcast, stateCache, mappers, ownership: { owners, ownerAlive, stop } })
 
-if (process.env.CODESK_WEB_MODE) {
-  const dist = path.join(process.cwd(), 'dist')
-  if (fs.existsSync(dist)) {
-    app.use(express.static(dist))
-    app.use((req, res) => res.sendFile(path.join(dist, 'index.html')))
-  } else {
-    app.use((req, res) => {
-      res
+if (webMode) {
+  const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist')
+  const built = fs.existsSync(path.join(dist, 'index.html'))
+  if (built) app.use(express.static(dist))
+  // The SPA owns every path the API does not. Falling through on `/api` keeps
+  // an unknown route a 404 instead of a 200 of index.html, which turns every
+  // client-side fetch typo into a JSON parse error somewhere far away.
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/') || req.method !== 'GET') return next()
+    if (!built) {
+      return res
         .status(503)
         .type('text/plain')
-        .send('Codesk Web UI is not built yet. Please run "npm run build" first.')
-    })
-  }
+        .send('Codesk Web UI is not built yet. Run "npm run build" first.')
+    }
+    res.sendFile(path.join(dist, 'index.html'))
+  })
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => void stop(`received ${signal}`))
@@ -152,7 +185,11 @@ async function main() {
   await gateway.start()
   stateCache.refreshStaleHosts()
   const port = Number(process.env.PORT || 4242)
-  const host = process.env.HOST || (process.env.CODESK_WEB_MODE ? '0.0.0.0' : '127.0.0.1')
+  // Loopback in every mode. This gateway has no authentication of its own —
+  // it holds the daemon token and proxies to it — so anything that can reach
+  // the port can start agents. Web mode is meant to sit behind `tailscale
+  // serve`, which terminates TLS and authenticates the tailnet for us.
+  const host = process.env.HOST || '127.0.0.1'
   server.on('error', (error) => {
     const message = error.code === 'EADDRINUSE'
       ? `Port ${port} is already in use. Stop the process holding it or set PORT to another port.`
@@ -160,6 +197,13 @@ async function main() {
     console.error(message)
     void stop(message, 1)
   })
-  server.listen(port, host, () => console.log(`Codesk client gateway listening on http://${host}:${port}`))
+  server.listen(port, host, () => {
+    console.log(`Codesk client gateway listening on http://${host}:${port}`)
+    if (!/^(127\.|localhost$|::1$)/.test(host)) {
+      console.warn(
+        `WARNING: HOST=${host} exposes an unauthenticated agent control plane to the network. Put it behind "tailscale serve" or a firewall.`,
+      )
+    }
+  })
 }
 main().catch((error) => { console.error(error); void stop(`startup failed: ${error.message}`, 1) })

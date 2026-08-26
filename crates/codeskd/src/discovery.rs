@@ -919,7 +919,7 @@ fn is_interactive_agent_command(provider: &str, command: &str) -> bool {
         "codex" => !lower.contains(" app-server") && !lower.contains(" codex exec"),
         "kiro" => !lower.contains(" acp"),
         "opencode" => !lower.contains(" acp") && !lower.contains(" opencode run"),
-        "dsh" => true,
+        "dsh" => !lower.contains(" web"),
         "claude" => !lower.contains("--print") && !lower.contains(" -p "),
         "agy" => !lower.contains("--print"),
         "pi" => !lower.contains("--mode rpc"),
