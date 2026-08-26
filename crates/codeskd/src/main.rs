@@ -285,8 +285,10 @@ async fn require_token(
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
     // Health stays open: the desktop shell probes it to decide whether the
-    // daemon needs replacing, before it could know any token, and it discloses
-    // only a version string.
+    // daemon needs replacing, before it could know any token. What it discloses
+    // — version, build fingerprint, hostname, uptime, and how many runs are
+    // active — describes the binary rather than anything it is running, and the
+    // fingerprint is a hash of a published artifact.
     if request.uri().path() == "/v1/health" {
         return Ok(next.run(request).await);
     }
