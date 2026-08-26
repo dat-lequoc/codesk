@@ -44,7 +44,7 @@ import { memo, useState } from 'react'
 import { api } from '../../api'
 import { InputRequestDialog } from './InputRequestDialog'
 import { activityText } from '../../lib/activity'
-import { conversationText, durationLabel } from '../../lib/format'
+import { conversationText, durationLabel, middleTruncatePath } from '../../lib/format'
 import { providerName, providerUi } from '../../lib/providers'
 import { ProviderIcon } from '../../components/ProviderIcon'
 import type { ProviderSession, Run, RunEvent, SessionMessage } from '../../types'
@@ -89,7 +89,7 @@ export function HistoricalOperationalEvent({
                 key={`${change.path || 'file'}:${index}`}
               >
                 <code className={fileChangePath} title={change.path}>
-                  {change.path || 'Unknown file'}
+                  {middleTruncatePath(change.path) || 'Unknown file'}
                 </code>
                 <button
                   className={cn(fileChangeRowButton, 'opacity-100')}

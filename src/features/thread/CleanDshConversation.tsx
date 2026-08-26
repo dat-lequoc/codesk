@@ -18,6 +18,7 @@ import {
   Terminal,
 } from 'lucide-react'
 import { cn } from '../../lib/cn'
+import { middleTruncatePath, pathLike } from '../../lib/format'
 import type { TodoItemData } from '../../lib/clean-dsh'
 import type { SessionMessage } from '../../types'
 
@@ -249,8 +250,11 @@ export function CleanToolCard({
         <span className="font-mono text-[11px] font-medium text-fg-soft">{tool}</span>
 
         {displayLabel && (
-          <code className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-muted">
-            {displayLabel}
+          <code
+            className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-muted"
+            title={displayLabel}
+          >
+            {pathLike(displayLabel) ? middleTruncatePath(displayLabel, 38) : displayLabel}
           </code>
         )}
         {!displayLabel && <span className="flex-1" />}

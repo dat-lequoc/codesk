@@ -115,7 +115,7 @@ export function ActivityInspectorPanel({
   const raw = activityText(entry.raw)
   const hasDetails = Boolean(input || output || entry.changes.length)
   return (
-    <aside className="absolute top-[45px] right-0 bottom-0 z-10 flex w-[var(--file-preview-width)] min-w-[380px] flex-col border-l border-line bg-sunken shadow-[-18px_0_45px_#0003]">
+    <aside className="absolute top-[45px] right-0 bottom-0 z-10 flex w-full md:w-[var(--file-preview-width)] max-w-full md:min-w-[380px] flex-col border-l border-line bg-sunken shadow-[-18px_0_45px_#0003]">
       <header className="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-line px-3 text-muted">
         {entry.type === 'files' ? (
           <FileDiff size={15} className="shrink-0" />

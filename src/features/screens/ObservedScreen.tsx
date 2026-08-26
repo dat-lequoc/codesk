@@ -18,7 +18,7 @@ import {
 } from './screen-styles'
 import type { KeyboardEvent } from 'react'
 import { MoreHorizontal } from 'lucide-react'
-import { ListPlus, RefreshCw, ScrollText, Send, Terminal } from 'lucide-react'
+import { ListPlus, PanelLeft, RefreshCw, ScrollText, Send, Terminal } from 'lucide-react'
 import { api } from '../../api'
 import { useLatest } from '../../hooks/useLatest'
 import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
@@ -50,6 +50,7 @@ export function ObservedScreen({
   agent,
   onStarted,
   onError,
+  onToggleSidebar,
 }: {
   host?: Host
   project?: Project
@@ -57,6 +58,7 @@ export function ObservedScreen({
   agent: DiscoveredAgent
   onStarted: (run: Run) => void
   onError: (message: string) => void
+  onToggleSidebar?: () => void
 }) {
   const [message, setMessage] = usePersistentComposerDraft(
     `agent:${host?.id || 'unknown'}:${agent.id}`,
@@ -163,6 +165,17 @@ export function ObservedScreen({
   return (
     <div className={threadScreen}>
       <header className={threadHeader}>
+        {onToggleSidebar && (
+          <button
+            type="button"
+            className="md:hidden grid size-8 shrink-0 place-items-center rounded-md text-muted hover:text-fg hover:bg-ink-700 -ml-1 mr-0.5"
+            title="Toggle sidebar"
+            aria-label="Toggle sidebar"
+            onClick={onToggleSidebar}
+          >
+            <PanelLeft size={18} />
+          </button>
+        )}
         <ProviderIcon provider={agent.provider} />
         <strong className={threadHeaderTitle}>{providerName(agent.provider)} session</strong>
         <span className={observedBadge}>Observed</span>
@@ -171,7 +184,7 @@ export function ObservedScreen({
           <MoreHorizontal size={18} />
         </button>
       </header>
-      <div className="mx-auto w-[min(720px,calc(100%-100px))] py-24">
+      <div className="mx-auto w-[min(720px,calc(100%-32px))] md:w-[min(720px,calc(100%-100px))] py-12 md:py-24">
         <div className="text-center [&>svg]:mx-auto [&>svg]:size-9 [&>svg]:text-fg-soft">
           <ProviderIcon provider={agent.provider} />
           <h1 className="mt-4 mb-2 text-2xl font-medium">{observedAgentTitle(agent)}</h1>
@@ -357,7 +370,11 @@ export function ObservedScreen({
               aria-label="Send message"
               disabled={!message.trim() || busy || host?.status !== 'online'}
             >
-              {busy ? <RefreshCw className="animate-spin" size={15} /> : <Send size={17} />}
+              {busy ? (
+                <RefreshCw className="animate-spin" size={15} />
+              ) : (
+                <Send size={15} className="translate-y-px -translate-x-0.5" />
+              )}
             </button>
           </ComposerFooter>
         </ComposerFrame>

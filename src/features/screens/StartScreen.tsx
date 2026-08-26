@@ -8,6 +8,7 @@ import {
   FolderGit2,
   GitBranch,
   Laptop,
+  PanelLeft,
   Plus,
   RefreshCw,
   Search,
@@ -35,8 +36,8 @@ const starterCard =
   'flex h-[121px] flex-col justify-between rounded-2xl border border-line bg-canvas p-[18px] text-left text-fg-soft hover:border-line-strong hover:bg-ink-900'
 const starterLabel = 'text-sm leading-snug font-medium'
 const codexComposer =
-  'absolute bottom-3.5 left-1/2 z-10 w-[min(790px,calc(100%-80px))] -translate-x-1/2 rounded-[19px] border border-line-strong bg-surface shadow-2xl shadow-black/40'
-const composerContext = 'flex h-9 items-center gap-4 rounded-t-[18px] bg-sunken px-4'
+  'absolute bottom-3 md:bottom-3.5 left-1/2 z-10 w-[calc(100%-24px)] md:w-[min(790px,calc(100%-80px))] -translate-x-1/2 rounded-[19px] border border-line-strong bg-surface shadow-2xl shadow-black/40'
+const composerContext = 'flex min-h-9 flex-wrap items-center gap-2 md:gap-4 rounded-t-[18px] bg-sunken px-3 md:px-4 py-1 md:py-0'
 const contextButton = 'flex items-center gap-[7px] text-xs text-fg-soft hover:text-fg'
 const harnessOption =
   'flex h-[30px] shrink-0 items-center gap-[5px] rounded-lg border border-line-strong bg-ink-850 px-2 text-[10px] whitespace-nowrap text-fg-soft hover:border-ink-400 hover:bg-raised hover:text-fg disabled:cursor-not-allowed disabled:opacity-40 [&>svg]:size-[13px]'
@@ -53,6 +54,7 @@ export function StartScreen({
   onProject,
   onStarted,
   onError,
+  onToggleSidebar,
 }: {
   state: AppState
   draft?: DraftSession
@@ -61,6 +63,7 @@ export function StartScreen({
   onProject: () => void
   onStarted: (run: Run) => void
   onError: (message: string) => void
+  onToggleSidebar?: () => void
 }) {
   const [prompt, setPrompt] = useState(draft?.prompt || '')
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
@@ -165,17 +168,32 @@ export function StartScreen({
   }
   return (
     <div className="relative grid h-full place-items-center">
-      <div className="-translate-y-[58px] text-center">
+      <div className="absolute top-0 inset-x-0 md:hidden flex h-[45px] items-center gap-2.5 border-b border-ink-700 px-3 z-10 bg-canvas">
+        {onToggleSidebar && (
+          <button
+            type="button"
+            className="grid size-8 shrink-0 place-items-center rounded-md text-muted hover:text-fg hover:bg-ink-700 -ml-1"
+            title="Toggle sidebar"
+            aria-label="Toggle sidebar"
+            onClick={onToggleSidebar}
+          >
+            <PanelLeft size={18} />
+          </button>
+        )}
+        <img className="size-[22px] rounded-[6px] object-cover" src={logoUrl} alt="" />
+        <strong className="text-[15px] tracking-[-0.2px]">Codesk</strong>
+      </div>
+      <div className="-translate-y-[40px] md:-translate-y-[58px] text-center px-4 max-w-full overflow-hidden">
         <img
-          className="mx-auto size-16 rounded-2xl object-cover shadow-[0_10px_28px_#0007,0_0_0_1px_#ffffff1c]"
+          className="mx-auto size-14 md:size-16 rounded-2xl object-cover shadow-[0_10px_28px_#0007,0_0_0_1px_#ffffff1c]"
           src={logoUrl}
           alt="Codesk"
         />
-        <h1 className="mt-4 mb-10 text-2xl font-normal tracking-[-0.55px]">
+        <h1 className="mt-3 md:mt-4 mb-6 md:mb-10 text-xl md:text-2xl font-normal tracking-[-0.55px]">
           {project ? `What should we work on in ${project.name}?` : 'Add a project to get started'}
         </h1>
         {project && (
-          <div className="grid grid-cols-[repeat(4,195px)] gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2.5 md:gap-3 w-full max-w-[780px] px-1 md:px-0">
             <button
               className={starterCard}
               onClick={() => setPrompt('Explore and explain this codebase')}
@@ -411,7 +429,11 @@ export function StartScreen({
                       : 'Start chat'
               }
             >
-              {busy ? <RefreshCw className="animate-spin" size={17} /> : <Send size={17} />}
+              {busy ? (
+                <RefreshCw className="animate-spin" size={15} />
+              ) : (
+                <Send size={15} className="translate-y-px -translate-x-0.5" />
+              )}
             </button>
           </ComposerFooter>
         </ComposerFrame>

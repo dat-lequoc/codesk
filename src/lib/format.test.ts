@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { makeDraft, resetIds } from '../test/factories'
-import { conversationText, draftTitle, durationLabel, pathLike, relative } from './format'
+import {
+  conversationText,
+  draftTitle,
+  durationLabel,
+  middleTruncatePath,
+  pathLike,
+  relative,
+} from './format'
 
 beforeEach(resetIds)
 
@@ -145,5 +152,60 @@ describe('durationLabel', () => {
 
   it('clamps a negative duration to zero rather than showing "-3s"', () => {
     expect(durationLabel(-3_000)).toBe('0s')
+  })
+})
+
+describe('middleTruncatePath', () => {
+  it('returns empty string for nullish or empty input', () => {
+    expect(middleTruncatePath(undefined)).toBe('')
+    expect(middleTruncatePath(null)).toBe('')
+    expect(middleTruncatePath('')).toBe('')
+  })
+
+  it('leaves a short path untouched', () => {
+    expect(middleTruncatePath('src/App.tsx', 40)).toBe('src/App.tsx')
+    expect(middleTruncatePath('/home/user/file.ts', 40)).toBe('/home/user/file.ts')
+  })
+
+  it('middle truncates a long absolute path preserving root and trailing folder+file', () => {
+    const result = middleTruncatePath(
+      '/home/ubuntu/repos/codesk/crates/codeskd/src/sessions/dsh.rs',
+      40,
+    )
+    expect(result.length).toBeLessThanOrEqual(40)
+    expect(result.startsWith('/home/.../')).toBe(true)
+    expect(result.endsWith('sessions/dsh.rs')).toBe(true)
+  })
+
+  it('middle truncates a home-relative path', () => {
+    const result = middleTruncatePath('~/deepseek-harness/apps/cli/src/features/runner.ts', 35)
+    expect(result.length).toBeLessThanOrEqual(35)
+    expect(result.startsWith('~/.../')).toBe(true)
+    expect(result.endsWith('features/runner.ts')).toBe(true)
+  })
+
+  it('middle truncates a relative nested path', () => {
+    const result = middleTruncatePath('src/features/screens/subfolder/NestedComponent.tsx', 40)
+    expect(result.length).toBeLessThanOrEqual(40)
+    expect(result.startsWith('src/.../')).toBe(true)
+    expect(result.endsWith('subfolder/NestedComponent.tsx')).toBe(true)
+  })
+
+  it('middle truncates a very long single filename with ellipsis', () => {
+    const result = middleTruncatePath(
+      'very_long_file_name_that_exceeds_the_maximum_limit.test.tsx',
+      30,
+    )
+    expect(result.length).toBeLessThanOrEqual(30)
+    expect(result).toContain('...')
+  })
+
+  it('falls back to .../filename when parent folder and file name exceeds available prefix room', () => {
+    const result = middleTruncatePath(
+      'some/deep/path/to/moderately_long_folder_name/and_long_file_name.tsx',
+      45,
+    )
+    expect(result.length).toBeLessThanOrEqual(45)
+    expect(result.endsWith('and_long_file_name.tsx')).toBe(true)
   })
 })

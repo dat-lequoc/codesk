@@ -43,6 +43,7 @@ import {
   Info,
   Laptop,
   ListPlus,
+  PanelLeft,
   Pencil,
   RefreshCw,
   Send,
@@ -97,6 +98,7 @@ export function RunScreen({
   provider,
   onStarted,
   onError,
+  onToggleSidebar,
 }: {
   run: Run
   events: RunEvent[]
@@ -105,6 +107,7 @@ export function RunScreen({
   provider?: Provider
   onStarted: (run: Run) => void
   onError: (message: string) => void
+  onToggleSidebar?: () => void
 }) {
   const [message, setMessage] = usePersistentComposerDraft(`run:${run.hostId}:${run.id}`)
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
@@ -396,6 +399,17 @@ export function RunScreen({
     <FilePreviewContext.Provider value={openFile}>
       <div className={cn(threadScreen, showEnvironment && threadScreenEnvOpen)}>
         <header className={threadHeader}>
+          {onToggleSidebar && (
+            <button
+              type="button"
+              className="md:hidden grid size-8 shrink-0 place-items-center rounded-md text-muted hover:text-fg hover:bg-ink-700 -ml-1 mr-0.5"
+              title="Toggle sidebar"
+              aria-label="Toggle sidebar"
+              onClick={onToggleSidebar}
+            >
+              <PanelLeft size={18} />
+            </button>
+          )}
           <FolderGit2 size={16} className="shrink-0" />
           <strong className={threadHeaderTitle}>{run.title}</strong>
           <button className={headerButton} title="Thread actions" aria-label="Thread actions">
@@ -419,9 +433,11 @@ export function RunScreen({
             aria-label="Toggle clean conversation view"
           >
             <Sparkles size={13} className={cleanView ? 'text-azure-400' : 'text-muted'} />
-            <span className="text-[11px]">{cleanView ? 'Clean View' : 'Classic View'}</span>
+            <span className="text-[11px] hidden sm:inline">
+              {cleanView ? 'Clean View' : 'Classic View'}
+            </span>
           </button>
-          <button className={openIn}>
+          <button className={cn(openIn, 'hidden sm:flex')}>
             Open in <ChevronDown size={14} />
           </button>
           <button
@@ -800,7 +816,7 @@ export function RunScreen({
               ) : rewind ? (
                 <GitBranch size={16} />
               ) : (
-                <Send size={17} />
+                <Send size={15} className="translate-y-px -translate-x-0.5" />
               )}
             </button>
           </ComposerFooter>

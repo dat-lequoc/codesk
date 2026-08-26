@@ -10,6 +10,7 @@ import { Sidebar } from './features/sidebar/Sidebar'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { api } from './api'
+import { cn } from './lib/cn'
 import type { AppState, DiscoveredAgent, Project, ProviderSession, Run } from './types'
 import { useLatest } from './hooks/useLatest'
 import { empty, observedAgents } from './lib/app-state'
@@ -42,6 +43,9 @@ export function App() {
   const [archives, setArchives] = useState(false)
   const [projectToRemove, setProjectToRemove] = useState<Project | null>(null)
   const [removingProject, setRemovingProject] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const toggleSidebar = useCallback(() => setSidebarOpen((open) => !open), [])
+  const closeSidebar = useCallback(() => setSidebarOpen(false), [])
   const [error, setError] = useState('')
   // Shared between the transcript watcher (which records when a turn
   // completion was announced) and the unread bookkeeping (which suppresses the
@@ -439,109 +443,150 @@ export function App() {
     }
   }
   return (
-    <div className="grid h-screen grid-cols-[344px_minmax(0,1fr)] bg-canvas">
-      <Sidebar
-        state={state}
-        runs={state.runs}
-        sessions={allSessions}
-        agents={agents}
-        unreadKeys={unreadKeys}
-        selectedId={selectedId}
-        selectedSessionKey={selectedSessionKey}
-        selectedAgentKey={selectedAgentKey}
-        selectedDraftId={selectedDraftId}
-        selectedProjectKey={selectedProjectKey}
-        query={query}
-        onQuery={setQuery}
-        onSelectRun={(next) => {
-          readRun(next)
-          selectRun(next)
-        }}
-        onSelectSession={(next) => {
-          readSession(next)
-          selectSession(next)
-        }}
-        onSelectDraft={selectDraft}
-        onSelectAgent={selectAgent}
-        onSelectProject={selectProject}
-        onRemoveProject={setProjectToRemove}
-        onArchiveProject={archiveProjectSessions}
-        onTogglePin={togglePin}
-        onToggleArchive={toggleArchive}
-        onToggleArchiveRun={toggleArchiveRun}
-        onHideAgent={toggleHideAgent}
-        onControlAgent={controlAgent}
-        onRefreshProject={async (project) => {
-          try {
+    <div className="relative flex h-screen w-full overflow-hidden bg-canvas md:grid md:grid-cols-[344px_minmax(0,1fr)]">
+      {/* Mobile backdrop */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs md:hidden"
+          onClick={closeSidebar}
+          aria-hidden="true"
+        />
+      )}
+      {/* Sidebar sheet on mobile, fixed column on desktop */}
+      <div
+        className={cn(
+          'fixed inset-y-0 left-0 z-50 flex w-[300px] max-w-[85vw] flex-col transition-transform duration-200 ease-in-out md:static md:z-auto md:w-auto md:max-w-none md:translate-x-0',
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
+        )}
+      >
+        <Sidebar
+          state={state}
+          runs={state.runs}
+          sessions={allSessions}
+          agents={agents}
+          unreadKeys={unreadKeys}
+          selectedId={selectedId}
+          selectedSessionKey={selectedSessionKey}
+          selectedAgentKey={selectedAgentKey}
+          selectedDraftId={selectedDraftId}
+          selectedProjectKey={selectedProjectKey}
+          query={query}
+          onQuery={setQuery}
+          onSelectRun={(next) => {
+            closeSidebar()
+            readRun(next)
+            selectRun(next)
+          }}
+          onSelectSession={(next) => {
+            closeSidebar()
+            readSession(next)
+            selectSession(next)
+          }}
+          onSelectDraft={(draft) => {
+            closeSidebar()
+            selectDraft(draft)
+          }}
+          onSelectAgent={(hostId, agent, project) => {
+            closeSidebar()
+            selectAgent(hostId, agent, project)
+          }}
+          onSelectProject={(project) => {
+            closeSidebar()
+            selectProject(project)
+          }}
+          onRemoveProject={setProjectToRemove}
+          onArchiveProject={archiveProjectSessions}
+          onTogglePin={togglePin}
+          onToggleArchive={toggleArchive}
+          onToggleArchiveRun={toggleArchiveRun}
+          onHideAgent={toggleHideAgent}
+          onControlAgent={controlAgent}
+          onRefreshProject={async (project) => {
+            try {
+              const key = projectKey(project)
+              const items = await api.refreshProjectSessions(project.hostId, project.id)
+              setExtraSessions((current) => ({ ...current, [key]: items }))
+              setState((current) => ({
+                ...current,
+                sessions: [
+                  ...current.sessions.filter(
+                    (session) =>
+                      session.hostId !== project.hostId || session.projectId !== project.id,
+                  ),
+                  ...items,
+                ].sort(recentFirst),
+              }))
+            } catch (cause) {
+              setError(cause instanceof Error ? cause.message : String(cause))
+            }
+          }}
+          onShowMore={async (project, visibleLimit) => {
             const key = projectKey(project)
-            const items = await api.refreshProjectSessions(project.hostId, project.id)
-            setExtraSessions((current) => ({ ...current, [key]: items }))
-            setState((current) => ({
-              ...current,
-              sessions: [
-                ...current.sessions.filter(
-                  (session) =>
-                    session.hostId !== project.hostId || session.projectId !== project.id,
-                ),
-                ...items,
-              ].sort(recentFirst),
-            }))
-          } catch (cause) {
-            setError(cause instanceof Error ? cause.message : String(cause))
-          }
-        }}
-        onShowMore={async (project, visibleLimit) => {
-          const key = projectKey(project)
-          try {
-            const items = await api.projectSessions(project.hostId, project.id, visibleLimit + 1)
-            setExtraSessions((current) => ({ ...current, [key]: items }))
-            return true
-          } catch (cause) {
-            setError(cause instanceof Error ? cause.message : String(cause))
-            return false
-          }
-        }}
-        onNewRun={() => void newDraft()}
-        onNewProject={() => setNewProject(true)}
-        onRegisterFolder={async (hostId, path) => {
-          try {
-            const name = path.split('/').filter(Boolean).at(-1) || path
-            await api.createProject({ hostId, name, path })
-            await reload()
-          } catch (cause) {
-            setError(cause instanceof Error ? cause.message : String(cause))
-          }
-        }}
-        onSettings={() => setSettings(true)}
-        onArchives={() => setArchives(true)}
-        onJumpToUnread={() => {
-          // The badge is only useful if it can point at the thing it counts.
-          // Resolve the first unread key to its conversation and open it; keys
-          // that resolve to nothing are stale, so drop them instead of leaving
-          // a ghost badge nothing in the sidebar explains.
-          const stale: string[] = []
-          for (const key of unreadKeys) {
-            const unreadSession = allSessions.find((item) => sessionNotificationKey(item) === key)
-            if (unreadSession) {
-              readSession(unreadSession)
-              selectSession(unreadSession)
-              if (stale.length) clearUnread(stale)
-              return
+            try {
+              const items = await api.projectSessions(project.hostId, project.id, visibleLimit + 1)
+              setExtraSessions((current) => ({ ...current, [key]: items }))
+              return true
+            } catch (cause) {
+              setError(cause instanceof Error ? cause.message : String(cause))
+              return false
             }
-            const unreadRun = state.runs.find((item) => runNotificationKeys(item).includes(key))
-            if (unreadRun) {
-              readRun(unreadRun)
-              selectRun(unreadRun)
-              if (stale.length) clearUnread(stale)
-              return
+          }}
+          onNewRun={() => {
+            closeSidebar()
+            void newDraft()
+          }}
+          onNewProject={() => {
+            closeSidebar()
+            setNewProject(true)
+          }}
+          onRegisterFolder={async (hostId, path) => {
+            try {
+              const name = path.split('/').filter(Boolean).at(-1) || path
+              await api.createProject({ hostId, name, path })
+              await reload()
+            } catch (cause) {
+              setError(cause instanceof Error ? cause.message : String(cause))
             }
-            stale.push(key)
-          }
-          if (stale.length) clearUnread(stale)
-          setArchives(true)
-        }}
-      />
-      <section className="min-h-0 min-w-0 bg-canvas">
+          }}
+          onSettings={() => {
+            closeSidebar()
+            setSettings(true)
+          }}
+          onArchives={() => {
+            closeSidebar()
+            setArchives(true)
+          }}
+          onJumpToUnread={() => {
+            closeSidebar()
+            // The badge is only useful if it can point at the thing it counts.
+            // Resolve the first unread key to its conversation and open it; keys
+            // that resolve to nothing are stale, so drop them instead of leaving
+            // a ghost badge nothing in the sidebar explains.
+            const stale: string[] = []
+            for (const key of unreadKeys) {
+              const unreadSession = allSessions.find((item) => sessionNotificationKey(item) === key)
+              if (unreadSession) {
+                readSession(unreadSession)
+                selectSession(unreadSession)
+                if (stale.length) clearUnread(stale)
+                return
+              }
+              const unreadRun = state.runs.find((item) => runNotificationKeys(item).includes(key))
+              if (unreadRun) {
+                readRun(unreadRun)
+                selectRun(unreadRun)
+                if (stale.length) clearUnread(stale)
+                return
+              }
+              stale.push(key)
+            }
+            if (stale.length) clearUnread(stale)
+            setArchives(true)
+          }}
+          onClose={closeSidebar}
+        />
+      </div>
+      <section className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas">
         {session ? (
           <SessionScreen
             key={`session:${sessionNotificationKey(session)}`}
@@ -560,6 +605,7 @@ export function App() {
               void reload()
             }}
             onError={setError}
+            onToggleSidebar={toggleSidebar}
           />
         ) : run ? (
           <RunScreen
@@ -574,6 +620,7 @@ export function App() {
               void reload()
             }}
             onError={setError}
+            onToggleSidebar={toggleSidebar}
           />
         ) : selectedAgent ? (
           <ObservedScreen
@@ -589,6 +636,7 @@ export function App() {
               void reload()
             }}
             onError={setError}
+            onToggleSidebar={toggleSidebar}
           />
         ) : (
           <StartScreen
@@ -603,6 +651,7 @@ export function App() {
               void reload()
             }}
             onError={setError}
+            onToggleSidebar={toggleSidebar}
           />
         )}
       </section>

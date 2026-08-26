@@ -99,4 +99,17 @@ describe('FileChangeCard', () => {
     renderCard({ changes: [{ diff: '+a' }] })
     expect(screen.getByText('Unknown file')).toBeInTheDocument()
   })
+
+  it('middle-truncates a very long path while keeping the full path in the title and clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const longPath =
+      '/home/ubuntu/projects/very-long-repo-name/crates/codeskd/src/features/screens/SessionScreen.tsx'
+    renderCard({ changes: [{ path: longPath, diff: '+1' }] })
+    expect(screen.getByTitle(longPath)).toBeInTheDocument()
+    expect(screen.getByText(/SessionScreen\.tsx/)).toBeInTheDocument()
+    expect(screen.getByText(/\.\.\./)).toBeInTheDocument()
+    await userEvent.click(screen.getByTitle('Copy path'))
+    expect(writeText).toHaveBeenCalledWith(longPath)
+  })
 })

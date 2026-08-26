@@ -91,6 +91,8 @@ export function Sidebar({
   onSettings,
   onArchives,
   onJumpToUnread,
+  onClose,
+  className,
 }: {
   state: AppState
   runs: Run[]
@@ -128,6 +130,8 @@ export function Sidebar({
   onSettings: () => void
   onArchives: () => void
   onJumpToUnread: () => void
+  onClose?: () => void
+  className?: string
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(loadExpandedProjects)
   const [projectItemLimits, setProjectItemLimits] = useState<Map<string, number>>(() => new Map())
@@ -441,7 +445,12 @@ export function Sidebar({
     return (left?.name || leftId).localeCompare(right?.name || rightId)
   })
   return (
-    <aside className="flex min-h-0 flex-col border-r border-ink-650 bg-sidebar pt-[13px] pr-0 pb-[9px] pl-2">
+    <aside
+      className={cn(
+        'flex h-full min-h-0 flex-col border-r border-ink-650 bg-sidebar pt-[13px] pr-0 pb-[9px] pl-2',
+        className,
+      )}
+    >
       <div className="flex h-[38px] items-center gap-[7px] pr-2 pl-1.5">
         <img
           className="size-[25px] shrink-0 rounded-[7px] object-cover shadow-[0_0_0_1px_#ffffff1c]"
@@ -474,6 +483,16 @@ export function Sidebar({
             </i>
           )}
         </button>
+        {onClose && (
+          <button
+            className={cn(iconButton, 'md:hidden')}
+            title="Close sidebar"
+            aria-label="Close sidebar"
+            onClick={onClose}
+          >
+            <X size={18} />
+          </button>
+        )}
       </div>
       <button className={sideAction} onClick={onNewRun}>
         <Plus size={17} />

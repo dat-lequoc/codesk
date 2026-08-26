@@ -14,7 +14,7 @@ export function EnvironmentPopover({
   children: React.ReactNode
 }) {
   return (
-    <aside className="absolute top-[54px] right-3.5 z-10 w-[330px] rounded-xl border border-line-strong bg-ink-700 py-2 shadow-2xl shadow-black/50">
+    <aside className="absolute top-[54px] right-3 md:right-3.5 z-10 w-[calc(100%-24px)] max-w-[330px] rounded-xl border border-line-strong bg-ink-700 py-2 shadow-2xl shadow-black/50">
       <header className="flex h-8 items-center gap-2 pr-3 pl-3.5 text-xs text-muted">
         <span className="flex-1">{title}</span>
         <Button

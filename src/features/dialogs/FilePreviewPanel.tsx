@@ -1,6 +1,7 @@
 import { FileText, ImageIcon, RefreshCw, ShieldAlert, X } from 'lucide-react'
 
 import { Button } from '../../components/ui/button'
+import { middleTruncatePath } from '../../lib/format'
 import type { FilePreviewState } from '../../hooks/useFilePreview'
 
 /* Transparency checkerboard behind previewed images. */
@@ -19,7 +20,7 @@ export function FilePreviewPanel({
 }) {
   const isImage = Boolean(state.file?.data_url)
   return (
-    <aside className="absolute top-[45px] right-0 bottom-0 z-10 flex w-[var(--file-preview-width)] min-w-[380px] flex-col border-l border-line bg-sunken shadow-[-18px_0_45px_#0003]">
+    <aside className="absolute top-[45px] right-0 bottom-0 z-10 flex w-full md:w-[var(--file-preview-width)] max-w-full md:min-w-[380px] flex-col border-l border-line bg-sunken shadow-[-18px_0_45px_#0003]">
       <header className="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-line px-3 text-muted">
         {isImage ? (
           <ImageIcon size={15} className="shrink-0" />
@@ -34,7 +35,7 @@ export function FilePreviewPanel({
             className="mt-[3px] block truncate font-mono text-[9.5px] text-dim"
             title={state.file?.path || state.requestedPath}
           >
-            {state.file?.path || state.requestedPath}
+            {middleTruncatePath(state.file?.path || state.requestedPath, 45)}
           </small>
         </span>
         <Button

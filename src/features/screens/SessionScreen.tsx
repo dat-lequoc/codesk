@@ -25,6 +25,7 @@ import {
   threadComposerFilePreview,
   threadComposerMenuOpen,
   threadHeader,
+  threadHeaderTitle,
   threadScreen,
   threadScreenEnvOpen,
   threadScroll,
@@ -43,6 +44,7 @@ import {
   Info,
   Laptop,
   ListPlus,
+  PanelLeft,
   Plug,
   RefreshCw,
   Send,
@@ -127,6 +129,7 @@ export function SessionScreen({
   provider,
   onStarted,
   onError,
+  onToggleSidebar,
 }: {
   session: ProviderSession
   messages: SessionMessage[]
@@ -142,6 +145,7 @@ export function SessionScreen({
   provider?: Provider
   onStarted: (run: Run) => void
   onError: (message: string) => void
+  onToggleSidebar?: () => void
 }) {
   const [showEnvironment, setShowEnvironment] = useState(false)
   const [cleanView, setCleanView] = useState(() => session.provider === 'dsh')
@@ -467,8 +471,19 @@ export function SessionScreen({
     <FilePreviewContext.Provider value={openFile}>
       <div className={cn(threadScreen, showEnvironment && threadScreenEnvOpen)}>
         <header className={threadHeader}>
+          {onToggleSidebar && (
+            <button
+              type="button"
+              className="md:hidden grid size-8 shrink-0 place-items-center rounded-md text-muted hover:text-fg hover:bg-ink-700 -ml-1 mr-0.5"
+              title="Toggle sidebar"
+              aria-label="Toggle sidebar"
+              onClick={onToggleSidebar}
+            >
+              <PanelLeft size={18} />
+            </button>
+          )}
           <ProviderIcon provider={session.provider} />
-          <strong>{session.title}</strong>
+          <strong className={threadHeaderTitle}>{session.title}</strong>
           {session.status === 'running' && (
             <span className={observedBadge}>
               <Spinner />
@@ -493,7 +508,9 @@ export function SessionScreen({
             aria-label="Toggle clean conversation view"
           >
             <Sparkles size={13} className={cleanView ? 'text-azure-400' : 'text-muted'} />
-            <span className="text-[11px]">{cleanView ? 'Clean View' : 'Classic View'}</span>
+            <span className="text-[11px] hidden sm:inline">
+              {cleanView ? 'Clean View' : 'Classic View'}
+            </span>
           </button>
           <button className={headerButton} title="Thread actions" aria-label="Thread actions">
             <MoreHorizontal size={18} />
@@ -926,7 +943,14 @@ export function SessionScreen({
                 disabled={!message.trim() || busy}
                 title={canQueue ? 'Steer now (Tab queues instead)' : 'Continue conversation'}
               >
-                {busy ? <RefreshCw className="animate-spin" size={15} /> : <Send size={17} />}
+                {busy ? (
+                  <RefreshCw className="animate-spin" size={15} />
+                ) : (
+                  <Send
+                    size={15}
+                    className={cn(!canResume && 'translate-y-px -translate-x-0.5')}
+                  />
+                )}
                 {canResume ? 'Resume' : null}
               </button>
             </ComposerFooter>

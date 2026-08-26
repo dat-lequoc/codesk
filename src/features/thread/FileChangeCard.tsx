@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { api } from '../../api'
 import { cn } from '../../lib/cn'
 import { changePath, diffCounts } from '../../lib/activity'
+import { middleTruncatePath } from '../../lib/format'
 import type { FileChange } from '../../lib/activity'
 import type { Run } from '../../types'
 import {
@@ -90,7 +91,7 @@ export function FileChangeCard({
             return (
               <div className={fileChangeRow} key={`${change.path || 'file'}:${index}`}>
                 <code className={fileChangePath} title={change.path}>
-                  {change.path || 'Unknown file'}
+                  {middleTruncatePath(change.path) || 'Unknown file'}
                 </code>
                 <small className={fileChangeCounts}>
                   {counts.additions > 0 && <b className={addCount}>+{counts.additions}</b>}
