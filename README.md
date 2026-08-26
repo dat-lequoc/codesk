@@ -11,6 +11,29 @@ Codesk is a desktop app for running, monitoring, inspecting, and steering coding
 ## Platform support
 
 <details open>
+<summary><strong>Web UI mode (Linux, VPS, Tailscale, macOS)</strong></summary>
+
+Run the Web UI mode directly from your server, VPS, or local machine:
+
+```bash
+git clone https://github.com/dat-lequoc/codesk.git
+cd codesk
+npm install
+npm run build
+npm run start:web
+```
+
+Or run via the CLI binary:
+
+```bash
+codesk web
+```
+
+Then open `http://127.0.0.1:4000` (or access via your Tailscale IP/domain).
+
+</details>
+
+<details>
 <summary><strong>macOS — desktop app</strong></summary>
 
 Build and run the desktop app from source:
@@ -26,7 +49,7 @@ open target/debug/bundle/macos/Codesk.app
 </details>
 
 <details>
-<summary><strong>Linux — execution host</strong></summary>
+<summary><strong>Linux — execution host daemon</strong></summary>
 
 Linux is supported as a local or remote execution host. Build and install the daemon as a user service:
 
@@ -37,7 +60,7 @@ cargo build --release -p codeskd
 ./target/release/codeskd install 4243
 ```
 
-The desktop client connects to the daemon over SSH. A Linux desktop bundle is not published yet.
+The desktop client or Web gateway connects to the daemon locally or over SSH.
 
 </details>
 
@@ -58,6 +81,9 @@ Codex has first-class support through its app server: persistent sessions, live 
 
 - **Monitor every harness in one place.** Follow running, idle, and historical sessions without switching terminals.
 - **View agent trajectories.** Inspect reasoning, commands, tool calls, file changes, results, usage, and raw provider events in chronological order.
+- **Clean conversation view.** Compact, collapsible cards for runtime context injections, produced files, tool/bash outputs, structured task checklists (`todo_write`), and ongoing goals.
+- **Instant tail-paged history.** Opens massive session logs in milliseconds with smooth pagination for earlier history and a floating scroll-to-bottom action.
+- **Attachments & media.** Add images and text files directly via the `+` button, drag-and-drop, or clipboard paste.
 - **Interact while agents work.** Start or resume sessions, steer an active turn, queue the next instruction, respond to requests, and interrupt or terminate runs.
 - **Work over SSH.** Remote projects execute on their own host through `codeskd`; Codesk connects through an automatically recreated SSH tunnel, so tools and files stay close to the project.
 - **Keep work isolated.** Run in the current checkout or use managed Git worktrees that can be inspected and cleaned up from the app.

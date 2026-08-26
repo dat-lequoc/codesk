@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::{
-    MAX_MESSAGES, MAX_TRANSCRIPT_BYTES, cwd_matches, home_dir, latest_rfc3339,
+    MAX_MESSAGES, cwd_matches, home_dir,
     meaningful_user_text, modified_rfc3339, sort_recent, string, truncate_title,
     unix_millis_rfc3339,
 };
@@ -18,7 +18,8 @@ use crate::model::{Project, ProviderSession, SessionMessage};
 pub(crate) fn index_dsh(project: &Project, limit: usize) -> Result<Vec<ProviderSession>> {
     let mut files = dsh_project_session_files(&home_dir(), &project.path)?;
     sort_recent(&mut files);
-    files.truncate(limit);
+    let scan_limit = (limit * 3).max(100);
+    files.truncate(scan_limit);
     let mut result = files
         .into_iter()
         .filter_map(|path| index_dsh_file(project, &path).transpose())
@@ -69,10 +70,21 @@ pub(super) fn dsh_session_files(home: &Path) -> Result<Vec<PathBuf>> {
 
 fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSession>> {
     let metadata = fs::metadata(path)?;
-    let values = dsh_values(path, MAX_TRANSCRIPT_BYTES)?;
-    let Some(header) = values.iter().find(|value| value["type"] == "session") else {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let decoder = zstd::stream::read::Decoder::new(file)
+        .with_context(|| format!("decompress {}", path.display()))?;
+    let mut reader = BufReader::new(decoder);
+    let mut first_line = String::new();
+    if reader.read_line(&mut first_line)? == 0 {
         return Ok(None);
+    }
+    let header: Value = match serde_json::from_str(&first_line) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
     };
+    if header["type"] != "session" {
+        return Ok(None);
+    }
     let cwd = string(&header["cwd"]).unwrap_or_default();
     if cwd.is_empty() || !cwd_matches(&cwd, &project.path) {
         return Ok(None);
@@ -88,40 +100,89 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
     if native_id.is_empty() {
         return Ok(None);
     }
-    let mut title = String::new();
+    let mut user_title = None::<String>;
+    let mut provider_title = None::<String>;
+    let mut fallback_title = None::<String>;
     let mut first_prompt = String::new();
-    let mut latest_time = None::<i64>;
-    for value in &values {
-        if let Some(time) = value.get("time").and_then(Value::as_i64) {
-            latest_time = Some(latest_time.map_or(time, |current| current.max(time)));
-        }
-        if value["type"] == "session/title" {
-            if let Some(value) = string(&value["data"]["title"]) {
-                title = value;
+    let mut line = String::new();
+    let mut lines_checked = 0;
+    while lines_checked < 5000 && reader.read_line(&mut line)? > 0 {
+        lines_checked += 1;
+        if line.contains("\"session/title\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value["type"] == "session/title" {
+                    if let Some(t) = string(&value["data"]["title"]).filter(|s| !s.trim().is_empty()) {
+                        let kind = value["data"]["source"]["kind"].as_str().unwrap_or_default();
+                        match kind {
+                            "user" => {
+                                user_title = Some(t);
+                                break;
+                            }
+                            "provider" => {
+                                provider_title = Some(t);
+                            }
+                            _ => {
+                                if fallback_title.is_none() {
+                                    fallback_title = Some(t);
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        } else if first_prompt.is_empty()
-            && value["type"] == "user/message"
-            && value["data"]["source"]["kind"] == "user"
-        {
-            first_prompt = meaningful_user_text(dsh_content_text(&value["data"]["content"]));
+        } else if first_prompt.is_empty() && line.contains("\"user/message\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value["type"] == "user/message" {
+                    let content_text = dsh_content_text(&value["data"]["content"]);
+                    let meaningful = meaningful_user_text(content_text.clone());
+                    if !meaningful.is_empty() {
+                        first_prompt = meaningful;
+                    } else if !content_text.is_empty() {
+                        first_prompt = content_text;
+                    }
+                }
+            }
+        } else if first_prompt.is_empty() && line.contains("\"goal/change\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if let Some(obj) = string(&value["data"]["goal"]["objective"]) {
+                    first_prompt = obj;
+                }
+            }
+        } else if first_prompt.is_empty() && line.contains("\"command/run\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value["data"]["name"] == "goal" {
+                    if let Some(args) = string(&value["data"]["args"]) {
+                        first_prompt = args;
+                    }
+                }
+            }
         }
+        line.clear();
     }
+    let mut title = user_title
+        .or(provider_title)
+        .or(fallback_title)
+        .unwrap_or(first_prompt);
     if title.trim().is_empty() {
-        title = first_prompt;
+        title = native_id.clone();
     }
     title = truncate_title(&title);
     if title.is_empty() {
-        return Ok(None);
+        title = native_id.clone();
     }
     let modified_at = modified_rfc3339(&metadata);
     let created_at = header["createdAt"]
         .as_i64()
         .map(unix_millis_rfc3339)
         .unwrap_or_else(|| modified_at.clone());
-    let updated_at = latest_time
-        .map(unix_millis_rfc3339)
-        .map(|value| latest_rfc3339(&modified_at, &value))
-        .unwrap_or(modified_at);
+    let updated_at = modified_at;
+    let is_recent = metadata
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|elapsed| elapsed <= std::time::Duration::from_secs(60));
+    let is_active = is_recent && dsh_turn_active(path);
+    let status = if is_active { "running" } else { "idle" };
     Ok(Some(ProviderSession {
         id: format!("dsh:{native_id}"),
         provider: "dsh".to_string(),
@@ -131,7 +192,7 @@ fn index_dsh_file(project: &Project, path: &Path) -> Result<Option<ProviderSessi
         title,
         created_at,
         updated_at,
-        status: "idle".to_string(),
+        status: status.to_string(),
         pid: None,
         managed_run_id: None,
         model: None,
@@ -166,6 +227,9 @@ fn dsh_fold_turn_active(path: &Path) -> Result<bool> {
     let reader = BufReader::new(decoder);
     let mut active = false;
     for line in reader.lines().map_while(Result::ok) {
+        if !line.contains("\"turn/") {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -178,41 +242,76 @@ fn dsh_fold_turn_active(path: &Path) -> Result<bool> {
     Ok(active)
 }
 
-pub(super) fn dsh_values(path: &Path, max_bytes: u64) -> Result<Vec<Value>> {
+pub(super) fn parse_dsh_messages(
+    path: &Path,
+    after: Option<&str>,
+    before: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionMessage>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let decoder = zstd::stream::read::Decoder::new(file)
         .with_context(|| format!("decompress {}", path.display()))?;
-    let reader = BufReader::new(decoder.take(max_bytes));
-    Ok(reader
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
-        .collect())
-}
-
-pub(super) fn parse_dsh_messages(path: &Path, after: Option<&str>) -> Result<Vec<SessionMessage>> {
-    let values = dsh_values(path, MAX_TRANSCRIPT_BYTES)?;
+    let reader = BufReader::new(decoder);
     let mut messages = Vec::new();
     let mut turn_started = HashMap::<u64, i64>::new();
-    for value in values {
+
+    for line in reader.lines().map_while(Result::ok) {
+        // Fast skip of lines that are not messages/turns/tools
+        if !line.contains("\"user/message\"")
+            && !line.contains("\"assistant/message\"")
+            && !line.contains("\"tool/call\"")
+            && !line.contains("\"tool/result\"")
+            && !line.contains("\"turn/start\"")
+            && !line.contains("\"turn/end\"")
+        {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let event_type = value["type"].as_str().unwrap_or_default();
         let seq = value["seq"].as_u64().unwrap_or_default();
         let time = value["time"].as_i64().unwrap_or_default();
         let timestamp = (time > 0)
             .then(|| unix_millis_rfc3339(time))
             .unwrap_or_default();
-        let include = |timestamp: &str| after.is_none_or(|cursor| timestamp >= cursor);
+        let include = |ts: &str| {
+            if let Some(cursor) = after {
+                if ts < cursor {
+                    return false;
+                }
+            }
+            if let Some(cursor) = before {
+                if ts >= cursor {
+                    return false;
+                }
+            }
+            true
+        };
         match event_type {
-            "user/message" if value["data"]["source"]["kind"] == "user" => {
-                let text = meaningful_user_text(dsh_content_text(&value["data"]["content"]));
-                if !text.is_empty() && include(&timestamp) {
+            "user/message" => {
+                let source_kind = value["data"]["source"]["kind"].as_str().unwrap_or_default();
+                let text = dsh_content_text(&value["data"]["content"]);
+                let is_context_injection = source_kind != "user"
+                    || text.starts_with("Current runtime context")
+                    || text.starts_with("The approval policy changed")
+                    || text.starts_with("Additional instructions from:");
+                if (!text.trim().is_empty() || is_context_injection) && include(&timestamp) {
                     messages.push(SessionMessage {
                         id: format!("dsh-{seq}"),
                         timestamp,
                         role: "user".to_string(),
                         text,
                         kind: "message".to_string(),
-                        meta: None,
+                        meta: if is_context_injection {
+                            Some(json!({
+                                "is_context_injection": true,
+                                "source": value["data"]["source"],
+                                "form": value["data"]["source"]["form"],
+                            }))
+                        } else {
+                            None
+                        },
                         duration_ms: None,
                     });
                 }
@@ -249,38 +348,66 @@ pub(super) fn parse_dsh_messages(path: &Path, after: Option<&str>) -> Result<Vec
             "tool/call" => {
                 let name = string(&value["data"]["name"]).unwrap_or_else(|| "tool".to_string());
                 let arguments = string(&value["data"]["arguments"]).unwrap_or_default();
+                let call_id = string(&value["data"]["callId"])
+                    .unwrap_or_else(|| format!("dsh-tool-{seq}"));
                 let path = dsh_tool_path(&arguments);
                 let file_change = dsh_file_tool(&name) && path.is_some();
+                let args_json = serde_json::from_str::<Value>(&arguments).ok();
+                let todos = if name == "todo_write" || name == "todos" {
+                    args_json.as_ref().and_then(|v| v.get("todos").cloned())
+                } else {
+                    None
+                };
+                let goal = if name == "create_goal" || name == "update_goal" {
+                    args_json.as_ref().cloned()
+                } else {
+                    None
+                };
+                let command = if name == "bash" {
+                    args_json
+                        .as_ref()
+                        .and_then(|v| v.get("command").and_then(Value::as_str))
+                        .map(str::to_string)
+                } else {
+                    None
+                };
+
                 if include(&timestamp) {
+                    let mut meta_obj = serde_json::Map::new();
+                    meta_obj.insert("call_id".into(), json!(call_id));
+                    meta_obj.insert("tool".into(), json!(name));
+                    meta_obj.insert("display".into(), json!(format!("Used {name}")));
+                    meta_obj.insert("command".into(), json!(arguments));
+                    meta_obj.insert("status".into(), json!("completed"));
+                    if let Some(todos_val) = todos {
+                        meta_obj.insert("todos".into(), todos_val);
+                    }
+                    if let Some(goal_val) = goal {
+                        meta_obj.insert("goal".into(), goal_val);
+                    }
+                    if let Some(cmd_val) = command {
+                        meta_obj.insert("bash_command".into(), json!(cmd_val));
+                    }
+                    if file_change {
+                        meta_obj.insert("changes".into(), json!([{"path": path, "kind": "edit"}]));
+                    }
+
                     messages.push(SessionMessage {
-                        id: string(&value["data"]["callId"])
-                            .unwrap_or_else(|| format!("dsh-tool-{seq}")),
+                        id: call_id,
                         timestamp,
                         role: "assistant".to_string(),
                         text: String::new(),
                         kind: if file_change { "file_change" } else { "tool" }.to_string(),
-                        meta: Some(if file_change {
-                            json!({
-                                "tool":name,
-                                "display":format!("Used {name}"),
-                                "command":arguments,
-                                "status":"completed",
-                                "changes":[{"path":path,"kind":"edit"}],
-                            })
-                        } else {
-                            json!({
-                                "tool":name,
-                                "display":format!("Used {name}"),
-                                "command":arguments,
-                                "status":"completed",
-                            })
-                        }),
+                        meta: Some(Value::Object(meta_obj)),
                         duration_ms: None,
                     });
                 }
             }
             "tool/result" => {
                 let text = dsh_tool_result_text(&value["data"]);
+                let call_id = string(&value["data"]["message"]["source"]["callId"])
+                    .or_else(|| string(&value["data"]["callId"]));
+                let is_error = value["data"]["message"]["content"][0]["isError"] == true;
                 if include(&timestamp) {
                     messages.push(SessionMessage {
                         id: format!("dsh-tool-result-{seq}"),
@@ -289,9 +416,10 @@ pub(super) fn parse_dsh_messages(path: &Path, after: Option<&str>) -> Result<Vec
                         text: text.clone(),
                         kind: "tool_output".to_string(),
                         meta: Some(json!({
-                            "tool":"DSH tool result",
-                            "output":text,
-                            "status":if value["data"]["message"]["content"][0]["isError"] == true { "failed" } else { "completed" },
+                            "call_id": call_id,
+                            "tool": "DSH tool result",
+                            "output": text,
+                            "status": if is_error { "failed" } else { "completed" },
                         })),
                         duration_ms: None,
                     });
@@ -323,6 +451,16 @@ pub(super) fn parse_dsh_messages(path: &Path, after: Option<&str>) -> Result<Vec
         }
         if messages.len() >= MAX_MESSAGES {
             break;
+        }
+    }
+    if let Some(page_limit) = limit {
+        if messages.len() > page_limit {
+            if after.is_some() && before.is_none() {
+                messages.truncate(page_limit);
+            } else {
+                let start = messages.len().saturating_sub(page_limit);
+                return Ok(messages.split_off(start));
+            }
         }
     }
     Ok(messages)
@@ -386,7 +524,7 @@ mod tests {
         let values = [
             json!({"type":"session","version":0,"id":session_id,"createdAt":1786840000000_i64,"cwd":project_path}),
             json!({"type":"turn/start","seq":1,"time":1786840000100_i64,"data":{"turn":1}}),
-            json!({"type":"user/message","seq":2,"time":1786840000200_i64,"data":{"content":[{"type":"text","text":"Inspect package.json"}],"source":{"kind":"user","rpcId":"prompt-1"},"role":"user","id":"user-1"}}),
+            json!({"type":"user/message","seq":2,"time":1786840000200_i64,"data":{"content":[{"type":"text","text":"# Review PR\nInspect /home/ubuntu/package.json\nLine 3"}],"source":{"kind":"user","rpcId":"prompt-1"},"role":"user","id":"user-1"}}),
             json!({"type":"session/title","seq":3,"time":1786840000300_i64,"data":{"title":"Inspect the package"}}),
             json!({"type":"tool/call","seq":4,"time":1786840000400_i64,"data":{"turn":1,"step":1,"callId":"call-1","name":"read","arguments":"{\"file_path\":\"package.json\"}"}}),
             json!({"type":"tool/result","seq":5,"time":1786840000500_i64,"data":{"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":"call-1"},"content":[{"type":"tool-result","toolCallId":"call-1","content":[{"type":"text","text":"codesk"}],"isError":false}],"role":"user","id":"result-1"}}}),
@@ -409,8 +547,12 @@ mod tests {
             source_path_from_home(&home, &project, "dsh", session_id).unwrap(),
             path
         );
-        let messages = parse_messages(&path, "dsh", None).unwrap();
+        let messages = parse_messages(&path, "dsh", None, None, None).unwrap();
         assert_eq!(messages[0].role, "user");
+        assert_eq!(
+            messages[0].text,
+            "# Review PR\nInspect /home/ubuntu/package.json\nLine 3"
+        );
         assert!(messages.iter().any(|message| message.kind == "tool"));
         assert!(messages.iter().any(|message| message.kind == "tool_output"));
         assert!(

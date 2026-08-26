@@ -50,6 +50,8 @@ import { ProviderIcon } from '../../components/ProviderIcon'
 import type { ProviderSession, Run, RunEvent, SessionMessage } from '../../types'
 import { FileChangeCard } from './FileChangeCard'
 import { ConversationMessage, MarkdownContent } from './Markdown'
+import { ContextInjectionCard } from './CleanDshConversation'
+import { isContextInjectionMessage } from '../../lib/clean-dsh'
 export function HistoricalOperationalEvent({
   message,
   session,
@@ -436,6 +438,7 @@ function InputRequestCard({
 export const ThreadEvent = memo(function ThreadEvent({
   event,
   run,
+  cleanView = false,
   durationMs,
   resolved,
   canRewind,
@@ -443,6 +446,7 @@ export const ThreadEvent = memo(function ThreadEvent({
 }: {
   event: RunEvent
   run: Run
+  cleanView?: boolean
   durationMs?: number
   resolved: boolean
   canRewind: boolean
@@ -583,7 +587,22 @@ export const ThreadEvent = memo(function ThreadEvent({
     return (
       <InputRequestCard event={event} run={run} rpcId={rpcId} resolved={resolved} text={text} />
     )
-  if (event.kind === 'user.message')
+  if (event.kind === 'user.message') {
+    if (
+      cleanView &&
+      isContextInjectionMessage({
+        id: event.event_id,
+        text,
+        role: 'user',
+        timestamp: event.timestamp,
+      })
+    ) {
+      return (
+        <ContextInjectionCard
+          message={{ id: event.event_id, text, role: 'user', timestamp: event.timestamp }}
+        />
+      )
+    }
     return (
       <ConversationMessage author="user" text={text} className={rewindable}>
         {canRewind && typeof event.payload.turn_id === 'string' && (
@@ -598,6 +617,7 @@ export const ThreadEvent = memo(function ThreadEvent({
         )}
       </ConversationMessage>
     )
+  }
   if (event.kind === 'turn.started') return null
   if (event.kind === 'turn.completed')
     return (

@@ -22,6 +22,11 @@ export const RunRow = memo(function RunRow({
   onSelect: (run: Run) => void
   onArchive: (run: Run) => void
 }) {
+  const isWorking =
+    run.status === 'running' || run.status === 'starting' || run.status === 'interrupting'
+  const isWaiting = run.status === 'waiting_for_input'
+  const isActive = active.has(run.status)
+
   return (
     <div className="group relative flex min-h-7 min-w-0">
       <button
@@ -30,9 +35,22 @@ export const RunRow = memo(function RunRow({
         onClick={() => onSelect(run)}
       >
         <span
-          className={cn(recentStatus, active.has(run.status) ? 'text-grass-400' : 'text-muted')}
+          className={cn(
+            recentStatus,
+            isWorking && 'text-grass-400',
+            isWaiting && 'text-azure-400',
+            !isActive && 'text-muted',
+          )}
         >
-          {active.has(run.status) ? <Spinner /> : <Circle size={7} fill="currentColor" />}
+          {isWorking ? (
+            <Spinner />
+          ) : (
+            <Circle
+              size={7}
+              fill="currentColor"
+              className={isWaiting ? 'animate-pulse' : undefined}
+            />
+          )}
         </span>
         <span className={rowTitle}>
           <SidebarHarness provider={run.provider} />

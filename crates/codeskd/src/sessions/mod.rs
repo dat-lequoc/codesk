@@ -36,7 +36,7 @@ use agy::{agy_transcript_path, agy_workspace_paths, parse_agy_messages};
 use claude::{claude_project_directories, claude_user_text};
 use codex::{codex_rollout_matches_project, codex_rollout_path, parse_codex_history_event};
 use dsh::{
-    dsh_project_directory, dsh_session_files, dsh_turn_active, dsh_values, parse_dsh_messages,
+    dsh_project_directory, dsh_session_files, dsh_turn_active, parse_dsh_messages,
 };
 
 const MAX_SESSIONS_PER_PROVIDER: usize = 50;
@@ -78,16 +78,21 @@ pub async fn messages(
     provider: &str,
     native_session_id: &str,
     after: Option<&str>,
+    before: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<SessionMessage>> {
     let project = project.clone();
     let provider = provider.to_string();
     let native_session_id = native_session_id.to_string();
     let after = after.map(str::to_string);
+    let before = before.map(str::to_string);
     tokio::task::spawn_blocking(move || {
         providers::require(&provider)?.session_messages(
             &project,
             &native_session_id,
             after.as_deref(),
+            before.as_deref(),
+            limit,
         )
     })
     .await?
@@ -163,6 +168,20 @@ fn list_sync(
                 .is_some_and(|adapter| adapter.transcript_turn_active(path))
         }) {
             session.status = "running".to_string();
+        }
+    }
+    for session in result.iter_mut() {
+        if session.status != "running" {
+            if let Ok(path) = source_path(project, &session.provider, &session.native_session_id) {
+                let is_recent = fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|m| m.elapsed().ok())
+                    .is_some_and(|elapsed| elapsed <= std::time::Duration::from_secs(60));
+                if is_recent && transcript_turn_active(&path, &session.provider) {
+                    session.status = "running".to_string();
+                }
+            }
         }
     }
     result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -701,9 +720,11 @@ pub(crate) fn file_messages_for_project(
     provider: &str,
     native_id: &str,
     after: Option<&str>,
+    before: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<SessionMessage>> {
     let path = source_path(project, provider, native_id)?;
-    parse_messages(&path, provider, after)
+    parse_messages(&path, provider, after, before, limit)
 }
 
 fn source_path_from_home(
@@ -786,11 +807,10 @@ fn source_path_from_home(
         let direct = dsh_project_directory(home, &project.path)
             .join(native_id)
             .join("session.jsonl.zstd");
-        let candidates = if direct.is_file() {
-            vec![direct]
-        } else {
-            dsh_session_files(home)?
-        };
+        if direct.is_file() {
+            return Ok(direct);
+        }
+        let candidates = dsh_session_files(home)?;
         for path in candidates {
             if path
                 .parent()
@@ -798,13 +818,7 @@ fn source_path_from_home(
                 .and_then(|value| value.to_str())
                 == Some(native_id)
             {
-                let values = dsh_values(&path, MAX_INDEX_BYTES)?;
-                if values.iter().any(|value| {
-                    value["type"] == "session"
-                        && string(&value["cwd"]).is_some_and(|cwd| cwd_matches(&cwd, &project.path))
-                }) {
-                    return Ok(path);
-                }
+                return Ok(path);
             }
         }
         anyhow::bail!("provider session file not found")
@@ -830,9 +844,15 @@ fn source_path_from_home(
     anyhow::bail!("provider session file not found")
 }
 
-fn parse_messages(path: &Path, provider: &str, after: Option<&str>) -> Result<Vec<SessionMessage>> {
+fn parse_messages(
+    path: &Path,
+    provider: &str,
+    after: Option<&str>,
+    before: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<SessionMessage>> {
     if provider == "dsh" {
-        return parse_dsh_messages(path, after);
+        return parse_dsh_messages(path, after, before, limit);
     }
     if provider == "agy" {
         return parse_agy_messages(path, after);
@@ -1331,12 +1351,12 @@ mod tests {
         });
         fs::write(&path, format!("{old}\n{padding}\n{newest}\n")).unwrap();
 
-        let messages = parse_messages(&path, "pi", None).unwrap();
+        let messages = parse_messages(&path, "pi", None, None, None).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, "newest");
         assert_eq!(messages[0].text, "Newest answer");
 
-        let messages = parse_messages(&path, "pi", Some("2026-08-13T20:30:00Z")).unwrap();
+        let messages = parse_messages(&path, "pi", Some("2026-08-13T20:30:00Z"), None, None).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, "newest");
         fs::remove_dir_all(root).unwrap();

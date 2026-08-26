@@ -12,7 +12,7 @@ import {
 import type { ActivityEntry, ActivityLedgerItem } from '../../lib/activity'
 import type { RunEvent, SessionMessage } from '../../types'
 import { MarkdownContent } from '../thread/Markdown'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 const tabButton =
   'h-8 border-b-2 border-transparent px-2 text-[10.5px] text-muted hover:text-fg-soft'
 const tabActive = 'border-azure-400 text-fg'
@@ -254,11 +254,6 @@ export function HistoricalActivityGroup({
   selectedId: string | null
   onSelect: (entry: ActivityEntry) => void
 }) {
-  return (
-    <ActivityLedger
-      items={historicalActivityItems(messages)}
-      selectedId={selectedId}
-      onSelect={onSelect}
-    />
-  )
+  const items = useMemo(() => historicalActivityItems(messages), [messages])
+  return <ActivityLedger items={items} selectedId={selectedId} onSelect={onSelect} />
 }

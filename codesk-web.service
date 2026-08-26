@@ -1,0 +1,17 @@
+[Unit]
+Description=Codesk Web Interface
+After=network.target codeskd.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/codesk
+Environment="CODESK_WEB_MODE=1"
+Environment="HOST=0.0.0.0"
+Environment="PORT=4000"
+# Adjust the Node.js path if needed
+ExecStart=/usr/bin/npm run start:web
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

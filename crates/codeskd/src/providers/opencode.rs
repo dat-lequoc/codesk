@@ -116,6 +116,8 @@ impl ProviderAdapter for OpenCode {
         project: &Project,
         native_session_id: &str,
         after: Option<&str>,
+        _before: Option<&str>,
+        _limit: Option<usize>,
     ) -> Result<Vec<SessionMessage>> {
         sessions::opencode_messages_for_project(project, native_session_id, after)
     }

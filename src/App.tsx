@@ -170,7 +170,7 @@ export function App() {
     notifyRunEvent,
     reload,
   })
-  const { sessionMessages } = useSessionMessagesPoller({
+  const { sessionMessages, hasEarlier, loadingEarlier, loadEarlier } = useSessionMessagesPoller({
     selectedSessionKey,
     sessionHostId,
     sessionProjectId,
@@ -548,6 +548,9 @@ export function App() {
             session={session}
             messages={sessionMessages[selectedSessionKey!] || []}
             messagesLoaded={Boolean(sessionMessages[selectedSessionKey!])}
+            hasEarlier={hasEarlier}
+            loadingEarlier={loadingEarlier}
+            onLoadEarlier={loadEarlier}
             runEvents={session.managedRunId ? events[session.managedRunId] || [] : []}
             project={project}
             host={host}

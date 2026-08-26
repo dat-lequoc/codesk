@@ -19,7 +19,7 @@ import {
 } from './screen-styles'
 import type { KeyboardEvent } from 'react'
 import { MoreHorizontal } from 'lucide-react'
-import { ListPlus, Plus, RefreshCw, ScrollText, Send, Terminal } from 'lucide-react'
+import { ListPlus, RefreshCw, ScrollText, Send, Terminal } from 'lucide-react'
 import { api } from '../../api'
 import { useLatest } from '../../hooks/useLatest'
 import { useExternalQueuePoller } from '../../hooks/useExternalQueuePoller'
@@ -37,8 +37,15 @@ import type {
   Provider,
   Run,
 } from '../../types'
-import { ComposerFooter, ComposerFrame, ComposerInput } from '../composer/Composer'
+import {
+  AttachmentButton,
+  ComposerAttachmentsList,
+  ComposerFooter,
+  ComposerFrame,
+  ComposerInput,
+} from '../composer/Composer'
 import { ModelMenu } from '../composer/ModelMenu'
+import { formatPromptWithAttachments, type ComposerAttachment } from '../../lib/attachments'
 import { TmuxDetails } from '../environment/Environment'
 import { useEffect, useRef, useState } from 'react'
 export function ObservedScreen({
@@ -60,6 +67,7 @@ export function ObservedScreen({
     `agent:${host?.id || 'unknown'}:${agent.id}`,
   )
   const { recall, remember } = usePromptRecall(setMessage)
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState(false)
   const [moving, setMoving] = useState(false)
@@ -114,7 +122,7 @@ export function ObservedScreen({
     if (element) element.scrollTop = element.scrollHeight
   }, [log])
   const submit = async (delivery: 'steer' | 'queue' = 'steer') => {
-    const prompt = message.trim()
+    const prompt = formatPromptWithAttachments(message.trim(), attachments)
     if (!prompt || busy || host?.status !== 'online' || !canContinue) return
     if (delivery === 'queue' && !canQueue) return
     remember(prompt)
@@ -134,6 +142,7 @@ export function ObservedScreen({
           result.queued!,
         ])
       setMessage('')
+      setAttachments([])
       if (result.run) onStarted(result.run)
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause))
@@ -311,6 +320,7 @@ export function ObservedScreen({
             event.preventDefault()
             void submit()
           }}
+          onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
         >
           {queued.length > 0 && (
             <div className={queuePanel}>
@@ -340,18 +350,20 @@ export function ObservedScreen({
             value={message}
             onChange={(event) => setMessage(event.target.value)}
             onKeyDown={keyDown}
+            onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
             placeholder={
               canQueue ? 'Steer this session · Tab queues after this turn' : 'Steer this session'
             }
           />
+          <ComposerAttachmentsList
+            attachments={attachments}
+            onRemove={(id) => setAttachments((prev) => prev.filter((a) => a.id !== id))}
+          />
           <ComposerFooter className={composerBar}>
-            <button
-              type="button"
-              className="grid shrink-0 place-items-center text-muted hover:text-fg"
-              aria-label="Add attachment"
-            >
-              <Plus size={18} />
-            </button>
+            <AttachmentButton
+              onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
+              disabled={busy || host?.status !== 'online'}
+            />
             <span className={deliveryMode}>
               <Send size={13} />
               Enter · Steer

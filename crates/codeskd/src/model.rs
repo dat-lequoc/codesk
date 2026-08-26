@@ -360,6 +360,8 @@ pub struct SessionsQuery {
 #[derive(Debug, Deserialize)]
 pub struct MessagesQuery {
     pub after: Option<String>,
+    pub before: Option<String>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

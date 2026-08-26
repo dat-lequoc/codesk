@@ -1,29 +1,66 @@
-import { ChevronDown, ChevronUp, Terminal } from 'lucide-react'
+import { ChevronDown, ChevronUp, FileText, Plus, Terminal, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import type { FormEvent } from 'react'
 
 import { Textarea } from '../../components/ui/input'
 import { cn } from '../../lib/cn'
+import {
+  formatFileSize,
+  processAttachmentFiles,
+  type ComposerAttachment,
+} from '../../lib/attachments'
 import type { SlashSuggestion } from '../../lib/kiro'
 
 export function ComposerFrame({
   className,
   onSubmit,
+  onAttach,
   children,
 }: {
   className?: string
   onSubmit: (event: FormEvent) => void
+  onAttach?: (attachments: ComposerAttachment[]) => void
   children: React.ReactNode
 }) {
+  const handleDrop = async (e: React.DragEvent) => {
+    if (!onAttach || !e.dataTransfer.files.length) return
+    e.preventDefault()
+    e.stopPropagation()
+    const loaded = await processAttachmentFiles(e.dataTransfer.files)
+    if (loaded.length) onAttach(loaded)
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (onAttach && e.dataTransfer.types.includes('Files')) {
+      e.preventDefault()
+    }
+  }
+
   return (
-    <form className={className} onSubmit={onSubmit}>
+    <form className={className} onSubmit={onSubmit} onDrop={handleDrop} onDragOver={handleDragOver}>
       {children}
     </form>
   )
 }
 
-export function ComposerInput(props: React.ComponentProps<'textarea'>) {
-  return <Textarea {...props} />
+export function ComposerInput({
+  onAttach,
+  onPaste,
+  ...props
+}: React.ComponentProps<'textarea'> & {
+  onAttach?: (attachments: ComposerAttachment[]) => void
+}) {
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (onAttach && e.clipboardData.files.length > 0) {
+      e.preventDefault()
+      const loaded = await processAttachmentFiles(e.clipboardData.files)
+      if (loaded.length) onAttach(loaded)
+      return
+    }
+    onPaste?.(e)
+  }
+
+  return <Textarea {...props} onPaste={handlePaste} />
 }
 
 export function ComposerFooter({
@@ -34,6 +71,102 @@ export function ComposerFooter({
   children: React.ReactNode
 }) {
   return <div className={cn('flex h-11 items-center gap-2.5 px-3', className)}>{children}</div>
+}
+
+export function AttachmentButton({
+  onAttach,
+  disabled = false,
+  className,
+}: {
+  onAttach: (attachments: ComposerAttachment[]) => void
+  disabled?: boolean
+  className?: string
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || !files.length) return
+    const loaded = await processAttachmentFiles(files)
+    if (loaded.length) {
+      onAttach(loaded)
+    }
+    if (inputRef.current) {
+      inputRef.current.value = ''
+    }
+  }
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept="image/*,text/*,.pdf,.md,.txt,.json,.py,.ts,.js,.rs,.c,.cpp,.h,.css,.html,.yaml,.yml,.toml,.sh"
+        className="hidden"
+        onChange={(e) => void handleFiles(e.target.files)}
+      />
+      <button
+        type="button"
+        className={cn(
+          'grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-ink-650 hover:text-fg transition-colors cursor-pointer',
+          className,
+        )}
+        aria-label="Add attachment"
+        title="Add images or text files (or paste/drag into chat)"
+        disabled={disabled}
+        onClick={() => inputRef.current?.click()}
+      >
+        <Plus size={18} />
+      </button>
+    </>
+  )
+}
+
+export function ComposerAttachmentsList({
+  attachments,
+  onRemove,
+}: {
+  attachments: ComposerAttachment[]
+  onRemove: (id: string) => void
+}) {
+  if (!attachments.length) return null
+  return (
+    <div className="flex flex-wrap gap-2 px-3 pt-2 pb-1">
+      {attachments.map((att) => (
+        <div
+          key={att.id}
+          className="group flex items-center gap-2 rounded-lg border border-ink-650 bg-ink-800 py-1 pr-2 pl-1.5 text-xs text-fg shadow-xs transition-all hover:border-ink-500"
+        >
+          {att.dataUrl ? (
+            <img
+              src={att.dataUrl}
+              alt={att.name}
+              className="size-7 rounded object-cover border border-ink-700"
+            />
+          ) : (
+            <span className="grid size-7 place-items-center rounded bg-ink-700 text-muted">
+              <FileText size={14} />
+            </span>
+          )}
+          <div className="min-w-0 max-w-[140px]">
+            <p className="truncate font-medium text-[11px] leading-tight text-fg-soft">
+              {att.name}
+            </p>
+            <p className="text-[10px] text-muted">{formatFileSize(att.size)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onRemove(att.id)}
+            className="ml-0.5 grid size-4.5 place-items-center rounded text-muted opacity-60 hover:bg-ink-700 hover:text-fg hover:opacity-100 transition-opacity cursor-pointer"
+            title="Remove attachment"
+            aria-label={`Remove ${att.name}`}
+          >
+            <X size={12} />
+          </button>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 export function SlashCommandMenu({

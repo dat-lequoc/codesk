@@ -114,7 +114,7 @@ export function useAppStatePolling({
       } finally {
         loading = false
       }
-      if (!cancelled && !document.hidden) timer = window.setTimeout(poll, 15_000)
+      if (!cancelled && !document.hidden) timer = window.setTimeout(poll, 10_000)
     }
     const visibility = () => {
       clearTimeout(timer)

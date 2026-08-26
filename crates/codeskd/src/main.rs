@@ -398,7 +398,14 @@ async fn project_session_messages(
         .map_err(api_error)?
         .ok_or_else(|| api_error("project not found"))?;
     Ok(Json(
-        sessions::messages(&project, &provider, &session_id, query.after.as_deref())
+        sessions::messages(
+            &project,
+            &provider,
+            &session_id,
+            query.after.as_deref(),
+            query.before.as_deref(),
+            query.limit,
+        )
             .await
             .map_err(api_error)?,
     ))

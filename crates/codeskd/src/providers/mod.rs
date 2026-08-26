@@ -242,6 +242,8 @@ pub(crate) trait ProviderAdapter: Sync {
         _project: &Project,
         _native_session_id: &str,
         _after: Option<&str>,
+        _before: Option<&str>,
+        _limit: Option<usize>,
     ) -> Result<Vec<SessionMessage>> {
         anyhow::bail!("{} sessions are not indexed", self.descriptor().name)
     }

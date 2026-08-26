@@ -220,6 +220,10 @@ export type SessionMessage = {
     server?: string
     display?: string
     changes?: Array<{ path?: string; kind?: string; diff?: string }>
+    is_context_injection?: boolean
+    todos?: unknown
+    goal?: unknown
+    bash_command?: string
   }
   duration_ms?: number
 }
