@@ -25,14 +25,14 @@ try {
 }
 
 console.log(`Starting Codesk web mode on port ${port}...`)
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-const child = spawn(npm, ['run', 'start:web'], {
+const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+const child = spawn(pnpm, ['run', 'start:web'], {
   cwd: root,
   stdio: 'inherit',
   env: { ...process.env, PORT: String(port) },
 })
 child.on('error', (cause) => {
-  console.error(`Could not start ${npm}: ${cause.message}`)
+  console.error(`Could not start ${pnpm}: ${cause.message}`)
   process.exit(1)
 })
 child.on('exit', (code, signal) => process.exit(signal ? 1 : (code ?? 0)))

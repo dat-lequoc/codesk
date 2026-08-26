@@ -4,7 +4,7 @@
 // `codeskd` are owned by the desktop app, and quitting the app — gracefully or
 // by force-quit — must leave no Codesk process running. The negative case
 // matters just as much: with no owner declared, the daemon must keep running,
-// because `npm start`, `npm run dev`, the rest of this suite, and remote systemd
+// because `pnpm start`, `pnpm run dev`, the rest of this suite, and remote systemd
 // daemons all depend on that.
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
@@ -203,7 +203,7 @@ try {
   }
 
   // 5. A gateway started by hand belongs to the developer's terminal. Adopting it
-  //    would mean quitting the desktop app kills `npm run dev`.
+  //    would mean quitting the desktop app kills `pnpm run dev`.
   {
     const daemonPort = port()
     const gatewayPort = port() + 200
@@ -231,7 +231,7 @@ try {
     assert.equal(refused.status, 409, 'an unowned gateway accepted an owner')
     // The decisive case for the developer workflow: a desktop app quitting sends
     // its pid to /api/shutdown. A hand-started gateway must ignore it rather than
-    // taking `npm run dev` down with the app.
+    // taking `pnpm run dev` down with the app.
     const quit = await jsonRequest(gatewayBase, '/api/shutdown', { pid: owner.pid })
     assert.equal(quit.body.stopped, false, 'a desktop app quitting stopped an unowned dev gateway')
     await wait(1000)

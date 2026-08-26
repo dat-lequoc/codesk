@@ -52,14 +52,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: npm ci
-      - run: npm run desktop:build
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run desktop:build
       - run: |
           dmg=$(ls target/release/bundle/dmg/*.dmg)
           cp "$dmg" "Codesk-Darwin-${{ matrix.arch }}.dmg"

@@ -61,10 +61,10 @@ Treat memory as a trend rather than a hard gate because WebKit varies with windo
 Run from the repository root:
 
 ```bash
-npm ci
-npm run check
-npm test
-npm run desktop:build -- --debug --bundles app
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm test
+pnpm run desktop:build -- --debug --bundles app
 ditto target/debug/bundle/macos/Codesk.app /Applications/Codesk.app
 open -a /Applications/Codesk.app
 ```
@@ -214,12 +214,12 @@ The idle-app procedure above deliberately excludes provider processes, so it
 never measured what an *attached* Codex run costs. That gap hid a per-run
 polling tax that users noticed as battery drain while Codex sessions were open.
 
-`npm run bench:codex` measures it directly. The benchmark drives the real daemon
+`pnpm run bench:codex` measures it directly. The benchmark drives the real daemon
 with a fake `codex app-server`, so it is deterministic, offline, needs no
 credentials, and can be run on any revision:
 
 ```bash
-npm run bench:codex
+pnpm run bench:codex
 ```
 
 It reports three things for one attached Codex run, summing CPU time across the

@@ -73,7 +73,7 @@ const OWNER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// being `SIGKILL`ed, or the whole app being force-quit.
 ///
 /// Without `CODESK_OWNER_PID` the daemon is unowned and this returns
-/// immediately, which is what standalone runs rely on: `npm start`, the test
+/// immediately, which is what standalone runs rely on: `pnpm start`, the test
 /// suite, and a remote daemon under systemd.
 async fn owner_watchdog() {
     let Some(owner) = env::var("CODESK_OWNER_PID")

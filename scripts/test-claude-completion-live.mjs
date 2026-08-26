@@ -8,7 +8,7 @@
 // change would first show up.
 //
 // Requires a logged-in Claude Code and real credits, so it is not part of
-// `npm run test:backend`.
+// `pnpm run test:backend`.
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
