@@ -7,7 +7,8 @@ export const fileChangeList = 'border-t border-ink-650'
 export const fileChangeRow =
   'group flex min-h-[38px] items-center gap-2 border-t border-ink-700 px-2.5 first:border-t-0'
 export const fileChangePath = 'min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-soft'
-export const fileChangeCounts = 'flex shrink-0 min-w-0 sm:min-w-[56px] justify-end gap-1 font-mono text-[10.5px]'
+export const fileChangeCounts =
+  'flex shrink-0 min-w-0 sm:min-w-[56px] justify-end gap-1 font-mono text-[10.5px]'
 export const fileChangeRowButton =
   'grid size-[25px] shrink-0 place-items-center rounded-md text-muted opacity-100 sm:opacity-0 hover:bg-ink-650 hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100'
 export const fileChangeMore =

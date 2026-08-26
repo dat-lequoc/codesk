@@ -65,7 +65,10 @@ export function DialogContent({
 export function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
-      className={cn('flex shrink-0 flex-col gap-1 px-4 sm:px-6 pt-5 sm:pt-6 pb-3 sm:pb-4', className)}
+      className={cn(
+        'flex shrink-0 flex-col gap-1 px-4 sm:px-6 pt-5 sm:pt-6 pb-3 sm:pb-4',
+        className,
+      )}
       {...props}
     />
   )
@@ -87,13 +90,21 @@ export function DialogDescription({
   className,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Description>) {
-  return <DialogPrimitive.Description className={cn('text-xs sm:text-sm text-muted', className)} {...props} />
+  return (
+    <DialogPrimitive.Description
+      className={cn('text-xs sm:text-sm text-muted', className)}
+      {...props}
+    />
+  )
 }
 
 export function DialogBody({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
-      className={cn('scroll-thin min-h-0 flex-1 overflow-y-auto px-4 sm:px-6 pb-4 sm:pb-6', className)}
+      className={cn(
+        'scroll-thin min-h-0 flex-1 overflow-y-auto px-4 sm:px-6 pb-4 sm:pb-6',
+        className,
+      )}
       {...props}
     />
   )

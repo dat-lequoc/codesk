@@ -37,7 +37,8 @@ const starterCard =
 const starterLabel = 'text-sm leading-snug font-medium'
 const codexComposer =
   'absolute bottom-3 md:bottom-3.5 left-1/2 z-10 w-[calc(100%-24px)] md:w-[min(790px,calc(100%-80px))] -translate-x-1/2 rounded-[19px] border border-line-strong bg-surface shadow-2xl shadow-black/40'
-const composerContext = 'flex min-h-9 flex-wrap items-center gap-2 md:gap-4 rounded-t-[18px] bg-sunken px-3 md:px-4 py-1 md:py-0'
+const composerContext =
+  'flex min-h-9 flex-wrap items-center gap-2 md:gap-4 rounded-t-[18px] bg-sunken px-3 md:px-4 py-1 md:py-0'
 const contextButton = 'flex items-center gap-[7px] text-xs text-fg-soft hover:text-fg'
 const harnessOption =
   'flex h-[30px] shrink-0 items-center gap-[5px] rounded-lg border border-line-strong bg-ink-850 px-2 text-[10px] whitespace-nowrap text-fg-soft hover:border-ink-400 hover:bg-raised hover:text-fg disabled:cursor-not-allowed disabled:opacity-40 [&>svg]:size-[13px]'

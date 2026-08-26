@@ -946,10 +946,7 @@ export function SessionScreen({
                 {busy ? (
                   <RefreshCw className="animate-spin" size={15} />
                 ) : (
-                  <Send
-                    size={15}
-                    className={cn(!canResume && 'translate-y-px -translate-x-0.5')}
-                  />
+                  <Send size={15} className={cn(!canResume && 'translate-y-px -translate-x-0.5')} />
                 )}
                 {canResume ? 'Resume' : null}
               </button>

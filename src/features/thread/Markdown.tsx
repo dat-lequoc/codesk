@@ -100,5 +100,10 @@ export function ConversationMessage({
         {children}
       </div>
     )
-  return <MarkdownContent text={content.text} className={cn('mb-5 md:mb-[30px] min-w-0 max-w-full', className)} />
+  return (
+    <MarkdownContent
+      text={content.text}
+      className={cn('mb-5 md:mb-[30px] min-w-0 max-w-full', className)}
+    />
+  )
 }

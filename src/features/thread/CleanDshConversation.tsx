@@ -49,7 +49,11 @@ export function ContextInjectionCard({ message }: { message: SessionMessage }) {
         <span className="rounded-sm bg-azure-950/80 px-1.5 py-0.5 font-mono text-[9px] text-azure-400 border border-azure-600/40 shrink-0">
           snapshot
         </span>
-        {open ? <ChevronDown size={13} className="text-muted shrink-0 ml-1" /> : <ChevronRight size={13} className="shrink-0 ml-1" />}
+        {open ? (
+          <ChevronDown size={13} className="text-muted shrink-0 ml-1" />
+        ) : (
+          <ChevronRight size={13} className="shrink-0 ml-1" />
+        )}
       </button>
 
       {open && (
@@ -131,7 +135,11 @@ export function TodoCard({ todos, defaultOpen }: { todos: TodoItemData[]; defaul
           {pendingCount > 0 && <span className="text-muted">{pendingCount} pending</span>}
         </span>
         <span className="flex-1" />
-        {open ? <ChevronDown size={13} className="text-muted shrink-0 ml-1" /> : <ChevronRight size={13} className="shrink-0 ml-1" />}
+        {open ? (
+          <ChevronDown size={13} className="text-muted shrink-0 ml-1" />
+        ) : (
+          <ChevronRight size={13} className="shrink-0 ml-1" />
+        )}
       </button>
 
       {open && (
@@ -156,7 +164,9 @@ export function TodoCard({ todos, defaultOpen }: { todos: TodoItemData[]; defaul
               {todo.status === 'pending' && (
                 <span className="mt-0.5 inline-block size-3 rounded-full border border-dashed border-ink-400 shrink-0" />
               )}
-              <span className="leading-tight [overflow-wrap:anywhere] break-words">{todo.content}</span>
+              <span className="leading-tight [overflow-wrap:anywhere] break-words">
+                {todo.content}
+              </span>
             </div>
           ))}
         </div>
@@ -267,7 +277,9 @@ export function CleanToolCard({
             <AlertCircle size={11} />
           </span>
         )}
-        {status === 'in_progress' && <Loader2 size={11} className="animate-spin text-azure-400 shrink-0" />}
+        {status === 'in_progress' && (
+          <Loader2 size={11} className="animate-spin text-azure-400 shrink-0" />
+        )}
 
         {open ? (
           <ChevronDown size={13} className="text-muted shrink-0 ml-1" />
