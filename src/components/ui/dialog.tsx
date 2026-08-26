@@ -41,7 +41,7 @@ export function DialogContent({
       <DialogOverlay />
       <DialogPrimitive.Content
         className={cn(
-          'fixed top-1/2 left-1/2 z-50 flex max-h-[88vh] w-full max-w-xl -translate-x-1/2 -translate-y-1/2 flex-col',
+          'fixed top-1/2 left-1/2 z-50 flex max-h-[88dvh] w-[calc(100%-24px)] md:w-full max-w-xl -translate-x-1/2 -translate-y-1/2 flex-col',
           'rounded-xl border border-line bg-surface shadow-2xl shadow-black/50',
           'focus:outline-none',
           className,
@@ -52,7 +52,7 @@ export function DialogContent({
         {showClose && (
           <DialogPrimitive.Close
             aria-label="Close"
-            className="absolute top-5 right-5 grid size-7 place-items-center rounded-md text-dim transition-colors hover:bg-raised hover:text-fg"
+            className="absolute top-4 right-4 sm:top-5 sm:right-5 grid size-7 place-items-center rounded-md text-dim transition-colors hover:bg-raised hover:text-fg"
           >
             <X size={18} />
           </DialogPrimitive.Close>
@@ -63,7 +63,12 @@ export function DialogContent({
 }
 
 export function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
-  return <div className={cn('flex shrink-0 flex-col gap-1 px-6 pt-6 pb-4', className)} {...props} />
+  return (
+    <div
+      className={cn('flex shrink-0 flex-col gap-1 px-4 sm:px-6 pt-5 sm:pt-6 pb-3 sm:pb-4', className)}
+      {...props}
+    />
+  )
 }
 
 export function DialogTitle({
@@ -72,7 +77,7 @@ export function DialogTitle({
 }: React.ComponentProps<typeof DialogPrimitive.Title>) {
   return (
     <DialogPrimitive.Title
-      className={cn('text-xl leading-tight font-semibold text-fg', className)}
+      className={cn('text-lg sm:text-xl leading-tight font-semibold text-fg', className)}
       {...props}
     />
   )
@@ -82,13 +87,13 @@ export function DialogDescription({
   className,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Description>) {
-  return <DialogPrimitive.Description className={cn('text-sm text-muted', className)} {...props} />
+  return <DialogPrimitive.Description className={cn('text-xs sm:text-sm text-muted', className)} {...props} />
 }
 
 export function DialogBody({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
-      className={cn('scroll-thin min-h-0 flex-1 overflow-y-auto px-6 pb-6', className)}
+      className={cn('scroll-thin min-h-0 flex-1 overflow-y-auto px-4 sm:px-6 pb-4 sm:pb-6', className)}
       {...props}
     />
   )
@@ -98,7 +103,7 @@ export function DialogFooter({ className, ...props }: React.ComponentProps<'div'
   return (
     <div
       className={cn(
-        'flex items-center justify-end gap-2 border-t border-line px-6 py-4',
+        'flex flex-wrap items-center justify-end gap-2 border-t border-line px-4 sm:px-6 py-3 sm:py-4',
         className,
       )}
       {...props}

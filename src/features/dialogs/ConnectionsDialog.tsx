@@ -61,7 +61,7 @@ export function ConnectionsDialog({
       subtitle="Appearance, local and SSH execution hosts"
       onClose={onClose}
     >
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-line-strong px-3.5 py-3">
+      <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 rounded-xl border border-line-strong px-3.5 py-3">
         <span>
           <strong className="block text-sm">Appearance</strong>
           <small className="mt-0.5 block text-muted">Auto follows the system setting</small>
@@ -89,7 +89,7 @@ export function ConnectionsDialog({
           ))}
         </div>
       </div>
-      <div className="scroll-thin mt-2.5 max-h-[380px] overflow-auto">
+      <div className="scroll-thin mt-2.5 max-h-[50dvh] overflow-auto">
         {hosts.map((host) => (
           <div className="my-2.5 rounded-xl border border-line-strong" key={host.id}>
             <div className="flex h-[68px] items-center gap-[11px] px-3.5">
@@ -173,7 +173,7 @@ export function ConnectionsDialog({
       </div>
       {error && <p className="mt-3 text-xs leading-relaxed text-scarlet-400">{error}</p>}
       <form
-        className="grid grid-cols-[1fr_1fr_auto] gap-2 pt-3"
+        className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2 pt-3"
         onSubmit={async (event) => {
           event.preventDefault()
           setError('')

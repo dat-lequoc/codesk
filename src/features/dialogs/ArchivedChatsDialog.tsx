@@ -53,7 +53,7 @@ export function ArchivedChatsDialog({
       onClose={onClose}
       className="max-w-[680px]"
     >
-      <div className="max-h-[480px]">
+      <div className="max-h-[60dvh] overflow-y-auto scroll-thin pr-1">
         {sessions.length + archivedRuns.length ? (
           <>
             {sessions.map((session) => {

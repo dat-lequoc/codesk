@@ -443,7 +443,7 @@ export function App() {
     }
   }
   return (
-    <div className="relative flex h-screen w-full overflow-hidden bg-canvas md:grid md:grid-cols-[344px_minmax(0,1fr)]">
+    <div className="relative flex h-[100dvh] w-full overflow-hidden bg-canvas md:grid md:grid-cols-[344px_minmax(0,1fr)]">
       {/* Mobile backdrop */}
       {sidebarOpen && (
         <div

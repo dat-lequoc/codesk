@@ -18,7 +18,7 @@ import { Button } from '../../components/ui/button'
 import { StatusDot } from '../../components/ui/status-dot'
 import { cn } from '../../lib/cn'
 import { folderMatchScore } from '../../lib/app-state'
-import { pathLike } from '../../lib/format'
+import { middleTruncatePath, pathLike } from '../../lib/format'
 import type { FileEntry, Host } from '../../types'
 import { useEffect, useMemo, useRef, useState } from 'react'
 const toolbarButton =
@@ -253,13 +253,13 @@ export function ProjectDialog({
               ? `${filteredEntries.length} matching folder${filteredEntries.length === 1 ? '' : 's'}`
               : `${entries.length} folder${entries.length === 1 ? '' : 's'}`}
           </span>
-          <small className="flex items-center gap-1 text-dim">
+          <small className="hidden sm:flex items-center gap-1 text-dim">
             <kbd className={kbd}>↑</kbd>
             <kbd className={kbd}>↓</kbd> choose <kbd className={kbd}>Enter</kbd> open{' '}
             <kbd className={kbd}>Tab</kbd> complete <kbd className={kbd}>Esc</kbd> clear
           </small>
         </div>
-        <div className="scroll-thin h-[290px] overflow-auto rounded-xl border border-line-strong bg-ink-850 p-[5px]">
+        <div className="scroll-thin h-[240px] sm:h-[290px] max-h-[45dvh] overflow-auto rounded-xl border border-line-strong bg-ink-850 p-[5px]">
           {busy === 'browse' && !entries.length ? (
             <div className={folderState}>
               <RefreshCw className="animate-spin" size={16} />
@@ -298,8 +298,11 @@ export function ProjectDialog({
                   </span>
                   <span className="min-w-0 flex-1">
                     <strong className="block truncate text-xs font-medium">{entry.name}</strong>
-                    <small className="mt-[3px] block truncate font-mono text-[9px] text-dim">
-                      {entry.path}
+                    <small
+                      className="mt-[3px] block truncate font-mono text-[9px] text-dim"
+                      title={entry.path}
+                    >
+                      {middleTruncatePath(entry.path, 38)}
                     </small>
                   </span>
                   {entry.is_git && (
