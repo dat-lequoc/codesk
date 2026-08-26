@@ -18,9 +18,9 @@ Run the Web UI mode directly from your server, VPS, or local machine:
 ```bash
 git clone https://github.com/dat-lequoc/codesk.git
 cd codesk
-npm install
-npm run build
-npm run start:web
+pnpm install
+pnpm run build
+pnpm run start:web
 ```
 
 Or run via the CLI binary:
@@ -56,8 +56,8 @@ Build and run the desktop app from source:
 ```bash
 git clone https://github.com/dat-lequoc/codesk.git
 cd codesk
-npm install
-npm run desktop:build -- --debug --bundles app
+pnpm install
+pnpm run desktop:build -- --debug --bundles app
 open target/debug/bundle/macos/Codesk.app
 ```
 
@@ -126,7 +126,7 @@ Codesk reads Kiro's command catalog directly from ACP and offers keyboard-first 
 
 `/usage` needs special handling because Kiro paints it as a full-screen terminal panel that never reaches the session transcript. On a tmux-controlled session Codesk reads that panel, reports it as a usage snapshot in the conversation (plan, credits used against the plan, and the reset date), and then dismisses the panel so the next Enter still steers the same pane. Sessions driven over ACP report the same snapshot from Kiro's billing response instead.
 
-The live regression checks cover both Kiro's ACP command protocol (`npm run test:kiro-live`) and the real tmux terminal path (`npm run test:kiro-tmux-live`). The tmux check asserts the full `/usage` contract: the session stays attached to its pane after a turn completes, the usage snapshot arrives with real credit data, and a normal steer still lands afterwards.
+The live regression checks cover both Kiro's ACP command protocol (`pnpm run test:kiro-live`) and the real tmux terminal path (`pnpm run test:kiro-tmux-live`). The tmux check asserts the full `/usage` contract: the session stays attached to its pane after a turn completes, the usage snapshot arrives with real credit data, and a normal steer still lands afterwards.
 
 ## Status
 
@@ -135,28 +135,28 @@ The desktop client is currently developed and tested on macOS. Execution hosts c
 ## Development
 
 ```bash
-npm install
+pnpm install
 cargo build -p codeskd
-npm run dev
+pnpm run dev
 ```
 
 Run the frontend test suite:
 
 ```bash
-npm test          # vitest
-npm run check     # tsc --noEmit && eslint src
+pnpm test          # vitest
+pnpm run check     # tsc --noEmit && eslint src
 ```
 
 Run the daemon and gateway integration suites:
 
 ```bash
-npm run test:backend
+pnpm run test:backend
 ```
 
 To rebuild, safely replace, and relaunch the locally installed app:
 
 ```bash
-npm run desktop:redeploy
+pnpm run desktop:redeploy
 ```
 
 ## Remote daemon

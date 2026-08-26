@@ -21,7 +21,7 @@ Environment="CODESK_WEB_MODE=1"
 Environment="PORT=4000"
 # Origins the browser may use, when the tailnet name is not enough:
 # Environment="CODESK_WEB_ORIGINS=codesk.tail1234.ts.net"
-ExecStart=/usr/bin/env npm run start:web
+ExecStart=/usr/bin/env pnpm run start:web
 Restart=on-failure
 RestartSec=5
 

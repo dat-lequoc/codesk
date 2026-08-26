@@ -120,7 +120,7 @@ The live release test must use a disposable real project and verify:
 9. Resume the same Kiro session by its provider session ID.
 10. Repeat the critical path on a remote project.
 
-Capture verification screenshots for the new-chat view, a tool call with output, the Steer/Queue state, `/usage`, and a resumed historical session. Run the full Codesk test suite, the tmux control runbook, the performance regression runbook, and `npm run desktop:redeploy` before marking the milestone complete.
+Capture verification screenshots for the new-chat view, a tool call with output, the Steer/Queue state, `/usage`, and a resumed historical session. Run the full Codesk test suite, the tmux control runbook, the performance regression runbook, and `pnpm run desktop:redeploy` before marking the milestone complete.
 
 ## Definition of done
 

@@ -16,8 +16,8 @@ When touching this area:
   orphan the next time someone quits the app.
 - Suppress respawn logic during shutdown. The local-daemon supervisor restarts
   `codeskd` 1.5s after it exits, which will happily undo a teardown.
-- Leave unowned mode alone: with no `CODESK_OWNER_PID`, no watchdog runs. `npm
-  run dev`, `npm start`, the test suite, and remote systemd daemons depend on it.
+- Leave unowned mode alone: with no `CODESK_OWNER_PID`, no watchdog runs. `pnpm
+  run dev`, `pnpm start`, the test suite, and remote systemd daemons depend on it.
 - Remote daemons keep their independence. This rule is local-only.
 
 Durability does not come from a long-lived daemon. Runs are detached process
@@ -45,7 +45,7 @@ After any change to this project that affects the desktop app, the gateway, or
 `codeskd`, run the redeploy without asking:
 
 ```bash
-npm run desktop:redeploy
+pnpm run desktop:redeploy
 ```
 
 The installed `/Applications/Codesk.app` runs a built binary, so source changes

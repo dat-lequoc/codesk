@@ -7,19 +7,19 @@ Thanks for helping improve Codesk. Small, focused pull requests are easiest to r
 Install Node.js 22 or newer, a stable Rust toolchain, and the agent CLIs you want to exercise. Then run:
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
-The desktop shell is available with `npm run desktop`. Remote execution uses the `codeskd` daemon; see the [README](./README.md) and [architecture](./ARCHITECTURE.md) for the local/remote boundary.
+The desktop shell is available with `pnpm run desktop`. Remote execution uses the `codeskd` daemon; see the [README](./README.md) and [architecture](./ARCHITECTURE.md) for the local/remote boundary.
 
 ## Before opening a pull request
 
 Run the checks relevant to your change:
 
 ```bash
-npm run check
-npm run build
+pnpm run check
+pnpm run build
 cargo fmt --all -- --check
 cargo test -p codeskd
 ```

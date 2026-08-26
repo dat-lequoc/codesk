@@ -21,9 +21,9 @@ Run:
 
 ```sh
 cargo test -p codeskd
-npm run check
-npm run build
-npm test
+pnpm run check
+pnpm run build
+pnpm test
 ```
 
 The Rust suite covers:

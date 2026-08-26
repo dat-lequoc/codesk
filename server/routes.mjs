@@ -95,7 +95,7 @@ export function registerRoutes(app, { store, gateway, broadcast, stateCache, map
     if (!Number.isInteger(pid) || pid <= 0) return res.status(400).json({ error: 'A positive integer pid is required' })
     if (!ownerAlive(pid)) return res.status(400).json({ error: `Process ${pid} is not running` })
     // Refuse to be adopted by an app instance that did not start us. A gateway
-    // launched by hand (`npm start`, `npm run dev`) belongs to the developer's
+    // launched by hand (`pnpm start`, `pnpm run dev`) belongs to the developer's
     // terminal, and quitting a desktop app must not take it down.
     if (owners.size === 0) return res.status(409).json({ error: 'This gateway is unowned and will not adopt an owner' })
     owners.add(pid)
@@ -112,7 +112,7 @@ export function registerRoutes(app, { store, gateway, broadcast, stateCache, map
       return res.status(400).json({ error: 'An owner pid is required to shut this gateway down' })
     // A pid identifies the caller as one of our owners. If it is not one, the
     // request came from an app instance that never owned this gateway — a
-    // desktop app quitting next to a hand-started `npm run dev` — and taking the
+    // desktop app quitting next to a hand-started `pnpm run dev` — and taking the
     // developer's server down with it would be wrong.
     if (!owners.has(pid)) return res.json({ ok: true, stopped: false, owners: [...owners] })
     // Releasing one owner is not a shutdown: a second app instance may still be

@@ -112,7 +112,7 @@ wss.on('connection', (socket) => socket.send(JSON.stringify({ type: 'ready', pay
 // there is nobody to serve, so it stops instead of lingering as a background
 // service that keeps a polling daemon alive. See ARCHITECTURE.md §6.5.
 //
-// An empty owner set means "unowned", not "abandoned": `npm start`, `npm run
+// An empty owner set means "unowned", not "abandoned": `pnpm start`, `npm run
 // dev`, and the test suite launch the gateway with no CODESK_OWNER_PID and must
 // keep running until signalled.
 const owners = new Set()
@@ -172,7 +172,7 @@ if (webMode) {
       return res
         .status(503)
         .type('text/plain')
-        .send('Codesk Web UI is not built yet. Run "npm run build" first.')
+        .send('Codesk Web UI is not built yet. Run "pnpm run build" first.')
     }
     res.sendFile(path.join(dist, 'index.html'))
   })

@@ -4,9 +4,9 @@
   "version": "0.2.2",
   "identifier": "app.codesk.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "pnpm run dev",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "npm run build && npm run build:gateway && npm run build:daemon",
+    "beforeBuildCommand": "pnpm run build && pnpm run build:gateway && pnpm run build:daemon",
     "frontendDist": "../dist"
   },
   "app": {
