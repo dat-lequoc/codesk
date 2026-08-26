@@ -111,7 +111,14 @@ curl -s http://127.0.0.1:4243/v1/health
 `/v1/health` needs no token. You should get something like:
 
 ```json
-{"ok":true,"version":"0.2.2","build":"98f72c6be9de154c","host_name":"...","uptime_seconds":12,"active_runs":0}
+{
+  "ok": true,
+  "version": "0.2.2",
+  "build": "98f72c6be9de154c",
+  "host_name": "...",
+  "uptime_seconds": 12,
+  "active_runs": 0
+}
 ```
 
 Now compare `build` against the binary the app is running:
