@@ -35,26 +35,25 @@ export function ContextInjectionCard({ message }: { message: SessionMessage }) {
   }
 
   return (
-    <div className="my-2 overflow-hidden rounded-lg border border-azure-950 bg-ink-850/80 shadow-xs transition-all">
+    <div className="my-2 max-w-full min-w-0 overflow-hidden rounded-lg border border-azure-950 bg-ink-850/80 shadow-xs transition-all">
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="flex min-h-[32px] w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted hover:bg-ink-800/80 hover:text-fg transition-colors"
+        className="flex min-h-[32px] w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-xs text-muted hover:bg-ink-800/80 hover:text-fg transition-colors"
         aria-expanded={open}
       >
         <Compass size={13} className="shrink-0 text-azure-400" />
-        <span className="font-medium text-azure-400 text-[11px]">Context injection</span>
-        <span className="text-[10px] text-muted">·</span>
-        <span className="truncate text-[11px] text-fg-soft/80">{category}</span>
-        <span className="flex-1" />
-        <span className="rounded-sm bg-azure-950/80 px-1.5 py-0.5 font-mono text-[9px] text-azure-400 border border-azure-600/40">
+        <span className="font-medium text-azure-400 text-[11px] shrink-0">Context injection</span>
+        <span className="text-[10px] text-muted shrink-0">·</span>
+        <span className="truncate min-w-0 flex-1 text-[11px] text-fg-soft/80">{category}</span>
+        <span className="rounded-sm bg-azure-950/80 px-1.5 py-0.5 font-mono text-[9px] text-azure-400 border border-azure-600/40 shrink-0">
           snapshot
         </span>
-        {open ? <ChevronDown size={13} className="text-muted" /> : <ChevronRight size={13} />}
+        {open ? <ChevronDown size={13} className="text-muted shrink-0 ml-1" /> : <ChevronRight size={13} className="shrink-0 ml-1" />}
       </button>
 
       {open && (
-        <div className="border-t border-ink-700/60 bg-ink-900/90 p-3 font-mono text-[11px]/[1.6] text-fg-soft whitespace-pre-wrap select-text max-h-[360px] overflow-y-auto scroll-thin">
+        <div className="border-t border-ink-700/60 bg-ink-900/90 p-3 font-mono text-[11px]/[1.6] text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere] break-words select-text max-h-[360px] overflow-y-auto scroll-thin">
           {text}
         </div>
       )}
@@ -73,13 +72,13 @@ export function ProducedFilesCard({
   if (!files.length) return null
 
   return (
-    <div className="my-3 flex flex-wrap items-center gap-1.5 rounded-lg border border-grass-600/40 bg-grass-950/40 px-3 py-2 text-xs">
-      <span className="flex items-center gap-1.5 text-[11px] font-semibold text-grass-400">
+    <div className="my-3 flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-grass-600/40 bg-grass-950/40 px-3 py-2 text-xs">
+      <span className="flex items-center gap-1.5 text-[11px] font-semibold text-grass-400 shrink-0">
         <Sparkles size={13} />
         Produced
       </span>
-      <span className="text-muted text-[10px]">·</span>
-      <div className="flex flex-wrap gap-1.5">
+      <span className="text-muted text-[10px] shrink-0">·</span>
+      <div className="flex max-w-full min-w-0 flex-wrap gap-1.5">
         {files.map((path) => {
           const basename = path.split('/').pop() || path
           return (
@@ -87,11 +86,11 @@ export function ProducedFilesCard({
               key={path}
               type="button"
               onClick={() => onOpenFile?.(path)}
-              className="flex items-center gap-1 rounded-md border border-grass-600/50 bg-grass-950 px-2 py-0.5 font-mono text-[10.5px] text-grass-400 hover:bg-grass-600/30 hover:text-fg transition-colors"
+              className="flex max-w-full items-center gap-1 rounded-md border border-grass-600/50 bg-grass-950 px-2 py-0.5 font-mono text-[10.5px] text-grass-400 hover:bg-grass-600/30 hover:text-fg transition-colors truncate"
               title={`Open ${path}`}
             >
-              <FileText size={11} className="opacity-70" />
-              <span>{basename}</span>
+              <FileText size={11} className="opacity-70 shrink-0" />
+              <span className="truncate">{basename}</span>
             </button>
           )
         })}
@@ -112,17 +111,17 @@ export function TodoCard({ todos, defaultOpen }: { todos: TodoItemData[]; defaul
   const pendingCount = todos.length - completedCount - inProgressCount
 
   return (
-    <div className="my-3 overflow-hidden rounded-xl border border-ink-650 bg-ink-850/90 shadow-sm">
+    <div className="my-3 max-w-full min-w-0 overflow-hidden rounded-xl border border-ink-650 bg-ink-850/90 shadow-sm">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex min-h-[36px] w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-ink-800 transition-colors"
+        className="flex min-h-[36px] w-full min-w-0 items-center gap-2 px-3 py-2 text-left hover:bg-ink-800 transition-colors"
         aria-expanded={open}
       >
         <ListTodo size={14} className="text-azure-400 shrink-0" />
-        <strong className="text-xs font-semibold text-fg">To-dos</strong>
-        <span className="text-[10px] text-muted">·</span>
-        <span className="text-[11px] text-fg-soft">
+        <strong className="text-xs font-semibold text-fg shrink-0">To-dos</strong>
+        <span className="text-[10px] text-muted shrink-0">·</span>
+        <span className="truncate min-w-0 text-[11px] text-fg-soft">
           {completedCount > 0 && <span className="text-grass-400">{completedCount} done</span>}
           {completedCount > 0 && (inProgressCount > 0 || pendingCount > 0) && ' · '}
           {inProgressCount > 0 && (
@@ -132,7 +131,7 @@ export function TodoCard({ todos, defaultOpen }: { todos: TodoItemData[]; defaul
           {pendingCount > 0 && <span className="text-muted">{pendingCount} pending</span>}
         </span>
         <span className="flex-1" />
-        {open ? <ChevronDown size={13} className="text-muted" /> : <ChevronRight size={13} />}
+        {open ? <ChevronDown size={13} className="text-muted shrink-0 ml-1" /> : <ChevronRight size={13} className="shrink-0 ml-1" />}
       </button>
 
       {open && (
@@ -157,7 +156,7 @@ export function TodoCard({ todos, defaultOpen }: { todos: TodoItemData[]; defaul
               {todo.status === 'pending' && (
                 <span className="mt-0.5 inline-block size-3 rounded-full border border-dashed border-ink-400 shrink-0" />
               )}
-              <span className="leading-tight">{todo.content}</span>
+              <span className="leading-tight [overflow-wrap:anywhere] break-words">{todo.content}</span>
             </div>
           ))}
         </div>
@@ -173,15 +172,14 @@ export function GoalCard({
   goal: { objective?: string; action?: string; status?: string }
 }) {
   return (
-    <div className="my-2.5 flex items-center gap-2.5 rounded-lg border border-amber-signal-600/50 bg-amber-signal-950/60 px-3 py-2 text-xs">
+    <div className="my-2.5 flex max-w-full min-w-0 items-center gap-2 rounded-lg border border-amber-signal-600/50 bg-amber-signal-950/60 px-3 py-2 text-xs">
       <Target size={14} className="text-amber-signal-400 shrink-0" />
-      <span className="font-semibold text-amber-signal-400 text-[11.5px]">Goal</span>
-      <span className="text-[10px] text-muted">·</span>
-      <span className="truncate font-medium text-fg-soft text-[11.5px]">
+      <span className="font-semibold text-amber-signal-400 text-[11.5px] shrink-0">Goal</span>
+      <span className="text-[10px] text-muted shrink-0">·</span>
+      <span className="truncate min-w-0 flex-1 font-medium text-fg-soft text-[11.5px]">
         {goal.objective || 'Active objective'}
       </span>
-      <span className="flex-1" />
-      <span className="rounded bg-amber-signal-950 px-1.5 py-0.5 font-mono text-[9px] text-amber-signal-400 uppercase">
+      <span className="rounded bg-amber-signal-950 px-1.5 py-0.5 font-mono text-[9px] text-amber-signal-400 uppercase shrink-0">
         {goal.action || 'active'}
       </span>
     </div>
@@ -229,11 +227,11 @@ export function CleanToolCard({
   }
 
   return (
-    <div className="my-1.5 overflow-hidden rounded-lg border border-ink-650 bg-ink-850 shadow-xs">
+    <div className="my-1.5 max-w-full min-w-0 overflow-hidden rounded-lg border border-ink-650 bg-ink-850 shadow-xs">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex min-h-[33px] w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-muted hover:bg-ink-800 hover:text-fg transition-colors"
+        className="flex min-h-[33px] w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left text-xs text-muted hover:bg-ink-800 hover:text-fg transition-colors"
         aria-expanded={open}
       >
         <span className="grid size-5 place-items-center rounded shrink-0">
@@ -247,7 +245,7 @@ export function CleanToolCard({
           )}
         </span>
 
-        <span className="font-mono text-[11px] font-medium text-fg-soft">{tool}</span>
+        <span className="font-mono text-[11px] font-medium text-fg-soft shrink-0">{tool}</span>
 
         {displayLabel && (
           <code
@@ -260,28 +258,28 @@ export function CleanToolCard({
         {!displayLabel && <span className="flex-1" />}
 
         {status === 'completed' && (
-          <span className="inline-flex items-center gap-1 text-[10px] text-grass-400">
+          <span className="inline-flex items-center gap-1 text-[10px] text-grass-400 shrink-0">
             <Check size={11} />
           </span>
         )}
         {status === 'failed' && (
-          <span className="inline-flex items-center gap-1 text-[10px] text-scarlet-400">
+          <span className="inline-flex items-center gap-1 text-[10px] text-scarlet-400 shrink-0">
             <AlertCircle size={11} />
           </span>
         )}
-        {status === 'in_progress' && <Loader2 size={11} className="animate-spin text-azure-400" />}
+        {status === 'in_progress' && <Loader2 size={11} className="animate-spin text-azure-400 shrink-0" />}
 
         {open ? (
-          <ChevronDown size={13} className="text-muted ml-1" />
+          <ChevronDown size={13} className="text-muted shrink-0 ml-1" />
         ) : (
-          <ChevronRight size={13} className="ml-1" />
+          <ChevronRight size={13} className="shrink-0 ml-1" />
         )}
       </button>
 
       {open && (
         <div className="border-t border-ink-700 bg-ink-900 p-2.5 font-mono text-[10.5px]/[1.5] text-fg-soft">
           {command && (
-            <div className="mb-2">
+            <div className="mb-2 max-w-full min-w-0">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[9.5px] font-semibold text-muted uppercase tracking-wider block">
                   Command / Input
@@ -297,13 +295,13 @@ export function CleanToolCard({
                   </button>
                 )}
               </div>
-              <pre className="m-0 rounded bg-ink-950 p-2 text-fg-soft whitespace-pre-wrap overflow-x-auto">
+              <pre className="m-0 max-w-full rounded bg-ink-950 p-2 text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere] break-words overflow-x-auto">
                 {command}
               </pre>
             </div>
           )}
           {output && (
-            <div>
+            <div className="max-w-full min-w-0">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[9.5px] font-semibold text-muted uppercase tracking-wider">
                   Output
@@ -317,7 +315,7 @@ export function CleanToolCard({
                   <span>{copied ? 'Copied' : 'Copy'}</span>
                 </button>
               </div>
-              <pre className="scroll-thin m-0 max-h-[280px] overflow-auto rounded bg-ink-950 p-2 text-fg-soft whitespace-pre-wrap">
+              <pre className="scroll-thin m-0 max-h-[280px] max-w-full overflow-auto rounded bg-ink-950 p-2 text-fg-soft whitespace-pre-wrap [overflow-wrap:anywhere] break-words">
                 {output}
               </pre>
             </div>

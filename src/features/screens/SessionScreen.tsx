@@ -768,7 +768,7 @@ export function SessionScreen({
                 </small>
               </span>
             </div>
-            <div className="min-w-0 max-w-[42%] flex-1">
+            <div className="min-w-0 w-full sm:w-auto sm:max-w-[42%] flex-1">
               <TmuxDetails name={session.tmuxName} command={session.tmuxAccessCommand} />
             </div>
             <button
@@ -807,7 +807,7 @@ export function SessionScreen({
           <button
             type="button"
             onClick={() => scrollToBottom(true)}
-            className="absolute bottom-[76px] right-8 z-20 flex items-center gap-1.5 rounded-full border border-line-strong bg-ink-750/95 px-3 py-1.5 text-xs font-medium text-fg-soft shadow-lg backdrop-blur-xs hover:bg-ink-700 hover:text-fg hover:border-azure-500/50 transition-all cursor-pointer"
+            className="absolute bottom-[76px] right-4 md:right-8 z-20 flex items-center gap-1.5 rounded-full border border-line-strong bg-ink-750/95 px-3 py-1.5 text-xs font-medium text-fg-soft shadow-lg backdrop-blur-xs hover:bg-ink-700 hover:text-fg hover:border-azure-500/50 transition-all cursor-pointer"
             aria-label="Scroll to bottom"
             title="Scroll to bottom"
           >
@@ -913,7 +913,7 @@ export function SessionScreen({
               />
               {canQueue && (
                 <>
-                  <span className={deliveryMode}>
+                  <span className={cn(deliveryMode, 'hidden sm:flex')}>
                     <Send size={13} />
                     Enter · Steer
                   </span>

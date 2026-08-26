@@ -354,7 +354,7 @@ export function StartScreen({
               </button>
               {workspaceMenu && (
                 <div
-                  className="absolute -left-2 bottom-9 z-20 w-[310px] rounded-xl border border-line-strong bg-ink-700 p-2 shadow-2xl shadow-black/60"
+                  className="absolute -left-2 bottom-9 z-20 w-[310px] max-w-[calc(100vw-32px)] rounded-xl border border-line-strong bg-ink-700 p-2 shadow-2xl shadow-black/60"
                   role="listbox"
                   aria-label="Work in"
                 >

@@ -72,6 +72,6 @@ export const environmentActionButton =
 export const environmentActionDanger = 'text-ember-400'
 
 export const tmuxNotice =
-  'mx-[18px] mb-2 flex items-center gap-2.5 rounded-lg border border-grass-600/40 bg-grass-950 px-2.5 py-2.5 text-fg-soft'
+  'mx-[12px] md:mx-[18px] mb-2 flex flex-wrap md:flex-nowrap items-center gap-2.5 rounded-lg border border-grass-600/40 bg-grass-950 px-2.5 py-2.5 text-fg-soft'
 export const tmuxNoticeButton =
   'flex h-[29px] shrink-0 items-center gap-1.5 rounded-[7px] border border-grass-600/70 bg-grass-600/25 px-2.5 text-[10px] text-grass-400 disabled:cursor-default disabled:opacity-55'

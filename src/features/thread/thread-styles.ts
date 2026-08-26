@@ -1,12 +1,12 @@
 /** Shared thread-surface styles. */
 export const reasoningSummary =
   'my-1 grid grid-cols-[20px_1fr] rounded-md bg-ink-850 px-2.5 py-2.5 text-[11px] text-fg-soft [&_p]:mb-0'
-export const commandRow = 'my-1 overflow-hidden rounded-md bg-ink-850'
-export const commandHeader = 'flex min-h-[34px] items-center gap-2 px-2.5'
+export const commandRow = 'my-1 overflow-hidden rounded-md bg-ink-850 max-w-full min-w-0'
+export const commandHeader = 'flex min-h-[34px] items-center gap-2 px-2.5 max-w-full min-w-0'
 export const commandCode = 'min-w-0 flex-1 truncate font-mono text-[10px] text-fg-soft'
 export const commandPre =
-  'scroll-thin m-0 max-h-[260px] overflow-auto border-t border-ink-650 p-2.5 font-mono text-[10px]/[1.5] whitespace-pre-wrap text-fg-soft'
-export const toolOutput = 'my-1 rounded-md bg-ink-850 px-2.5 py-2'
+  'scroll-thin m-0 max-h-[260px] max-w-full overflow-auto border-t border-ink-650 p-2.5 font-mono text-[10px]/[1.5] whitespace-pre-wrap [overflow-wrap:anywhere] break-words text-fg-soft'
+export const toolOutput = 'my-1 rounded-md bg-ink-850 px-2.5 py-2 max-w-full min-w-0'
 export const toolOutputFailed = 'border border-scarlet-950'
 export const toolOutputCode = 'font-mono text-[9px] text-muted'
 
@@ -35,6 +35,6 @@ export const turnBoundary =
 export const turnRule = 'h-px bg-ink-700'
 export const threadStatus = 'my-3 flex items-center gap-2 text-xs text-muted capitalize'
 export const threadStatusCode = 'rounded-sm bg-ink-750 px-1.5 py-0.5 font-mono'
-export const rewindable = 'mr-10 flex items-start gap-2'
+export const rewindable = 'mr-0 sm:mr-10 flex items-start gap-2 max-w-full min-w-0'
 export const rewindButton =
   'flex h-6 shrink-0 items-center gap-1 rounded-md bg-ink-650 px-[7px] text-[10px] whitespace-nowrap text-fg-soft opacity-85 hover:bg-ink-500 hover:text-fg hover:opacity-100'

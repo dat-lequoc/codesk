@@ -44,7 +44,7 @@ export function VirtualTimeline<T>({
       <div className={threadColumn}>
         {before}
         {items.map((item) => (
-          <div className="min-w-0" key={itemKey(item)}>
+          <div className="min-w-0 max-w-full" key={itemKey(item)}>
             {renderItem(item)}
           </div>
         ))}
@@ -58,7 +58,7 @@ export function VirtualTimeline<T>({
           const item = items[row.index]
           return (
             <div
-              className="absolute top-0 left-0 w-full [will-change:transform]"
+              className="absolute top-0 left-0 w-full min-w-0 max-w-full [will-change:transform]"
               data-index={row.index}
               key={row.key}
               ref={virtualizer.measureElement}

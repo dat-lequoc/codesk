@@ -732,7 +732,7 @@ export function RunScreen({
               </button>
             )}
             {tmuxRun && (
-              <span className={deliveryMode}>
+              <span className={cn(deliveryMode, 'hidden sm:flex')}>
                 <Send size={13} />
                 Enter · Steer
               </span>

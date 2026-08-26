@@ -163,10 +163,8 @@
     margin: 0;
     overflow: hidden;
     font-synthesis: none;
-    /* The shell is a fixed 344px rail plus a reading column; below this the
-       starter cards and composer clip. Carried over from the stylesheet this
-       replaced — the app has never had a narrow layout. */
-    min-width: 980px;
+    min-width: 0;
+    width: 100%;
   }
 
   /* Preflight resets these to `inherit` only for font; colour still needs help. */

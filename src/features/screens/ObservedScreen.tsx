@@ -294,7 +294,7 @@ export function ObservedScreen({
             ) : (
               <pre
                 ref={logRef}
-                className="max-h-[320px] overflow-auto px-3 py-2 text-left font-mono text-[10.5px] leading-[1.5] whitespace-pre-wrap text-fg-soft"
+                className="max-h-[320px] max-w-full overflow-auto px-3 py-2 text-left font-mono text-[10.5px] leading-[1.5] whitespace-pre-wrap [overflow-wrap:anywhere] break-words text-fg-soft"
               >
                 {log ? log.text || '(the pane is empty)' : 'Capturing…'}
               </pre>
@@ -353,7 +353,7 @@ export function ObservedScreen({
               onAttach={(files) => setAttachments((prev) => [...prev, ...files])}
               disabled={busy || host?.status !== 'online'}
             />
-            <span className={deliveryMode}>
+            <span className={cn(deliveryMode, 'hidden sm:flex')}>
               <Send size={13} />
               Enter · Steer
             </span>

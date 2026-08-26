@@ -92,7 +92,7 @@ export function ConversationMessage({
     return (
       <div
         className={cn(
-          'mb-10 ml-auto w-max max-w-[75%] rounded-2xl bg-ink-750 px-[15px] py-2.5 [&_p]:mb-0',
+          'mb-6 md:mb-10 ml-auto w-max max-w-[88%] sm:max-w-[80%] md:max-w-[75%] rounded-2xl bg-ink-750 px-3.5 md:px-[15px] py-2 md:py-2.5 [overflow-wrap:anywhere] break-words [&_p]:mb-0',
           className,
         )}
       >
@@ -100,5 +100,5 @@ export function ConversationMessage({
         {children}
       </div>
     )
-  return <MarkdownContent text={content.text} className={cn('mb-[30px]', className)} />
+  return <MarkdownContent text={content.text} className={cn('mb-5 md:mb-[30px] min-w-0 max-w-full', className)} />
 }
